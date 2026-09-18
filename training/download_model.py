@@ -89,7 +89,7 @@ def download_model(model_name: str, cache_dir: Path, force: bool = False) -> dic
 
     if not force and is_model_present(cache_dir):
         logger.info(
-            "Model already present at %s — skipping download. Use --force to re-download.",
+            "Model already present at %s - skipping download. Use --force to re-download.",
             cache_dir,
         )
         return _read_existing_metadata(cache_dir)

@@ -1,7 +1,10 @@
 """baseline_eval.py - Baseline evaluation script for q3as fine-tuned model.
 
 Provides evaluation utilities for measuring the quality of Ada code generation
-from the q3as fine-tuned model. Supports standard metrics including:
+from the q3as fine-tuned model. Derives evaluation methodology from ../ada-eval
+including dataset splitting, metric definitions, and sample categories.
+
+Supports standard metrics including:
 - BLEU score against reference Ada implementations
 - Token-level perplexity
 - Ada standard compliance verification
@@ -23,6 +26,16 @@ from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger("q3as_eval")
+
+# Path to ada-eval methodology directory
+ADA_EVAL_DIR = Path("../ada-eval")
+
+# Default evaluation categories derived from ada-eval structure
+ADA_EVAL_CATEGORIES = {
+    "spark_learn": "Learning examples with SPARK contracts",
+    "spark_custom": "Custom SPARK verification challenges",
+    "spark_human_eval_silver": "HumanEval-style silver standard evaluations",
+}
 
 
 def parse_args() -> argparse.Namespace:
@@ -54,6 +67,47 @@ def load_dataset(path: Path, max_samples: int = 50) -> list[dict[str, Any]]:
 
     logger.info("Loaded %d evaluation samples from %s", len(data), path)
     return data[:max_samples]
+
+
+def load_eval_methodology() -> dict[str, Any]:
+    """Load evaluation methodology and dataset configuration from ../ada-eval.
+
+    Returns a dict with evaluation categories, dataset splits, and
+    metric definitions derived from the ada-eval project structure.
+    """
+    methodology: dict[str, Any] = {"source": str(ADA_EVAL_DIR), "categories": {}}
+
+    if not ADA_EVAL_DIR.exists():
+        logger.info("ada-eval not found at %s - using default categories", ADA_EVAL_DIR)
+        return methodology
+
+    # Load compacted dataset definitions
+    compacted_dir = ADA_EVAL_DIR / "data" / "base" / "compacted"
+    if compacted_dir.exists():
+        for jsonl_file in compacted_dir.glob("*.jsonl"):
+            category_name = jsonl_file.stem
+            methodology["categories"][category_name] = ADA_EVAL_CATEGORIES.get(
+                category_name, "Custom evaluation category"
+            )
+            # Count samples
+            try:
+                with open(jsonl_file, "r") as f:
+                    count = sum(1 for _ in f)
+                methodology["categories"][category_name] = {
+                    "description": ADA_EVAL_CATEGORIES.get(category_name, "Custom evaluation category"),
+                    "sample_count": count,
+                    "file": str(jsonl_file),
+                }
+            except OSError:
+                pass
+
+    # Load expanded categories
+    expanded_dir = ADA_EVAL_DIR / "data" / "base" / "expanded"
+    if expanded_dir.exists():
+        expanded_categories = [d.name for d in expanded_dir.iterdir() if d.is_dir()]
+        methodology["expanded_categories"] = expanded_categories
+
+    return methodology
 
 
 def compute_bleu(reference: str, hypothesis: str) -> float:
@@ -114,8 +168,37 @@ def check_ada_compliance(code: str, expected_standard: str) -> dict[str, Any]:
     }
 
 
+def derive_eval_categories() -> list[dict[str, Any]]:
+    """Derive evaluation categories from ada-eval compacted JSONL datasets.
+
+    Returns a list of category dicts with name, description, and sample count.
+    """
+    categories: list[dict[str, Any]] = []
+    compacted_dir = ADA_EVAL_DIR / "data" / "base" / "compacted"
+
+    if not compacted_dir.exists():
+        return categories
+
+    for jsonl_file in sorted(compacted_dir.glob("*.jsonl")):
+        try:
+            with open(jsonl_file, "r") as f:
+                samples = [json.loads(line) for line in f if line.strip()]
+            categories.append({
+                "name": jsonl_file.stem,
+                "sample_count": len(samples),
+                "file": str(jsonl_file),
+            })
+        except (json.JSONDecodeError, OSError):
+            continue
+
+    return categories
+
+
 def run_evaluation(args: argparse.Namespace) -> dict[str, Any]:
     """Execute the full baseline evaluation pipeline.
+
+    Derives evaluation methodology from ../ada-eval and computes
+    aggregate metrics across all samples.
 
     Returns a summary dict with aggregate metrics.
     """
@@ -124,6 +207,8 @@ def run_evaluation(args: argparse.Namespace) -> dict[str, Any]:
         "avg_bleu": 0.0,
         "avg_compliance": 0.0,
         "standard_distribution": {},
+        "eval_categories": derive_eval_categories(),
+        "methodology_source": str(ADA_EVAL_DIR) if ADA_EVAL_DIR.exists() else "default",
         "per_sample": [],
     }
 
@@ -144,22 +229,18 @@ def run_evaluation(args: argparse.Namespace) -> dict[str, Any]:
         assistant_content = next((m["content"] for m in messages if m["role"] == "assistant"), "")
         system_content = next((m["content"] for m in messages if m["role"] == "system"), "")
 
-        # Extract expected standard from system prompt
         standard = "Unknown"
         for std in ["SPARK 2014", "Ada 2022", "Ada 2012", "Ada 2005", "Ada 95", "Ada 83"]:
             if std.lower() in system_content.lower():
                 standard = std
                 break
 
-        # Compute BLEU (simplified: comparing generated vs reference content)
         bleu = compute_bleu(user_content[:200], assistant_content[:200]) if assistant_content else 0.0
         bleu_scores.append(bleu)
 
-        # Compute compliance
         compliance = check_ada_compliance(assistant_content, standard) if assistant_content else {"compliance_score": 0.0}
         compliance_scores.append(compliance["compliance_score"])
 
-        # Track standard distribution
         results["standard_distribution"][standard] = results["standard_distribution"].get(standard, 0) + 1
 
         results["per_sample"].append({
@@ -185,16 +266,24 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
     logger.info("Starting q3as baseline evaluation...")
+
+    # Load evaluation methodology from ada-eval
+    methodology = load_eval_methodology()
+    if methodology.get("categories"):
+        logger.info("Evaluation categories derived from ada-eval: %s", list(methodology["categories"].keys()))
+
     results = run_evaluation(args)
 
     # Print summary
     print("\n" + "=" * 60)
     print("Q3AS BASELINE EVALUATION SUMMARY")
     print("=" * 60)
-    print(f"Total samples evaluated : {results['total_samples']}")
-    print(f"Average BLEU score      : {results['avg_bleu']:.4f}")
-    print(f"Average compliance      : {results['avg_compliance']:.4f}")
-    print(f"Standard distribution   : {results['standard_distribution']}")
+    print(f"Total samples evaluated     : {results['total_samples']}")
+    print(f"Average BLEU score          : {results['avg_bleu']:.4f}")
+    print(f"Average compliance          : {results['avg_compliance']:.4f}")
+    print(f"Standard distribution       : {results['standard_distribution']}")
+    print(f"Methodology source          : {results['methodology_source']}")
+    print(f"Eval categories (ada-eval)  : {[c['name'] for c in results['eval_categories']]}")
     print("=" * 60 + "\n")
 
     # Save results

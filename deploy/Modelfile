@@ -21,7 +21,7 @@ PARAMETER top_p 0.9
 # Model metadata
 MODEL q3as-8b-qlora-ada
 DESCRIPTION "Qwen 3 Ada SPARK - Fine-tuned model targeting Ada 83 through Ada 2022 and SPARK 2014"
-LICENSE MIT
+LICENSE Apache-2.0
 
 # Ada language specialization tags
 TAG ada

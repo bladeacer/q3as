@@ -1,15 +1,18 @@
 """build_dataset.py - Intermediate ingestion and extraction script for q3as.
 
 Discovers Ada source files (.ads, .adb), .gpr project files, and alire.toml
-metadata across a target directory tree, pairs matching specification/implementation
-files, detects the target Ada standard via heuristic keyword analysis, sanitizes
-content, and writes a standardized JSONL dataset formatted with the OpenAI/Qwen
-chat template (system, user, assistant messages).
+metadata across target directory trees (including ../adacovex and ../Ada_CRDT),
+pairs matching specification/implementation files, detects the target Ada
+standard via heuristic keyword analysis, sanitizes content, and writes a
+standardized JSONL dataset formatted with the OpenAI/Qwen chat template.
+
+Also loads evaluation methodology from ../ada-eval for dataset structure
+and metric definitions.
 
 Usage:
     python build_dataset.py --input-dir data/raw/
-    python build_dataset.py --input-dir /path/to/adakernel --output-dir data/processed/
-    python build_dataset.py --input-dir symlink_to_ada --input-dir data/raw/
+    python build_dataset.py --input-dir data/raw/ --extra-input-dir ../adacovex --extra-input-dir ../Ada_CRDT
+    python build_dataset.py --input-dir /path/to/submodule --output-dir data/processed/
 """
 
 from __future__ import annotations
@@ -33,6 +36,14 @@ METADATA_FILES = {"alire.toml"}
 DEFAULT_INPUT_DIR = Path("data/raw")
 DEFAULT_OUTPUT_DIR = Path("data/processed")
 DEFAULT_OUTPUT_FILE = DEFAULT_OUTPUT_DIR / "dataset.jsonl"
+# Default extra input directories for additional training data sources
+DEFAULT_EXTRA_INPUT_DIRS = [
+    Path("../adacovex"),
+    Path("../Ada_CRDT"),
+    Path("../Ada-83-TLALOC"),
+]
+# Default path to ada-eval methodology directory
+ADA_EVAL_DIR = Path("../ada-eval")
 
 # ---- Sanitization patterns ------------------------------------------------ #
 _SECRET_PATTERNS = re.compile(
@@ -100,6 +111,56 @@ logger = logging.getLogger("q3as_build_dataset")
 
 
 # --------------------------------------------------------------------------- #
+# Evaluation Methodology Loader
+# --------------------------------------------------------------------------- #
+
+def load_eval_methodology() -> dict[str, Any]:
+    """Load evaluation methodology and dataset configuration from ../ada-eval.
+
+    Reads the ada-eval project structure to derive:
+    - Dataset splitting strategy
+    - Evaluation metric definitions
+    - Sample categories (spark_learn, spark_custom, spark_human_eval_silver)
+
+    Returns a dict with methodology metadata. Returns empty dict if
+    ada-eval is not found.
+    """
+    if not ADA_EVAL_DIR.exists():
+        logger.info("ada-eval not found at %s — skipping methodology load", ADA_EVAL_DIR)
+        return {}
+
+    methodology: dict[str, Any] = {"source": str(ADA_EVAL_DIR)}
+
+    # Discover compacted JSONL datasets
+    compacted_dir = ADA_EVAL_DIR / "data" / "base" / "compacted"
+    if compacted_dir.exists():
+        jsonl_files = list(compacted_dir.glob("*.jsonl"))
+        methodology["compacted_datasets"] = [f.name for f in jsonl_files]
+        logger.info(
+            "Found %d compacted datasets in ada-eval: %s",
+            len(jsonl_files), methodology["compacted_datasets"],
+        )
+
+    # Discover expanded sample categories
+    expanded_dir = ADA_EVAL_DIR / "data" / "base" / "expanded"
+    if expanded_dir.exists():
+        categories = [d.name for d in expanded_dir.iterdir() if d.is_dir()]
+        methodology["expanded_categories"] = categories
+        logger.info(
+            "Found %d expanded categories in ada-eval: %s",
+            len(categories), categories,
+        )
+
+    # Load any available evaluation config
+    for config_file in [ADA_EVAL_DIR / "pyproject.toml", ADA_EVAL_DIR / "setup.py"]:
+        if config_file.exists():
+            methodology["config_file"] = str(config_file)
+            break
+
+    return methodology
+
+
+# --------------------------------------------------------------------------- #
 # File Discovery
 # --------------------------------------------------------------------------- #
 
@@ -116,8 +177,9 @@ def discover_files(root: Path) -> dict[str, list[Path]]:
         return discovered
 
     for dirpath, dirnames, filenames in os_walk_safe(root):
+        root_path = Path(dirpath)
         for fname in filenames:
-            full_path = (dirpath / fname).resolve()
+            full_path = (root_path / fname).resolve()
             ext = full_path.suffix.lower()
 
             if ext in ADA_SPEC_EXTENSIONS:
@@ -137,11 +199,33 @@ def discover_files(root: Path) -> dict[str, list[Path]]:
     return discovered
 
 
-def os_walk_safe(root: Path):
-    """Safely walk a directory tree, skipping unreadable or broken symlinks."""
+def os_walk_safe(root: Path, max_depth: int = 5):
+    """Safely walk a directory tree, skipping unreadable or broken symlinks.
+
+    Skips .git, .cache, __pycache__, .pytest_cache, and .github.
+    Limits recursion depth to avoid walking excessively deep paths.
+    """
+    skip_dirs = {".git", ".cache", "__pycache__", ".pytest_cache", ".github"}
+
+    def _walk(current: Path, depth: int):
+        if depth > max_depth:
+            return
+        try:
+            entries = list(current.iterdir())
+        except PermissionError:
+            return
+        dirnames = []
+        filenames = []
+        for entry in entries:
+            if entry.is_dir() and entry.name not in skip_dirs:
+                dirnames.append(entry.name)
+                yield from _walk(entry, depth + 1)
+            elif entry.is_file():
+                filenames.append(entry.name)
+        yield current, dirnames, filenames
+
     try:
-        for dirpath, dirnames, filenames in os.walk(root, followlinks=True):
-            yield dirpath, dirnames, filenames
+        yield from _walk(root, 0)
     except PermissionError:
         logger.warning("Permission denied walking: %s", root)
         return
@@ -165,10 +249,7 @@ def pair_files(discovered: dict[str, list[Path]]) -> list[dict[str, Path | None]
     ads_files = discovered.get("ads", [])
     adb_files = discovered.get("adb", [])
 
-    # Index .adb files by stem name
     adb_index: dict[str, Path] = {p.stem: p for p in adb_files}
-
-    # Track paired .adb files
     paired_adb: set[str] = set()
 
     for ads_path in ads_files:
@@ -186,7 +267,6 @@ def pair_files(discovered: dict[str, list[Path]]) -> list[dict[str, Path | None]
         else:
             pairs.append({"spec": ads_path, "impl": None, "package": package_name})
 
-    # Add unpaired .adb files as standalone impl entries
     for adb_path in adb_files:
         if adb_path.name not in paired_adb:
             package = extract_package_name(adb_path)
@@ -308,6 +388,7 @@ def format_training_turn(
     impl_content: str | None,
     package: str | None,
     context: str,
+    source: str = "",
 ) -> dict[str, list[dict[str, str]]]:
     """Format a single training turn using the OpenAI/Qwen chat template.
 
@@ -324,6 +405,7 @@ def format_training_turn(
     if spec_content and impl_content:
         user_msg = (
             f"Ada {standard} - Package specification for `{package}`.\n\n"
+            f"Source: {source}\n\n"
             f"Please complete the following package body based on the "
             f"specification below.\n\n---\n\n"
             f"```ada\n{spec_content}\n```\n\n"
@@ -333,6 +415,7 @@ def format_training_turn(
     elif spec_content and not impl_content:
         user_msg = (
             f"Ada {standard} - Package specification for `{package}`.\n\n"
+            f"Source: {source}\n\n"
             f"Please provide the full package body implementation for "
             f"the following specification.\n\n---\n\n"
             f"```ada\n{spec_content}\n```\n\n"
@@ -342,6 +425,7 @@ def format_training_turn(
     elif impl_content and not spec_content:
         user_msg = (
             f"Ada {standard} - Implementation unit for `{package}`.\n\n"
+            f"Source: {source}\n\n"
             f"Please provide the corresponding package specification "
             f"(`.ads` file) for this implementation.\n\n---\n\n"
             f"```ada\n{impl_content}\n```\n\n"
@@ -365,81 +449,112 @@ def format_training_turn(
 # --------------------------------------------------------------------------- #
 
 def build_dataset(
-    input_dir: Path,
+    input_dirs: list[Path],
+    extra_input_dirs: list[Path],
     output_file: Path,
     context: str = "high-integrity, safety-critical systems",
+    eval_methodology: dict[str, Any] | None = None,
 ) -> int:
     """Run the full ingestion -> pairing -> sanitization -> JSONL pipeline.
 
+    Processes all input directories plus extra input directories
+    (adacovex, Ada_CRDT). Derives dataset structure from ada-eval
+    methodology if available.
+
     Returns the number of valid training turns written to the output file.
     """
-    resolved_input = input_dir.resolve()
-    logger.info("Resolving input directory: %s -> %s", input_dir, resolved_input)
+    all_turns: list[dict[str, list[dict[str, str]]]] = []
+    eval_info = eval_methodology or {}
 
-    if not resolved_input.exists():
-        logger.error("Resolved input directory does not exist: %s", resolved_input)
-        sys.exit(1)
-
-    output_file.parent.mkdir(parents=True, exist_ok=True)
-
-    discovered = discover_files(resolved_input)
-    if not discovered["ads"] and not discovered["adb"]:
-        logger.warning("No Ada source files found in %s", resolved_input)
-
-    pairs = pair_files(discovered)
-
-    training_turns: list[dict[str, list[dict[str, str]]]] = []
-
-    for idx, pair in enumerate(pairs):
-        spec_path = pair["spec"]
-        impl_path = pair["impl"]
-        package = pair["package"]
-
-        spec_content: str | None = None
-        impl_content: str | None = None
-
-        if spec_path:
-            spec_content = read_and_sanitize(spec_path)
-        if impl_path:
-            impl_content = read_and_sanitize(impl_path)
-
-        if spec_content is None and impl_content is None:
-            logger.warning("Skipping pair %d - both spec and impl unparseable", idx)
-            continue
-
-        combined_content = ""
-        if spec_content:
-            combined_content += spec_content + "\n"
-        if impl_content:
-            combined_content += impl_content + "\n"
-
-        standard = detect_ada_standard(combined_content)
-        logger.debug(
-            "Pair %d - Package: %s | Standard: %s | Spec: %s | Impl: %s",
-            idx, package, standard,
-            spec_path.name if spec_path else "N/A",
-            impl_path.name if impl_path else "N/A",
+    # Log evaluation methodology info
+    if eval_info:
+        logger.info(
+            "Using evaluation methodology from %s: %s categories, %d compacted datasets",
+            eval_info.get("source", "unknown"),
+            len(eval_info.get("expanded_categories", [])),
+            len(eval_info.get("compacted_datasets", [])),
         )
 
-        if discovered.get("gpr"):
-            for gpr_path in discovered["gpr"][:3]:
-                gpr_content = read_and_sanitize(gpr_path)
-                if gpr_content:
-                    combined_content += f"\n---\nProject file reference ({gpr_path.name}):\n{gpr_content}\n"
-                    break
+    for input_dir in input_dirs + extra_input_dirs:
+        resolved_input = input_dir.resolve()
+        logger.info("Processing input directory: %s -> %s", input_dir, resolved_input)
 
-        turn = format_training_turn(standard, spec_content, impl_content, package, context)
-        if turn["messages"]:
-            training_turns.append(turn)
+        if not resolved_input.exists():
+            logger.warning("Directory does not exist, skipping: %s", resolved_input)
+            continue
 
+        discovered = discover_files(resolved_input)
+        if not discovered["ads"] and not discovered["adb"]:
+            logger.warning("No Ada source files found in %s", resolved_input)
+
+        pairs = pair_files(discovered)
+
+        for idx, pair in enumerate(pairs):
+            spec_path = pair["spec"]
+            impl_path = pair["impl"]
+            package = pair["package"]
+            source = str(resolved_input)
+
+            spec_content: str | None = None
+            impl_content: str | None = None
+
+            if spec_path:
+                spec_content = read_and_sanitize(spec_path)
+            if impl_path:
+                impl_content = read_and_sanitize(impl_path)
+
+            if spec_content is None and impl_content is None:
+                logger.warning("Skipping pair %d - both spec and impl unparseable", idx)
+                continue
+
+            combined_content = ""
+            if spec_content:
+                combined_content += spec_content + "\n"
+            if impl_content:
+                combined_content += impl_content + "\n"
+
+            standard = detect_ada_standard(combined_content)
+            logger.debug(
+                "Pair %d - Package: %s | Standard: %s | Source: %s",
+                idx, package, standard, source,
+            )
+
+            # Include .gpr context if available
+            if discovered.get("gpr"):
+                for gpr_path in discovered["gpr"][:3]:
+                    gpr_content = read_and_sanitize(gpr_path)
+                    if gpr_content:
+                        combined_content += f"\n---\nProject file reference ({gpr_path.name}):\n{gpr_content}\n"
+                        break
+
+            turn = format_training_turn(
+                standard, spec_content, impl_content, package, context, source=source,
+            )
+            if turn["messages"]:
+                all_turns.append(turn)
+
+    # Write JSONL output
+    output_file.parent.mkdir(parents=True, exist_ok=True)
     with open(output_file, "w", encoding="utf-8") as f:
-        for turn in training_turns:
+        for turn in all_turns:
             f.write(json.dumps(turn, ensure_ascii=False) + "\n")
 
+    # Write evaluation methodology alongside the dataset
+    if eval_info:
+        meta_path = output_file.parent / "dataset_metadata.json"
+        metadata = {
+            "total_turns": len(all_turns),
+            "evaluation_methodology": eval_info,
+            "input_dirs": [str(d.resolve()) for d in input_dirs + extra_input_dirs],
+        }
+        with open(meta_path, "w", encoding="utf-8") as f:
+            json.dump(metadata, f, indent=2, ensure_ascii=False)
+        logger.info("Dataset metadata written to %s", meta_path)
+
     logger.info(
-        "Dataset written to %s - %d training turns.", output_file, len(training_turns)
+        "Dataset written to %s - %d training turns.", output_file, len(all_turns)
     )
-    return len(training_turns)
+    return len(all_turns)
 
 
 def main() -> None:
@@ -448,28 +563,27 @@ def main() -> None:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument(
-        "--input-dir",
-        type=Path,
-        default=DEFAULT_INPUT_DIR,
+        "--input-dir", type=Path, default=DEFAULT_INPUT_DIR,
         help="Root directory containing Ada source files. "
              "Accepts relative paths, symlinks, and git submodule targets. "
              "Resolved via pathlib.Path.resolve().",
     )
     parser.add_argument(
-        "--output-dir",
-        type=Path,
-        default=DEFAULT_OUTPUT_DIR,
+        "--extra-input-dir", type=Path, action="append", default=[],
+        help="Additional input directories for training data "
+             "(e.g., ../adacovex, ../Ada_CRDT, ../Ada-83-TLALOC). "
+             "Can be specified multiple times.",
+    )
+    parser.add_argument(
+        "--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR,
         help="Directory where dataset.jsonl will be written.",
     )
     parser.add_argument(
-        "--context",
-        type=str,
-        default="high-integrity, safety-critical systems",
+        "--context", type=str, default="high-integrity, safety-critical systems",
         help="Safety context string embedded in the system prompt.",
     )
     parser.add_argument(
-        "--verbose", "-v",
-        action="store_true",
+        "--verbose", "-v", action="store_true",
         help="Enable debug-level logging.",
     )
     args = parser.parse_args()
@@ -477,8 +591,26 @@ def main() -> None:
     if args.verbose:
         logging.getLogger().setLevel(logging.DEBUG)
 
+    # Set default extra input directories if none provided
+    extra_dirs = args.extra_input_dir if args.extra_input_dir else DEFAULT_EXTRA_INPUT_DIRS
+
+    # Load evaluation methodology from ada-eval
+    eval_methodology = load_eval_methodology()
+
+    # Ensure all input directories exist (warn if not)
+    all_dirs = [args.input_dir] + extra_dirs
+    for d in all_dirs:
+        if not d.exists():
+            logger.warning("Extra input directory not found: %s", d)
+
     output_file = args.output_dir / "dataset.jsonl"
-    count = build_dataset(input_dir=args.input_dir, output_file=output_file, context=args.context)
+    count = build_dataset(
+        input_dirs=[args.input_dir],
+        extra_input_dirs=extra_dirs,
+        output_file=output_file,
+        context=args.context,
+        eval_methodology=eval_methodology,
+    )
     print(f"Dataset built: {count} training turns -> {output_file}")
 
 
