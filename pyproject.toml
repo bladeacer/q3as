@@ -1,0 +1,45 @@
+[project]
+name = "q3as"
+version = "0.1.0"
+description = "Qwen 3 Ada SPARK (q3as) - Fine-tuning pipeline for the full Ada language spectrum"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache 2.0"
+authors = [
+    {name = "q3as Contributors"},
+]
+dependencies = [
+    "pydantic>=2.10.0",
+    "datasets>=3.0.0",
+    "unsloth>=2025.0.0",
+    "torch>=2.6.0",
+    "transformers>=4.48.0",
+    "triton>=3.0.0",
+    "huggingface_hub>=0.28.0",
+    "accelerate>=0.34.0",
+    "peft>=0.14.0",
+    "trl>=0.12.0",
+]
+
+[tool.uv]
+package = false
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.24.0",
+    "ruff>=0.8.0",
+    "mypy>=1.11.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"

@@ -1,0 +1,36 @@
+FROM base:latest
+
+# q3as - Qwen 3 Ada SPARK Deployment Modelfile
+# Used with llama.cpp, ollama, or similar inference runtimes.
+
+# Base model configuration
+PARAMETER stop "<|end_of_sentence|>"
+PARAMETER stop "<|end_of_sentence_id_002|>"
+
+# Context and generation parameters optimized for Ada code generation
+PARAMETER context_size 4096
+PARAMETER max_new_tokens 2048
+PARAMETER temperature 0.3
+PARAMETER repeat_penalty 1.1
+
+# Ada-specific generation parameters
+# Lower temperature for deterministic, safety-critical code
+PARAMETER top_k 40
+PARAMETER top_p 0.9
+
+# Model metadata
+MODEL q3as-8b-qlora-ada
+DESCRIPTION "Qwen 3 Ada SPARK - Fine-tuned model targeting Ada 83 through Ada 2022 and SPARK 2014"
+LICENSE MIT
+
+# Ada language specialization tags
+TAG ada
+TAG safety-critical
+TAG standards-compliance
+TAG qlora
+TAG ada-2012
+TAG ada-2022
+TAG spark-2014
+
+# System prompt defaults for Ada code generation
+SYSTEM "You are an Ada language expert specializing in Ada 83, Ada 95, Ada 2005, Ada 2012, Ada 2022, and SPARK 2014. You produce safe, correct, and standards-compliant Ada code. Always prioritize safety, correctness, and standards compliance."
