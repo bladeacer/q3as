@@ -1,4 +1,4 @@
-.PHONY: help sync download build-dataset train eval clean
+.PHONY: help sync download build-dataset train generate eval eval-pipeline prove clean
 
 .DEFAULT_GOAL := help
 
@@ -10,8 +10,11 @@ help: ## Show this help message
 	@echo "  make build-dataset - Build the training dataset from Ada source trees"
 	@echo "                      (includes ../adacovex and ../Ada_CRDT by default)"
 	@echo "  make train         - Run QLoRA fine-tuning with Unsloth"
-	@echo "  make eval          - Run baseline evaluation on the fine-tuned model"
-	@echo "                      (methodology derived from ../ada-eval)"
+	@echo "  make generate      - Generate Ada code with base and fine-tuned models"
+	@echo "  make eval          - Run baseline evaluation with BLEU + ada-eval metrics"
+	@echo "                      (compilation, test, SPARK proof; base model comparison)"
+	@echo "  make eval-pipeline - Run full ada-eval BUILD/TEST/PROVE pipeline"
+	@echo "  make prove         - Install gnatprove/gprbuild from alire-dev.toml"
 	@echo "  make clean         - Remove generated outputs and caches"
 	@echo ""
 	@echo "Usage: make [target]   (default: help)"
@@ -34,8 +37,17 @@ build-dataset: ## Build the training dataset from Ada source trees
 train: ## Run QLoRA fine-tuning with Unsloth
 	uv run python training/train_unsloth.py
 
-eval: ## Run baseline evaluation (methodology derived from ../ada-eval)
-	uv run python eval/baseline_eval.py --model outputs/q3as
+generate: ## Generate Ada code with base and fine-tuned models
+	uv run python eval/generate.py --model outputs/q3as --base-model unsloth/Qwen3-8B
+
+eval: ## Run baseline evaluation (BLEU + compilation/test/SPARK metrics, base comparison)
+	uv run python eval/baseline_eval.py --model outputs/q3as --base-model unsloth/Qwen3-8B
+
+eval-pipeline: ## Run full ada-eval BUILD/TEST/PROVE pipeline
+	uv run python eval/eval_pipeline.py --evals build test prove
+
+prove: ## Install gnatprove, gprbuild, gnatformat from dev manifest
+	alr build --manifest alire-dev.toml
 
 clean: ## Remove generated outputs and caches
 	rm -rf outputs/ models/ data/processed/dataset.jsonl data/processed/dataset_metadata.json

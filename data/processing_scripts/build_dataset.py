@@ -1,7 +1,7 @@
 """build_dataset.py - Intermediate ingestion and extraction script for q3as.
 
-Discovers Ada source files (.ads, .adb), .gpr project files, and alire.toml
-metadata across target directory trees (including ../adacovex and ../Ada_CRDT),
+Discovers Ada source files (.ads, .adb) and .gpr project files
+across target directory trees (including ../adacovex and ../Ada_CRDT),
 pairs matching specification/implementation files, detects the target Ada
 standard via heuristic keyword analysis, sanitizes content, and writes a
 standardized JSONL dataset formatted with the OpenAI/Qwen chat template.
@@ -32,7 +32,6 @@ from typing import Any
 
 ADA_SPEC_EXTENSIONS = {".ads", ".adb"}
 PROJECT_EXTENSIONS = {".gpr"}
-METADATA_FILES = {"alire.toml"}
 DEFAULT_INPUT_DIR = Path("data/raw")
 DEFAULT_OUTPUT_DIR = Path("data/processed")
 DEFAULT_OUTPUT_FILE = DEFAULT_OUTPUT_DIR / "dataset.jsonl"
@@ -55,49 +54,84 @@ _SECRET_PATTERNS = re.compile(
 )
 _BINARY_MAGIC = {b"\x00", b"\xff\xfe", b"\xfe\xff", b"\x7fELF"}
 
-# ---- Ada standard detection heuristics ------------------------------------ #
-# Ordered from most specific to least specific; first match wins.
-_STANDARD_PATTERNS: list[tuple[str, list[re.Pattern[str]]]] = [
-    ("SPARK 2014", [
-        re.compile(r"\bSPARK_Mode\b", re.IGNORECASE),
-        re.compile(r"\bGhost\b", re.IGNORECASE),
-        re.compile(r"\bGNATprove\b", re.IGNORECASE),
-        re.compile(r"\bPraxis\b", re.IGNORECASE),
-    ]),
+# ---- Ada standard detection (robust, scoring-based, newest-first) ----
+# Newer Ada standards are supersets of older ones. We score each file
+# against features from Ada 2022 down to Ada 83. The first standard
+# whose matched feature count meets the minimum threshold wins.
+# This avoids brittle per-keyword regex matching and handles the
+# superset relationship between Ada standards correctly.
+
+_STANDARD_FEATURES: list[tuple[str, list[tuple[str, re.Pattern[str]]], int]] = [
     ("Ada 2022", [
-        re.compile(r"\bStatic_Pure\b", re.IGNORECASE),
-        re.compile(r"\bPure_Global\b", re.IGNORECASE),
-        re.compile(r"\bContract_Cases\b", re.IGNORECASE),
-        re.compile(r"\bLoop_Invariant\b", re.IGNORECASE),
-        re.compile(r"\bDynamic_Pure\b", re.IGNORECASE),
-    ]),
+        ("Static_Pure", re.compile(r"\bStatic_Pure\b", re.IGNORECASE)),
+        ("Pure_Global", re.compile(r"\bPure_Global\b", re.IGNORECASE)),
+        ("Contract_Cases", re.compile(r"\bContract_Cases\b", re.IGNORECASE)),
+        ("Loop_Invariant", re.compile(r"\bLoop_Invariant\b", re.IGNORECASE)),
+        ("Dynamic_Pure", re.compile(r"\bDynamic_Pure\b", re.IGNORECASE)),
+        ("Wide_Wide_String", re.compile(r"\bWide_Wide_String\b", re.IGNORECASE)),
+        ("String_Literals", re.compile(r"\bString_Literal\b", re.IGNORECASE)),
+        ("Aspect_Specs", re.compile(r"\bwith\s+\w+\s+=>", re.IGNORECASE)),
+    ], 3),
     ("Ada 2012", [
-        re.compile(r"\bPre\s*=>", re.IGNORECASE),
-        re.compile(r"\bPost\s*=>", re.IGNORECASE),
-        re.compile(r"\bType_Invariant\b", re.IGNORECASE),
-        re.compile(r"\bSubtype_Contract\b", re.IGNORECASE),
-        re.compile(r"\bGlobal\s*=>", re.IGNORECASE),
-        re.compile(r"\bDepends\s*=>", re.IGNORECASE),
-        re.compile(r"with\s+Pre\b", re.IGNORECASE),
-        re.compile(r"with\s+Post\b", re.IGNORECASE),
-    ]),
+        ("Pre_aspect", re.compile(r"\bPre\s*=>", re.IGNORECASE)),
+        ("Post_aspect", re.compile(r"\bPost\s*=>", re.IGNORECASE)),
+        ("Type_Invariant", re.compile(r"\bType_Invariant\b", re.IGNORECASE)),
+        ("Global_aspect", re.compile(r"\bGlobal\s*=>", re.IGNORECASE)),
+        ("Depends_aspect", re.compile(r"\bDepends\s*=>", re.IGNORECASE)),
+        ("Subtype_Contract", re.compile(r"\bSubtype_Contract\b", re.IGNORECASE)),
+        ("Iterate_aspect", re.compile(r"\bIterate\s*=>", re.IGNORECASE)),
+        ("Concurrent", re.compile(r"\bSynchronous_Queue\b|\bProtected_Type\b", re.IGNORECASE)),
+    ], 3),
+    ("SPARK 2014", [
+        ("SPARK_Mode", re.compile(r"\bSPARK_Mode\b", re.IGNORECASE)),
+        ("Ghost", re.compile(r"\bGhost\b", re.IGNORECASE)),
+        ("GNATprove", re.compile(r"\bGNATprove\b", re.IGNORECASE)),
+        ("Praxis", re.compile(r"\bPraxis\b", re.IGNORECASE)),
+        ("SPARK_Keyword", re.compile(r"\bSPARK\b", re.IGNORECASE)),
+        ("Pre_Post", re.compile(r"\bPre\s*=>|Post\s*=>", re.IGNORECASE)),
+        ("Ghost_Var", re.compile(r"\bGhost\s+\w+", re.IGNORECASE)),
+    ], 2),
     ("Ada 2005", [
-        re.compile(r"\binterfaces\b", re.IGNORECASE),
-        re.compile(r"\baliased\b", re.IGNORECASE),
-        re.compile(r"\bprotected\s+type\b", re.IGNORECASE),
-    ]),
+        ("interfaces", re.compile(r"\binterfaces\b", re.IGNORECASE)),
+        ("aliased", re.compile(r"\baliased\b", re.IGNORECASE)),
+        ("protected_type", re.compile(r"\bprotected\s+type\b", re.IGNORECASE)),
+        ("abstract_interface", re.compile(r"\babstract\s+interface\b", re.IGNORECASE)),
+        ("assertion", re.compile(r"\bassert\b|\bassertion_policy\b", re.IGNORECASE)),
+        ("container_types", re.compile(r"\bAda\.Containers\b", re.IGNORECASE)),
+    ], 2),
     ("Ada 95", [
-        re.compile(r"\btagged\b", re.IGNORECASE),
-        re.compile(r"\babstract\s+tagged\b", re.IGNORECASE),
-        re.compile(r"\boverride\b", re.IGNORECASE),
-        re.compile(r"\binterface\b\b", re.IGNORECASE),
-    ]),
+        ("tagged", re.compile(r"\btagged\b", re.IGNORECASE)),
+        ("abstract_tagged", re.compile(r"\babstract\s+tagged\b", re.IGNORECASE)),
+        ("override", re.compile(r"\boverride\b", re.IGNORECASE)),
+        ("interface", re.compile(r"\binterface\b\b", re.IGNORECASE)),
+        ("protected", re.compile(r"\bprotected\b", re.IGNORECASE)),
+        ("task_type", re.compile(r"\btask\s+type\b", re.IGNORECASE)),
+        ("generic_formal", re.compile(r"\bgeneric\s+formal\b", re.IGNORECASE)),
+    ], 2),
     ("Ada 83", [
-        re.compile(r"procedure\b", re.IGNORECASE),
-        re.compile(r"function\b", re.IGNORECASE),
-        re.compile(r"package\s+body\b", re.IGNORECASE),
-    ]),
+        ("procedure", re.compile(r"\bprocedure\b", re.IGNORECASE)),
+        ("function", re.compile(r"\bfunction\b", re.IGNORECASE)),
+        ("package_body", re.compile(r"\bpackage\s+body\b", re.IGNORECASE)),
+        ("package_spec", re.compile(r"\bpackage\s+\w+\s+is\b", re.IGNORECASE)),
+        ("pragma", re.compile(r"\bpragma\b", re.IGNORECASE)),
+    ], 2),
 ]
+
+
+def detect_ada_standard(content: str) -> str:
+    """Detect the Ada language standard using a scoring-based approach.
+
+    Newer standards are supersets of older ones. We score the content
+    against features from Ada 2022 down to Ada 83. The first standard
+    whose matched feature count meets or exceeds its minimum threshold
+    wins. Returns the matched standard label or 'Unknown'.
+    """
+    for standard_name, features, min_match in _STANDARD_FEATURES:
+        match_count = sum(1 for _, pattern in features if pattern.search(content))
+        if match_count >= min_match:
+            return standard_name
+    return "Unknown"
+
 
 # --------------------------------------------------------------------------- #
 # Logging
@@ -165,67 +199,46 @@ def load_eval_methodology() -> dict[str, Any]:
 # --------------------------------------------------------------------------- #
 
 def discover_files(root: Path) -> dict[str, list[Path]]:
-    """Walk *root* and classify discovered files by category.
+    """Walk *root* and classify discovered Ada source files by category.
 
-    Returns a dict with keys 'ads', 'adb', 'gpr', 'metadata', and 'other'.
+    Only discovers .ads, .adb, and .gpr files. Non-Ada files are skipped.
     Symlinks are resolved automatically via ``Path.resolve()``.
     """
-    discovered: dict[str, list[Path]] = {"ads": [], "adb": [], "gpr": [], "metadata": [], "other": []}
+    discovered: dict[str, list[Path]] = {"ads": [], "adb": [], "gpr": []}
 
     if not root.exists():
         logger.warning("Input directory does not exist: %s", root)
         return discovered
 
     for dirpath, dirnames, filenames in os_walk_safe(root):
-        root_path = Path(dirpath)
         for fname in filenames:
-            full_path = (root_path / fname).resolve()
+            full_path = (Path(dirpath) / fname).resolve()
             ext = full_path.suffix.lower()
 
             if ext in ADA_SPEC_EXTENSIONS:
                 discovered["ads" if ext == ".ads" else "adb"].append(full_path)
             elif ext in PROJECT_EXTENSIONS:
                 discovered["gpr"].append(full_path)
-            elif fname in METADATA_FILES:
-                discovered["metadata"].append(full_path)
-            else:
-                discovered["other"].append(full_path)
 
     logger.info(
-        "Discovered %d .ads, %d .adb, %d .gpr, %d metadata files in %s",
+        "Discovered %d .ads, %d .adb, %d .gpr files in %s",
         len(discovered["ads"]), len(discovered["adb"]),
-        len(discovered["gpr"]), len(discovered["metadata"]), root,
+        len(discovered["gpr"]), root,
     )
     return discovered
 
 
-def os_walk_safe(root: Path, max_depth: int = 5):
-    """Safely walk a directory tree, skipping unreadable or broken symlinks.
+def os_walk_safe(root: Path):
+    """Safely walk a directory tree, pruning large/dangerous directories.
 
-    Skips .git, .cache, __pycache__, .pytest_cache, and .github.
-    Limits recursion depth to avoid walking excessively deep paths.
+    Uses os.walk with in-place directory pruning to skip .git, .cache,
+    __pycache__, .pytest_cache, and .github without descending into them.
     """
     skip_dirs = {".git", ".cache", "__pycache__", ".pytest_cache", ".github"}
-
-    def _walk(current: Path, depth: int):
-        if depth > max_depth:
-            return
-        try:
-            entries = list(current.iterdir())
-        except PermissionError:
-            return
-        dirnames = []
-        filenames = []
-        for entry in entries:
-            if entry.is_dir() and entry.name not in skip_dirs:
-                dirnames.append(entry.name)
-                yield from _walk(entry, depth + 1)
-            elif entry.is_file():
-                filenames.append(entry.name)
-        yield current, dirnames, filenames
-
     try:
-        yield from _walk(root, 0)
+        for dirpath, dirnames, filenames in os.walk(root, followlinks=True):
+            dirnames[:] = [d for d in dirnames if d not in skip_dirs]
+            yield dirpath, dirnames, filenames
     except PermissionError:
         logger.warning("Permission denied walking: %s", root)
         return
@@ -295,23 +308,6 @@ def extract_package_name(file_path: Path) -> str | None:
         return m.group(1)
 
     return file_path.stem
-
-
-# --------------------------------------------------------------------------- #
-# Standard Detection
-# --------------------------------------------------------------------------- #
-
-def detect_ada_standard(content: str) -> str:
-    """Detect the Ada language standard based on keyword heuristic analysis.
-
-    Checks patterns ordered from most specific (SPARK 2014, Ada 2022) to
-    least specific (Ada 83). Returns the matched standard label.
-    """
-    for standard_name, patterns in _STANDARD_PATTERNS:
-        for pattern in patterns:
-            if pattern.search(content):
-                return standard_name
-    return "Unknown"
 
 
 # --------------------------------------------------------------------------- #

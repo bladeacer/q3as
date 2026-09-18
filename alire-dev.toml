@@ -1,0 +1,25 @@
+# Development manifest for local SPARK proof verification and testing.
+# Used exclusively by eval commands (make prove, eval/eval_pipeline.py,
+# eval/baseline_eval.py) which run gnatprove and gprbuild against this
+# manifest. alire.toml is never polluted.
+#
+# gnatprove lives here (NOT in the publishing alire.toml), so q3as
+# stays zero-dependency for publishing purposes. The eval pipeline
+# resolves gnatprove from this dev manifest via alr exec.
+
+name = "q3as"
+description = "Qwen 3 Ada SPARK fine-tuning pipeline with evaluation"
+version = "0.1.0"
+project-files = []
+
+authors = ["q3as Contributors"]
+maintainers = ["q3as Contributors"]
+maintainers-logins = ["q3as"]
+licenses = "Apache-2.0"
+website = "https://github.com/q3as/q3as"
+tags = ["ada", "spark", "fine-tuning", "evaluation", "code-generation"]
+
+[[depends-on]]
+gnatprove = "^16.1.0"
+gnatdoc_bin = "^26.0.0"
+gnatformat_bin = "^26.0.0"

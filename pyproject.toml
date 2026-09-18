@@ -21,6 +21,9 @@ dependencies = [
     "trl>=0.12.0",
 ]
 
+[tool.uv.sources]
+ada-eval = { path = "../ada-eval" }
+
 [tool.uv]
 package = false
 
@@ -30,6 +33,7 @@ dev = [
     "pytest-asyncio>=0.24.0",
     "ruff>=0.8.0",
     "mypy>=1.11.0",
+    "ada-eval",
 ]
 
 [tool.pytest.ini_options]
