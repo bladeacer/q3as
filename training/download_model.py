@@ -23,7 +23,12 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
+os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "1")
 
 logger = logging.getLogger("q3as_download")
 
@@ -118,12 +123,14 @@ def download_model(model_name: str, cache_dir: Path, force: bool = False) -> dic
         )
         return _read_existing_metadata(cache_dir)
 
-    logger.info("Downloading model '%s' to %s ...", model_name, cache_dir)
+    logger.info("Downloading model '%s' to %s using accelerated hf_transfer...", model_name, cache_dir)
 
     download_info = snapshot_download(
         repo_id=model_name,
         local_dir=str(cache_dir),
         local_dir_use_symlinks=False,
+        token=os.getenv("HF_TOKEN"),
+        ignore_patterns=["*.pt", "*.bin"],
     )
 
     downloaded_files = list(cache_dir.rglob("*"))

@@ -4,3 +4,4 @@ models
 data/processed
 outputs
 unsloth_compiled_cache/
+.env

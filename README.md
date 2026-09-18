@@ -23,6 +23,9 @@ For training data that is not from my source code repositories, explicit permiss
 # Install dependencies
 uv sync
 
+# Set up Hugging Face credentials (see below)
+cp .env.dev .env
+
 # Download and sanity-check the base model
 uv run python training/download_model.py
 
@@ -46,6 +49,25 @@ uv run python eval/eval_pipeline.py --evals build test prove
 ```
 
 Alternatively, you can use the Makefile directly.
+
+## Hugging Face Token Setup
+
+The model download script uses `huggingface_hub` with `hf_transfer` for accelerated downloads. If you are downloading gated models (e.g. `unsloth/Qwen3-8B`), you need a Hugging Face access token.
+
+1. Create a token at [https://huggingface.co/settings/tokens](https://huggingface.co/settings/tokens)
+2. Copy the placeholder environment file:
+   ```bash
+   cp .env.dev .env
+   ```
+3. Edit `.env` and replace `your_huggingface_token_here` with your actual token
+4. The `.env` file is git-ignored — your token will not be committed
+
+The token is loaded automatically from `.env` when running `download_model.py`. You can also set it manually:
+
+```bash
+export HF_TOKEN="your_huggingface_token_here"
+uv run python training/download_model.py
+```
 
 ## Directory Structure
 
