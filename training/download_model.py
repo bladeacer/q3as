@@ -18,9 +18,12 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
 from pathlib import Path
 from typing import Any
+
+os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
 
 logger = logging.getLogger("q3as_download")
 
@@ -67,12 +70,33 @@ def is_model_present(cache_dir: Path) -> bool:
     """Check if the model files already exist in cache_dir.
 
     Returns True if all required files are present, False otherwise.
+    Verifies that the weight shards referenced by the safetensors index actually
+    exist on disk, so a partially downloaded model (metadata only) is not treated
+    as complete.
     """
     if not cache_dir.exists():
         return False
 
     existing_files = {f.name for f in cache_dir.rglob("*") if f.is_file()}
-    return _REQUIRED_FILES.issubset(existing_files)
+    if not _REQUIRED_FILES.issubset(existing_files):
+        return False
+
+    index_path = cache_dir / "model.safetensors.index.json"
+    if index_path.exists():
+        try:
+            index = json.loads(index_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return False
+        shard_names = set(index.get("weight_map", {}).values())
+        if not shard_names.issubset(existing_files):
+            missing = shard_names - existing_files
+            logger.warning(
+                "Model metadata present but weight shards missing: %s",
+                ", ".join(sorted(missing)),
+            )
+            return False
+
+    return True
 
 
 def download_model(model_name: str, cache_dir: Path, force: bool = False) -> dict[str, Any]:

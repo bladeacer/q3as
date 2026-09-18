@@ -20,10 +20,10 @@ help: ## Show this help message
 	@echo "Usage: make [target]   (default: help)"
 
 sync: ## Install/update all dependencies
-	uv sync
+	UV_LINK_MODE=copy uv sync
 
 download: ## Download and sanity-check the Qwen3-8B model
-	uv run python training/download_model.py --model-name unsloth/Qwen3-8B --cache-dir models/qwen3-8b
+	HF_HUB_DISABLE_XET=1 uv run python training/download_model.py --model-name unsloth/Qwen3-8B --cache-dir models/qwen3-8b
 
 build-dataset: ## Build the training dataset from Ada source trees
 	## Includes ../adacovex, ../Ada_CRDT, and ../Ada-83-TLALOC by default
@@ -35,7 +35,7 @@ build-dataset: ## Build the training dataset from Ada source trees
 		--extra-input-dir ../Ada-83-TLALOC
 
 train: ## Run QLoRA fine-tuning with Unsloth
-	uv run python training/train_unsloth.py
+	HF_HUB_DISABLE_XET=1 uv run python training/train_unsloth.py
 
 generate: ## Generate Ada code with base and fine-tuned models
 	uv run python eval/generate.py --model outputs/q3as --base-model unsloth/Qwen3-8B

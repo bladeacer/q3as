@@ -3,7 +3,7 @@ name = "q3as"
 version = "0.1.0"
 description = "Qwen 3 Ada SPARK (q3as) - Fine-tuning pipeline for the full Ada language spectrum"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 license = "Apache 2.0"
 authors = [
     {name = "q3as Contributors"},

@@ -19,6 +19,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
+
 logger = logging.getLogger("q3as_train")
 
 
