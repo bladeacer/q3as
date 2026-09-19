@@ -10,9 +10,13 @@ model. Evaluation metrics include:
 - Unit test pass rate (via ada-eval TEST)
 - SPARK verification success rate (via ada-eval PROVE)
 
+The base model defaults to the LOCAL download (models/qwen3-8b, i.e.
+unsloth/Qwen3-8B) - the same weights used for fine-tuning - so that
+the comparison isolates the effect of fine-tuning.
+
 Usage:
     uv run python eval/baseline_eval.py --model outputs/q3as
-    uv run python eval/baseline_eval.py --model outputs/q3as --base-model unsloth/Qwen3-8B --max-samples 20
+    uv run python eval/baseline_eval.py --model outputs/q3as --base-model models/qwen3-8b --max-samples 20
     uv run python eval/baseline_eval.py --model outputs/q3as --evals build test prove
 """
 
@@ -33,6 +37,8 @@ logger = logging.getLogger("q3as_eval")
 ADA_EVAL_DIR = Path("../ada-eval")
 EVAL_RESULTS_DIR = Path("outputs/eval_results")
 GENERATED_DIR = Path("outputs/generated_solutions")
+DEFAULT_BASE_MODEL = Path("models/qwen3-8b")
+BASE_MODEL_LABEL = "base_qwen3-8b"
 
 
 def check_tools_available() -> bool:
@@ -62,7 +68,7 @@ DEFAULT_STANDARD_KEYWORDS: dict[str, list[str]] = {
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Baseline evaluation for q3as model.")
     parser.add_argument("--model", type=Path, default=Path("outputs/q3as"), help="Fine-tuned model checkpoint path.")
-    parser.add_argument("--base-model", type=str, default="unsloth/Qwen3-8B", help="Base model identifier for comparison.")
+    parser.add_argument("--base-model", type=Path, default=DEFAULT_BASE_MODEL, help="Base model path (default: local models/qwen3-8b download of unsloth/Qwen3-8B).")
     parser.add_argument("--dataset", type=Path, default=Path("data/processed/dataset.jsonl"), help="Evaluation dataset.")
     parser.add_argument("--max-samples", type=int, default=50, help="Maximum number of samples to evaluate.")
     parser.add_argument("--evals", nargs="+", choices=["build", "test", "prove"], default=["build", "test", "prove"], help="Evaluation types to run via ada-eval.")
@@ -165,81 +171,58 @@ def extract_ada_code(generated_text: str) -> str:
     return generated_text.strip()
 
 
-def compute_compilation_stats_from_ada_eval(model_label: str) -> dict[str, int]:
-    """Read compilation stats from ada-eval evaluation results."""
-    stats = {"compiled": 0, "failed": 0, "total": 0}
+def compute_stats_from_ada_eval(model_label: str) -> dict[str, dict[str, int]]:
+    """Read build/test/prove stats from ada-eval evaluated packed datasets.
+
+    ada-eval writes results per generated dataset under
+    outputs/eval_results/<model_label>/<dataset>/*.jsonl, where each line is
+    an evaluated sample with an ``evaluation_results`` list.
+    """
+    stats: dict[str, dict[str, int]] = {
+        "build": {"compiled": 0, "failed": 0, "total": 0},
+        "test": {"passed": 0, "failed": 0, "total": 0},
+        "prove": {"proved": 0, "unproved": 0, "error": 0, "total": 0},
+    }
     model_eval_dir = EVAL_RESULTS_DIR / model_label
     if not model_eval_dir.exists():
         return stats
 
-    for dataset_dir in model_eval_dir.iterdir():
-        if not dataset_dir.is_dir():
-            continue
-        for result_file in dataset_dir.rglob("*.json"):
-            try:
-                with open(result_file) as f:
-                    data = json.load(f)
-                if isinstance(data, dict) and data.get("eval") == "build":
-                    stats["total"] += 1
-                    if data.get("compiled"):
-                        stats["compiled"] += 1
-                    else:
-                        stats["failed"] += 1
-            except (json.JSONDecodeError, OSError):
-                continue
-    return stats
-
-
-def compute_test_stats_from_ada_eval(model_label: str) -> dict[str, int]:
-    """Read test stats from ada-eval evaluation results."""
-    stats = {"passed": 0, "failed": 0, "total": 0}
-    model_eval_dir = EVAL_RESULTS_DIR / model_label
-    if not model_eval_dir.exists():
-        return stats
-
-    for dataset_dir in model_eval_dir.iterdir():
-        if not dataset_dir.is_dir():
-            continue
-        for result_file in dataset_dir.rglob("*.json"):
-            try:
-                with open(result_file) as f:
-                    data = json.load(f)
-                if isinstance(data, dict) and data.get("eval") == "test":
-                    stats["total"] += 1
-                    if data.get("passed_tests"):
-                        stats["passed"] += 1
-                    else:
-                        stats["failed"] += 1
-            except (json.JSONDecodeError, OSError):
-                continue
-    return stats
-
-
-def compute_prove_stats_from_ada_eval(model_label: str) -> dict[str, int]:
-    """Read SPARK proof stats from ada-eval evaluation results."""
-    stats = {"proved": 0, "unproved": 0, "error": 0, "total": 0}
-    model_eval_dir = EVAL_RESULTS_DIR / model_label
-    if not model_eval_dir.exists():
-        return stats
-
-    for dataset_dir in model_eval_dir.iterdir():
-        if not dataset_dir.is_dir():
-            continue
-        for result_file in dataset_dir.rglob("*.json"):
-            try:
-                with open(result_file) as f:
-                    data = json.load(f)
-                if isinstance(data, dict) and data.get("eval") == "prove":
-                    stats["total"] += 1
-                    result = data.get("result", "")
-                    if result == "proved":
-                        stats["proved"] += 1
-                    elif result == "unproved":
-                        stats["unproved"] += 1
-                    else:
-                        stats["error"] += 1
-            except (json.JSONDecodeError, OSError):
-                continue
+    for result_file in sorted(model_eval_dir.rglob("*.jsonl")):
+        try:
+            with open(result_file, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        sample = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    for es in sample.get("evaluation_results", []) or []:
+                        kind = es.get("eval")
+                        if kind == "build":
+                            stats["build"]["total"] += 1
+                            if es.get("compiled"):
+                                stats["build"]["compiled"] += 1
+                            else:
+                                stats["build"]["failed"] += 1
+                        elif kind == "test":
+                            stats["test"]["total"] += 1
+                            if es.get("compiled") and es.get("passed_tests"):
+                                stats["test"]["passed"] += 1
+                            else:
+                                stats["test"]["failed"] += 1
+                        elif kind == "prove":
+                            stats["prove"]["total"] += 1
+                            result = es.get("result", "error")
+                            if result == "proved":
+                                stats["prove"]["proved"] += 1
+                            elif result in ("unproved", "proved_incorrectly"):
+                                stats["prove"]["unproved"] += 1
+                            else:
+                                stats["prove"]["error"] += 1
+        except OSError as exc:
+            logger.warning("Cannot read result file %s: %s", result_file, exc)
     return stats
 
 
@@ -249,8 +232,8 @@ def run_evaluation(args: argparse.Namespace) -> dict[str, Any]:
     Computes BLEU, compliance, compilation, test, and SPARK proof metrics
     for both the fine-tuned and base models.
     """
-    model_label = "q3as_fine_tuned"
-    base_model_label = args.base_model.replace("/", "_")
+    model_label = "fine_tuned"
+    base_model_label = BASE_MODEL_LABEL
 
     results: dict[str, Any] = {
         "total_samples": 0,
@@ -261,7 +244,7 @@ def run_evaluation(args: argparse.Namespace) -> dict[str, Any]:
         "methodology_source": str(ADA_EVAL_DIR) if ADA_EVAL_DIR.exists() else "default",
         "per_sample": [],
         "fine_tuned": {"model": str(args.model), "stats": {}},
-        "base_model": {"model": args.base_model, "stats": {}},
+        "base_model": {"model": str(args.base_model), "stats": {}},
     }
 
     dataset = load_dataset(args.dataset, args.max_samples)
@@ -305,46 +288,47 @@ def run_evaluation(args: argparse.Namespace) -> dict[str, Any]:
     results["avg_compliance"] = sum(compliance_scores) / max(len(compliance_scores), 1)
 
     # Compute ada-eval metrics for both models
-    ft_stats = compute_compilation_stats_from_ada_eval(model_label)
-    ft_test_stats = compute_test_stats_from_ada_eval(model_label)
-    ft_prove_stats = compute_prove_stats_from_ada_eval(model_label)
+    ft_stats = compute_stats_from_ada_eval(model_label)
+    base_stats = compute_stats_from_ada_eval(base_model_label)
 
-    results["fine_tuned"]["stats"] = {
-        "build": ft_stats,
-        "test": ft_test_stats,
-        "prove": ft_prove_stats,
-    }
-
-    base_stats = compute_compilation_stats_from_ada_eval(base_model_label)
-    base_test_stats = compute_test_stats_from_ada_eval(base_model_label)
-    base_prove_stats = compute_prove_stats_from_ada_eval(base_model_label)
-
-    results["base_model"]["stats"] = {
-        "build": base_stats,
-        "test": base_test_stats,
-        "prove": base_prove_stats,
-    }
+    results["fine_tuned"]["stats"] = ft_stats
+    results["base_model"]["stats"] = base_stats
 
     # Compute pass rates
-    if ft_stats["total"] > 0:
-        results["fine_tuned"]["compile_rate"] = ft_stats["compiled"] / ft_stats["total"]
-    if ft_test_stats["total"] > 0:
-        results["fine_tuned"]["test_pass_rate"] = ft_test_stats["passed"] / ft_test_stats["total"]
-    if ft_prove_stats["total"] > 0:
-        results["fine_tuned"]["prove_success_rate"] = ft_prove_stats["proved"] / ft_prove_stats["total"]
+    if ft_stats["build"]["total"] > 0:
+        results["fine_tuned"]["compile_rate"] = ft_stats["build"]["compiled"] / ft_stats["build"]["total"]
+    if ft_stats["test"]["total"] > 0:
+        results["fine_tuned"]["test_pass_rate"] = ft_stats["test"]["passed"] / ft_stats["test"]["total"]
+    if ft_stats["prove"]["total"] > 0:
+        results["fine_tuned"]["prove_success_rate"] = ft_stats["prove"]["proved"] / ft_stats["prove"]["total"]
 
-    if base_stats["total"] > 0:
-        results["base_model"]["compile_rate"] = base_stats["compiled"] / base_stats["total"]
-    if base_test_stats["total"] > 0:
-        results["base_model"]["test_pass_rate"] = base_test_stats["passed"] / base_test_stats["total"]
-    if base_prove_stats["total"] > 0:
-        results["base_model"]["prove_success_rate"] = base_prove_stats["proved"] / base_prove_stats["total"]
+    if base_stats["build"]["total"] > 0:
+        results["base_model"]["compile_rate"] = base_stats["build"]["compiled"] / base_stats["build"]["total"]
+    if base_stats["test"]["total"] > 0:
+        results["base_model"]["test_pass_rate"] = base_stats["test"]["passed"] / base_stats["test"]["total"]
+    if base_stats["prove"]["total"] > 0:
+        results["base_model"]["prove_success_rate"] = base_stats["prove"]["proved"] / base_stats["prove"]["total"]
 
     logger.info(
         "Evaluation complete: %d samples, avg BLEU=%.4f, avg compliance=%.4f",
         results["total_samples"], results["avg_bleu"], results["avg_compliance"],
     )
     return results
+
+
+def print_stats_block(label: str, stats: dict[str, dict[str, int]]) -> None:
+    b = stats.get("build", {})
+    t = stats.get("test", {})
+    p = stats.get("prove", {})
+    if b.get("total", 0) > 0:
+        compile_rate = b.get("compiled", 0) / b["total"] * 100
+        print(f"  Compilation: {b.get('compiled', 0)}/{b['total']} passed ({compile_rate:.1f}%)")
+    if t.get("total", 0) > 0:
+        test_rate = t.get("passed", 0) / t["total"] * 100
+        print(f"  Unit Tests:  {t.get('passed', 0)}/{t['total']} passed ({test_rate:.1f}%)")
+    if p.get("total", 0) > 0:
+        prove_rate = p.get("proved", 0) / p["total"] * 100
+        print(f"  SPARK Proof: {p.get('proved', 0)}/{p['total']} proved ({prove_rate:.1f}%)")
 
 
 def main() -> None:
@@ -358,11 +342,20 @@ def main() -> None:
     logger.info("Base model: %s", args.base_model)
     logger.info("Evals: %s", args.evals)
 
+    if not args.model.exists():
+        logger.error("Fine-tuned model not found at %s - run `make train` first.", args.model)
+        sys.exit(1)
+    if not args.base_model.exists():
+        logger.error(
+            "Base model not found at %s - run `make download` first.", args.base_model
+        )
+        sys.exit(1)
+
     # Check tool availability
     tools_ok = check_tools_available()
     if not tools_ok:
         logger.warning("GNAT tools (gnatprove, gprbuild, gnatformat) not found.")
-        logger.warning("Install GNAT Pro/Community or set up PATH to enable compilation/test/SPARK evaluation.")
+        logger.warning("Install them via `make prove` (alr build --manifest alire-dev.toml).")
         logger.warning("BLEU and compliance metrics will still be computed.")
 
     methodology = load_eval_methodology()
@@ -381,39 +374,15 @@ def main() -> None:
     print(f"Standard distribution       : {results['standard_distribution']}")
     print()
 
-    # Fine-tuned model stats
     ft = results["fine_tuned"]
-    if ft["stats"]:
-        b = ft["stats"].get("build", {})
-        t = ft["stats"].get("test", {})
-        p = ft["stats"].get("prove", {})
-        print(f"--- Fine-tuned ({args.model.name}) ---")
-        if b.get("total", 0) > 0:
-            compile_rate = b.get("compiled", 0) / b["total"] * 100
-            print(f"  Compilation: {b.get('compiled', 0)}/{b['total']} passed ({compile_rate:.1f}%)")
-        if t.get("total", 0) > 0:
-            test_rate = t.get("passed", 0) / t["total"] * 100
-            print(f"  Unit Tests:  {t.get('passed', 0)}/{t['total']} passed ({test_rate:.1f}%)")
-        if p.get("total", 0) > 0:
-            prove_rate = p.get("proved", 0) / p["total"] * 100
-            print(f"  SPARK Proof: {p.get('proved', 0)}/{p['total']} proved ({prove_rate:.1f}%)")
+    if ft["stats"] and any(s.get("total", 0) for s in ft["stats"].values()):
+        print(f"--- Fine-tuned ({args.model}) ---")
+        print_stats_block(args.model.name, ft["stats"])
 
-    # Base model stats
     base = results["base_model"]
-    if base["stats"]:
-        b = base["stats"].get("build", {})
-        t = base["stats"].get("test", {})
-        p = base["stats"].get("prove", {})
+    if base["stats"] and any(s.get("total", 0) for s in base["stats"].values()):
         print(f"\n--- Base ({args.base_model}) ---")
-        if b.get("total", 0) > 0:
-            compile_rate = b.get("compiled", 0) / b["total"] * 100
-            print(f"  Compilation: {b.get('compiled', 0)}/{b['total']} passed ({compile_rate:.1f}%)")
-        if t.get("total", 0) > 0:
-            test_rate = t.get("passed", 0) / t["total"] * 100
-            print(f"  Unit Tests:  {t.get('passed', 0)}/{t['total']} passed ({test_rate:.1f}%)")
-        if p.get("total", 0) > 0:
-            prove_rate = p.get("proved", 0) / p["total"] * 100
-            print(f"  SPARK Proof: {p.get('proved', 0)}/{p['total']} proved ({prove_rate:.1f}%)")
+        print_stats_block(str(args.base_model), base["stats"])
 
     # Comparison
     if ft["stats"] and base["stats"]:
@@ -423,13 +392,15 @@ def main() -> None:
         print(f"{'Metric':<25s} {'Base':>10s} {'Fine-tuned':>12s} {'Delta':>10s}")
         print("-" * 60)
 
-        for eval_name, metric_name, display in [
-            ("build", "compile_rate", "Compilation pass rate"),
-            ("test", "test_pass_rate", "Test pass rate"),
-            ("prove", "prove_success_rate", "SPARK proof success"),
+        for stat_key, numerator, display in [
+            ("build", "compiled", "Compilation pass rate"),
+            ("test", "passed", "Test pass rate"),
+            ("prove", "proved", "SPARK proof success"),
         ]:
-            ft_rate = ft.get(metric_name, 0.0) * 100
-            base_rate = base.get(metric_name, 0.0) * 100
+            base_block = base["stats"].get(stat_key, {})
+            ft_block = ft["stats"].get(stat_key, {})
+            base_rate = base_block.get(numerator, 0) / max(base_block.get("total", 1), 1) * 100
+            ft_rate = ft_block.get(numerator, 0) / max(ft_block.get("total", 1), 1) * 100
             delta = ft_rate - base_rate
             print(f"{display:<25s} {base_rate:>9.1f}% {ft_rate:>11.1f}% {delta:>+9.1f}%")
 

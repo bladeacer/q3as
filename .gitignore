@@ -4,6 +4,8 @@ models
 data/processed
 outputs
 unsloth_compiled_cache/
+_unsloth_temporary_saved_buffers/
+training.log
 .env
 .venv
 .ruff_cache

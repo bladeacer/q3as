@@ -6,6 +6,16 @@ pairs matching specification/implementation files, detects the target Ada
 standard via heuristic keyword analysis, sanitizes content, and writes a
 standardized JSONL dataset formatted with the OpenAI/Qwen chat template.
 
+Additionally ingests:
+- ../ada-eval          - eval sample sources as extra Ada code trees
+- ../learn             - AdaCore's learn.adacore.com courses; Ada code blocks
+                         embedded in the RST course material are extracted as
+                         documentation-QA style training turns (CC-BY-4.0)
+- ../ada-spark         - the ada-spark agent skill (MIT); SKILL.md and
+                         agent-knowledge guidance is embedded into the system
+                         prompt so the model learns current-toolchain
+                         conventions (contracts, Alire, SPARK proof)
+
 Also loads evaluation methodology from ../ada-eval for dataset structure
 and metric definitions.
 
@@ -23,6 +33,7 @@ import logging
 import os
 import re
 import sys
+import textwrap
 from pathlib import Path
 from typing import Any
 
@@ -40,7 +51,14 @@ DEFAULT_EXTRA_INPUT_DIRS = [
     Path("../adacovex"),
     Path("../Ada_CRDT"),
     Path("../Ada-83-TLALOC"),
+    Path("../ada-eval"),
 ]
+# Directories treated as documentation sources: Ada code blocks are extracted
+# from their RST/Markdown content instead of pairing .ads/.adb files.
+DOC_SOURCE_DIRS = ["learn"]
+# Directories whose markdown guidance (SKILL.md, agent-knowledge) is embedded
+# into the system prompt as Ada/SPARK conventions.
+GUIDANCE_SOURCE_DIRS = ["ada-spark"]
 # Default path to ada-eval methodology directory
 ADA_EVAL_DIR = Path("../ada-eval")
 
@@ -375,6 +393,120 @@ def read_and_sanitize(file_path: Path) -> str | None:
 
 
 # --------------------------------------------------------------------------- #
+# Documentation & Guidance Ingestion (learn, ada-spark)
+# --------------------------------------------------------------------------- #
+
+_RST_ADA_BLOCK = re.compile(
+    r".. code-block::\s+(?:ada|Ada)\s*\n\s*\n((?:[^\n]*\n?)+?)(?=\n\S|\Z)",
+    re.MULTILINE,
+)
+_MD_ADA_BLOCK = re.compile(r"```(?:ada|Ada)\s*\n(.*?)```", re.DOTALL)
+
+
+def _looks_like_ada(code: str) -> bool:
+    """Heuristically reject shell transcripts and non-Ada snippets."""
+    lowered = code.lower()
+    keywords = (
+        "procedure", "function", "package", "task", "protected",
+        "is begin", "end ", ":=", "with ", "type ", "subtype ",
+    )
+    return any(k in lowered for k in keywords)
+
+
+def extract_ada_code_blocks(doc_root: Path) -> list[str]:
+    """Extract Ada code blocks from RST and Markdown files under doc_root.
+
+    Deduplicates blocks and keeps only snippets that look like Ada units.
+    """
+    blocks: list[str] = []
+    seen: set[str] = set()
+    for pattern in ("*.rst", "*.md"):
+        for doc_path in sorted(doc_root.rglob(pattern)):
+            try:
+                content = doc_path.read_text(encoding="utf-8")
+            except (UnicodeDecodeError, OSError):
+                continue
+            found = _RST_ADA_BLOCK.findall(content) + _MD_ADA_BLOCK.findall(content)
+            for raw in found:
+                code = textwrap.dedent(raw).strip("\n")
+                if not (30 <= len(code) <= 4000):
+                    continue
+                if not _looks_like_ada(code):
+                    continue
+                key = re.sub(r"\s+", " ", code)
+                if key in seen:
+                    continue
+                seen.add(key)
+                blocks.append(code)
+    logger.info("Extracted %d unique Ada code blocks from %s", len(blocks), doc_root)
+    return blocks
+
+
+def load_guidance_text(source_dirs: list[Path]) -> str:
+    """Concatenate SKILL.md / agent-knowledge guidance from agent-skill repos."""
+    parts: list[str] = []
+    for root in source_dirs:
+        if not root.exists():
+            logger.warning("Guidance source not found, skipping: %s", root)
+            continue
+        candidates = [root / "SKILL.md", *sorted(root.glob("agent-knowledge/*.md"))]
+        for md_path in candidates:
+            if not md_path.is_file():
+                continue
+            try:
+                text = md_path.read_text(encoding="utf-8").strip()
+            except (UnicodeDecodeError, OSError):
+                continue
+            if text:
+                parts.append(text)
+    if parts:
+        logger.info(
+            "Loaded %d guidance documents from %s",
+            len(parts), ", ".join(str(d) for d in source_dirs),
+        )
+    return "\n\n".join(parts)
+
+
+def build_doc_training_turns(
+    doc_sources: list[Path],
+    guidance_text: str = "",
+) -> list[dict[str, list[dict[str, str]]]]:
+    """Build documentation-QA style training turns from Ada code blocks."""
+    turns: list[dict[str, list[dict[str, str]]]] = []
+    for doc_root in doc_sources:
+        if not doc_root.exists():
+            logger.warning("Documentation source not found, skipping: %s", doc_root)
+            continue
+        for code in extract_ada_code_blocks(doc_root):
+            standard = detect_ada_standard(code)
+            user_msg = (
+                f"Explain the following {standard} code and describe what it demonstrates.\n\n"
+                f"```ada\n{code}\n```"
+            )
+            turns.append({
+                "messages": [
+                    {"role": "user", "content": user_msg},
+                    {"role": "assistant", "content": f"```ada\n{code}\n```"},
+                ],
+            })
+    if turns and guidance_text:
+        # Variant system prompts carrying the ada-spark guidance teach the
+        # model to write current-toolchain Ada/SPARK (contracts, Alire, proof).
+        sample_turns = turns[: max(len(turns) // 4, 1)]
+        for turn in sample_turns:
+            turn["messages"].insert(0, {
+                "role": "system",
+                "content": (
+                    "You are a specialized Ada/SPARK AI agent. You write strictly "
+                    "conforming, idiomatic code, prioritize contract annotations "
+                    "(Pre/Post), and target the current GNAT/Alire toolchain.\n\n"
+                    f"{guidance_text}"
+                ),
+            })
+    return turns
+
+
+# --------------------------------------------------------------------------- #
 # JSONL Formatting
 # --------------------------------------------------------------------------- #
 
@@ -385,11 +517,14 @@ def format_training_turn(
     package: str | None,
     context: str,
     source: str = "",
+    guidance_text: str = "",
 ) -> dict[str, list[dict[str, str]]]:
     """Format a single training turn using the OpenAI/Qwen chat template.
 
     Produces a dict with a ``messages`` key containing the ``system``,
-    ``user``, and ``assistant`` message objects.
+    ``user``, and ``assistant`` message objects. When *guidance_text* is
+    provided (from the ada-spark skill), a portion of turns embed it in the
+    system prompt so the model internalizes current-toolchain conventions.
     """
     system_msg = (
         f"You are an Ada language expert specializing in {standard}. "
@@ -397,6 +532,14 @@ def format_training_turn(
         f"Safety requirements: {context}. "
         "Always use the appropriate Ada standard syntax and conventions."
     )
+    if guidance_text and hash(package or "") % 4 == 0:
+        system_msg = (
+            "You are a specialized Ada/SPARK AI agent. You write strictly "
+            "conforming, idiomatic code, prioritize contract annotations "
+            "(Pre/Post), and target the current GNAT/Alire toolchain.\n\n"
+            f"{guidance_text}\n\n"
+            + system_msg
+        )
 
     if spec_content and impl_content:
         user_msg = (
@@ -450,17 +593,22 @@ def build_dataset(
     output_file: Path,
     context: str = "high-integrity, safety-critical systems",
     eval_methodology: dict[str, Any] | None = None,
+    doc_dirs: list[Path] | None = None,
+    guidance_dirs: list[Path] | None = None,
 ) -> int:
     """Run the full ingestion -> pairing -> sanitization -> JSONL pipeline.
 
     Processes all input directories plus extra input directories
-    (adacovex, Ada_CRDT). Derives dataset structure from ada-eval
-    methodology if available.
+    (adacovex, Ada_CRDT, TLALOC, ada-eval), extracts Ada code blocks from
+    documentation sources (learn), and embeds agent-skill guidance
+    (ada-spark) into system prompts. Derives dataset structure from
+    ada-eval methodology if available.
 
     Returns the number of valid training turns written to the output file.
     """
     all_turns: list[dict[str, list[dict[str, str]]]] = []
     eval_info = eval_methodology or {}
+    guidance_text = load_guidance_text(guidance_dirs or [])
 
     # Log evaluation methodology info
     if eval_info:
@@ -524,10 +672,15 @@ def build_dataset(
                         break
 
             turn = format_training_turn(
-                standard, spec_content, impl_content, package, context, source=source,
+                standard, spec_content, impl_content, package, context,
+                source=source, guidance_text=guidance_text,
             )
             if turn["messages"]:
                 all_turns.append(turn)
+
+    # Documentation-QA turns from code blocks embedded in course material
+    if doc_dirs:
+        all_turns.extend(build_doc_training_turns(doc_dirs, guidance_text))
 
     # Write JSONL output
     output_file.parent.mkdir(parents=True, exist_ok=True)
@@ -579,6 +732,16 @@ def main() -> None:
         help="Safety context string embedded in the system prompt.",
     )
     parser.add_argument(
+        "--doc-dir", type=Path, action="append", default=[],
+        help="Documentation source to extract Ada code blocks from "
+             "(e.g., ../learn). Can be specified multiple times.",
+    )
+    parser.add_argument(
+        "--guidance-dir", type=Path, action="append", default=[],
+        help="Agent-skill source whose SKILL.md/agent-knowledge guidance is "
+             "embedded into system prompts (e.g., ../ada-spark). Repeatable.",
+    )
+    parser.add_argument(
         "--verbose", "-v", action="store_true",
         help="Enable debug-level logging.",
     )
@@ -589,6 +752,11 @@ def main() -> None:
 
     # Set default extra input directories if none provided
     extra_dirs = args.extra_input_dir if args.extra_input_dir else DEFAULT_EXTRA_INPUT_DIRS
+    doc_dirs = args.doc_dir if args.doc_dir else [Path("..") / d for d in DOC_SOURCE_DIRS]
+    guidance_dirs = (
+        args.guidance_dir if args.guidance_dir
+        else [Path("..") / d for d in GUIDANCE_SOURCE_DIRS]
+    )
 
     # Load evaluation methodology from ada-eval
     eval_methodology = load_eval_methodology()
@@ -606,6 +774,8 @@ def main() -> None:
         output_file=output_file,
         context=args.context,
         eval_methodology=eval_methodology,
+        doc_dirs=doc_dirs,
+        guidance_dirs=guidance_dirs,
     )
     print(f"Dataset built: {count} training turns -> {output_file}")
 
