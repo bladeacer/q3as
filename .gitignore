@@ -10,3 +10,6 @@ training.log
 .venv
 .ruff_cache
 .mypy_cache
+.alire-dev/
+alire/
+config/

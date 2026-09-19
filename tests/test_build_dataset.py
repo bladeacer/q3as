@@ -15,8 +15,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "data" / "processing_scripts"))
 
-import build_dataset as bd  # noqa: E402
-
+import build_dataset as bd
 
 # --------------------------------------------------------------------------- #
 # sanitize_prose / apply_word_swaps / has_style_violations
@@ -186,7 +185,7 @@ class TestInjectDefectSyntax:
         code = "package Foo is\n   X : Integer := 1;\nend Foo;\n"
         result = bd.inject_defect(code, "syntax")
         assert result is not None
-        broken, diagnosis, compiler = result
+        broken, _diagnosis, compiler = result
         # Either the package-is or the semicolon defect applies; the
         # compiler message must be one of the two verified GNAT errors.
         assert compiler in ('error: missing ";"', 'error: missing "is"')
@@ -197,7 +196,7 @@ class TestInjectDefectContext:
     def test_with_clause_removal(self):
         result = bd.inject_defect(WITH_CODE, "context")
         assert result is not None
-        broken, diagnosis, compiler = result
+        broken, _diagnosis, compiler = result
         assert "with Ada.Text_IO;" not in broken
         assert "Ada.Text_IO.Put_Line" in broken
         assert compiler.startswith("error:")
@@ -211,7 +210,7 @@ class TestInjectDefectVisibility:
     def test_use_removal_for_dot_free_use(self):
         result = bd.inject_defect(USE_CODE, "visibility")
         assert result is not None
-        broken, diagnosis, compiler = result
+        broken, _diagnosis, compiler = result
         # The use clause is removed; the with clause stays (context family).
         assert "use Ada.Text_IO;" not in broken
         assert "with Ada.Text_IO;" in broken
@@ -228,7 +227,7 @@ class TestInjectDefectContract:
     def test_pre_misspelled(self):
         result = bd.inject_defect(CONTRACT_CODE, "contract")
         assert result is not None
-        broken, diagnosis, compiler = result
+        broken, _diagnosis, compiler = result
         assert "Pres =>" in broken
         assert "Pre =>" not in broken
         assert "not a valid aspect identifier" in compiler
@@ -242,7 +241,7 @@ class TestInjectDefectMismatch:
     def test_parameter_dropped(self):
         result = bd.inject_defect(SPEC_BODY, "mismatch")
         assert result is not None
-        broken, diagnosis, compiler = result
+        broken, _diagnosis, compiler = result
         assert "not type conformant" in compiler
         assert broken != SPEC_BODY
 

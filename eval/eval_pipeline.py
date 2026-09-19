@@ -21,7 +21,6 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import shutil
 import sys
 from pathlib import Path
 from typing import Any
@@ -30,6 +29,13 @@ from typing import Any
 _ADA_EVAL_SRC = Path(__file__).resolve().parents[1].parent / "ada-eval" / "src"
 if str(_ADA_EVAL_SRC) not in sys.path:
     sys.path.insert(0, str(_ADA_EVAL_SRC))
+
+# Add scripts/ so the Alire environment helper is importable
+_SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "scripts"
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+
+from alire_env import has_tool
 
 logger = logging.getLogger("q3as_eval_pipeline")
 
@@ -41,7 +47,7 @@ DEFAULT_BASE_LABEL = "base_qwen3-8b"
 
 
 def check_tools_available(evals: list[str]) -> tuple[bool, list[str]]:
-    """Check if required tools are available on the system."""
+    """Check if required tools are available in the Alire environment."""
     tool_map = {
         "build": ["gprbuild", "gnatformat"],
         "test": ["gprbuild", "gprclean"],
@@ -51,7 +57,7 @@ def check_tools_available(evals: list[str]) -> tuple[bool, list[str]]:
     for eval_type in evals:
         tools = tool_map.get(eval_type, [])
         for tool in tools:
-            if shutil.which(tool) is None:
+            if not has_tool(tool):
                 missing.append(tool)
     if missing:
         return False, sorted(set(missing))
@@ -295,9 +301,9 @@ def main() -> None:
     # Check tool availability
     tools_ok, missing_tools = check_tools_available(args.evals)
     if not tools_ok:
-        logger.warning("Required tools not found: %s", missing_tools)
+        logger.warning("Required tools not found in the Alire environment: %s", missing_tools)
         logger.warning("BUILD/TEST/PROVE evaluations require gnatprove, gprbuild, gnatformat")
-        logger.warning("Install them via `make prove` (alr build --manifest alire-dev.toml)")
+        logger.warning("Install them via `make prove` (Alire dev workspace build)")
 
     # Step 1: Run evaluations via ada-eval framework on packed generated datasets
     run_ada_eval(

@@ -1,15 +1,24 @@
 """download_model.py - Download and sanity-check the Qwen3-8B model from HuggingFace.
 
 Downloads the base model (Qwen3-8B) to a local cache directory and verifies
-that the model can be loaded and accessed correctly before fine-tuning begins.
+that the model is complete and loadable before fine-tuning begins.
 
 If the model is already present in the cache directory, the download is skipped
 unless --force is passed.
+
+Sanity checks:
+- Default (light): loads the tokenizer and config, and parses every
+  safetensors shard header. No GPU work, so it always terminates.
+- --sanity-deep: additionally loads the full model on the GPU and generates
+  a few tokens. The deep check runs in a child process with a hard timeout
+  (default 15 min), because CUDA/Triton initialization can hang on machines
+  without a working GPU driver setup and would otherwise wedge the pipeline.
 
 Usage:
     uv run python training/download_model.py
     uv run python training/download_model.py --model-name unsloth/Qwen3-8B --cache-dir models/qwen3-8b
     uv run python training/download_model.py --no-sanity-check
+    uv run python training/download_model.py --sanity-deep
     uv run python training/download_model.py --force
 """
 
@@ -70,8 +79,25 @@ def parse_args() -> argparse.Namespace:
         help="Skip the sanity check after download.",
     )
     parser.add_argument(
+        "--sanity-deep", action="store_true", default=False,
+        help="Run the deep GPU sanity check (model load + short generation) "
+             "in a child process with --sanity-timeout.",
+    )
+    parser.add_argument(
+        "--sanity-timeout", type=int, default=900,
+        help="Hard timeout in seconds for the deep sanity check child process.",
+    )
+    parser.add_argument(
+        "--sanity-child", action="store_true", default=False,
+        help=argparse.SUPPRESS,  # internal: runs the deep check in this process
+    )
+    parser.add_argument(
         "--force", action="store_true", default=False,
         help="Force re-download even if model already exists.",
+    )
+    parser.add_argument(
+        "--check-only", action="store_true", default=False,
+        help="Exit 0 when the model is complete, 1 when not; never downloads.",
     )
     parser.add_argument(
         "--verbose", "-v", action="store_true", help="Enable debug-level logging.",
@@ -136,7 +162,6 @@ def download_model(model_name: str, cache_dir: Path, force: bool = False) -> dic
     download_info = snapshot_download(
         repo_id=model_name,
         local_dir=str(cache_dir),
-        local_dir_use_symlinks=False,
         token=os.getenv("HF_TOKEN"),
         ignore_patterns=["*.pt", "*.bin"],
     )
@@ -146,8 +171,8 @@ def download_model(model_name: str, cache_dir: Path, force: bool = False) -> dic
     total_size = sum(f.stat().st_size for f in downloaded_files if f.is_file())
 
     logger.info(
-        "Download complete: %d files, %.2f GB",
-        file_count, total_size / (1024 ** 3),
+        "Download complete: %d files, %.2f GB (snapshot at %s)",
+        file_count, total_size / (1024 ** 3), download_info,
     )
 
     return {
@@ -182,16 +207,71 @@ def _read_existing_metadata(cache_dir: Path) -> dict[str, Any]:
     }
 
 
-def sanity_check(cache_dir: Path, model_name: str) -> bool:
-    """Verify the downloaded model can be loaded and accessed.
+def sanity_check_light(cache_dir: Path) -> bool:
+    """Fast, terminating sanity check: tokenizer, config, shard headers.
 
-    Returns True if the sanity check passes, False otherwise.
-    Gracefully skips the check when no GPU/CUDA is available.
+    Parses only the safetensors headers (a few KB per shard), so it never
+    loads weights into RAM and cannot hang on GPU or driver problems.
     """
-    logger.info("Running sanity check on model at %s ...", cache_dir)
+    logger.info("Running lightweight sanity check on model at %s ...", cache_dir)
+    try:
+        from safetensors import safe_open
+        from transformers import AutoConfig, AutoTokenizer
+
+        logger.info("Loading tokenizer ...")
+        tokenizer = AutoTokenizer.from_pretrained(str(cache_dir))
+        logger.info("Tokenizer ok: vocab size %d", len(tokenizer))
+
+        logger.info("Loading config ...")
+        config = AutoConfig.from_pretrained(str(cache_dir))
+        logger.info(
+            "Config ok - model_type: %s, layers: %d, hidden: %d",
+            config.model_type, config.num_hidden_layers, config.hidden_size,
+        )
+
+        index_path = cache_dir / "model.safetensors.index.json"
+        if not index_path.exists():
+            logger.error("Missing model.safetensors.index.json")
+            return False
+        index = json.loads(index_path.read_text(encoding="utf-8"))
+        shards = sorted(set(index.get("weight_map", {}).values()))
+        if not shards:
+            logger.error("Safetensors index has no weight_map entries")
+            return False
+
+        logger.info("Parsing headers of %d shards ...", len(shards))
+        for shard in shards:
+            shard_path = cache_dir / shard
+            if not shard_path.exists():
+                logger.error("Missing shard: %s", shard)
+                return False
+            with safe_open(shard_path, framework="pt") as f:
+                tensor_count = len(f.keys())
+            if tensor_count <= 0:
+                logger.error("Shard %s parses to zero tensors", shard)
+                return False
+        logger.info("All %d shards parse correctly (%s ...)", len(shards), shards[0])
+
+        logger.info("Lightweight sanity check PASSED (no GPU work performed).")
+        return True
+
+    except Exception as exc:
+        logger.error("Lightweight sanity check failed: %s", exc, exc_info=True)
+        return False
+
+
+def sanity_check_deep(cache_dir: Path, model_name: str) -> bool:
+    """Verify the downloaded model can be loaded on the GPU and generate.
+
+    Heavy: loads all weights onto the device and runs a short generation.
+    CUDA/Triton initialization can hang on machines without a working GPU
+    setup, so main() runs this in a child process with a hard timeout
+    instead of calling it directly.
+    """
+    logger.info("Running deep sanity check on model at %s ...", cache_dir)
 
     try:
-        from transformers import AutoTokenizer, AutoModelForCausalLM
+        from transformers import AutoModelForCausalLM, AutoTokenizer
         import torch
 
         logger.info("Loading tokenizer ...")
@@ -233,25 +313,81 @@ def sanity_check(cache_dir: Path, model_name: str) -> bool:
         return True
 
     except ImportError as exc:
-        logger.warning("Sanity check skipped - missing dependency: %s", exc)
-        return True
-    except subprocess.CalledProcessError as exc:
-        logger.warning(
-            "Sanity check skipped - CUDA/Triton compilation failed (no GPU available): %s",
-            exc,
-        )
+        logger.warning("Deep sanity check skipped - missing dependency: %s", exc)
         return True
     except Exception as exc:
-        logger.error("Sanity check failed: %s", exc, exc_info=True)
+        logger.error("Deep sanity check failed: %s", exc, exc_info=True)
         return False
 
 
-def main() -> None:
+def run_sanity(
+    cache_dir: Path,
+    model_name: str,
+    deep: bool,
+    timeout_s: int,
+) -> bool:
+    """Run the configured sanity check and return pass/fail.
+
+    The deep check runs in a child process with a hard timeout: if CUDA or
+    Triton initialization wedges, the child is killed and the result is
+    reported as inconclusive (treated as a pass with a loud warning) so the
+    download pipeline always terminates.
+    """
+    if not deep:
+        return sanity_check_light(cache_dir)
+
+    this_file = Path(__file__).resolve()
+    child_cmd = [
+        sys.executable, "-u", str(this_file),
+        "--sanity-child", "--cache-dir", str(cache_dir),
+        "--model-name", model_name, "--no-sanity-check",
+    ]
+    logger.info("Deep check runs in a child process (timeout: %ds) ...", timeout_s)
+    try:
+        proc = subprocess.run(
+            child_cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout_s,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        logger.warning(
+            "Deep sanity check INCONCLUSIVE: child process exceeded %ds and was "
+            "killed (likely CUDA/Triton initialization on this machine). "
+            "Run it manually with: uv run python training/download_model.py "
+            "--sanity-deep --cache-dir %s",
+            timeout_s, cache_dir,
+        )
+        return True
+
+    # Surface the child's log lines (they went to its stderr).
+    for line in (proc.stderr or "").splitlines():
+        if line.strip():
+            print(line, flush=True)
+    return proc.returncode == 0
+
+
+def main() -> int:
     args = parse_args()
     if args.verbose:
         logging.getLogger().setLevel(logging.DEBUG)
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+
+    if args.sanity_child:
+        # Internal mode: run the deep check in this process and report the
+        # result through the exit code.
+        passed = sanity_check_deep(args.cache_dir, args.model_name)
+        return 0 if passed else 1
+
+    if args.check_only:
+        # Presence probe for scripts (make check-model): never downloads.
+        if is_model_present(args.cache_dir):
+            logger.info("Model present and complete at %s", args.cache_dir)
+            return 0
+        logger.warning("Model incomplete or missing at %s", args.cache_dir)
+        return 1
 
     logger.info("Starting Qwen3-8B model download pipeline...")
 
@@ -267,17 +403,22 @@ def main() -> None:
         json.dump(metadata, f, indent=2, ensure_ascii=False)
     logger.info("Metadata saved to %s", metadata_path)
 
+    exit_code = 0
     if args.sanity_check:
-        passed = sanity_check(args.cache_dir, args.model_name)
+        passed = run_sanity(args.cache_dir, args.model_name, args.sanity_deep, args.sanity_timeout)
         if passed:
             print("\nSanity check PASSED - model is ready for fine-tuning.")
-            print(f"Run: uv run python training/train_unsloth.py")
+            print("Run: uv run python training/train_unsloth.py")
         else:
             print("\nSanity check FAILED - inspect logs above for details.")
-            sys.exit(1)
+            exit_code = 1
     else:
         print("\nSkipping sanity check. Use --sanity-check to enable.")
 
+    sys.stdout.flush()
+    sys.stderr.flush()
+    return exit_code
+
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

@@ -180,19 +180,28 @@ These metrics are compared between the base Qwen3-8B model and the fine-tuned q3
 
 ### Alire Toolchain Management
 
-Development tools (gnatprove, gprbuild, gnatformat) are managed via Alire:
+Development tools (gnatprove, gprbuild, gnat) are managed via Alire. All Ada tool invocations run through `alr exec` (never against system binaries):
 
 - **`alire.toml`** - Clean publishing manifest (no dev toolchain dependencies)
-- **`alire-dev.toml`** - Development manifest declaring `gnatprove`, `gnatdoc_bin`, `gnatformat_bin` as dev dependencies (modeled after `../adacovex/alire-dev.toml` and `../Ada_CRDT/alire-dev.toml`)
+- **`alire-dev.toml`** - Development manifest declaring the dev toolchain (modeled after `../adacovex/alire-dev.toml` and `../Ada_CRDT/alire-dev.toml`)
+- **`scripts/ada_env.sh`** - Shell wrapper: runs any command inside the Alire environment
+- **`scripts/alire_env.py`** - Python helper: `find_tool("gnatprove")` resolves the managed binary
+- **`.alire-dev/`** - Gitignored throwaway Alire workspace (a copy of the dev manifest; the real manifests are never modified by tooling)
 
-Install the dev toolchain with:
-```bash
-alr build --manifest alire-dev.toml
-```
-
-Or via Make:
+Fetch the dev toolchain with:
 ```bash
 make prove
+```
+
+`alr 1.2.1` has no `--manifest` option, so `make prove` copies `alire-dev.toml` into `.alire-dev/` and resolves there. The eval pipeline and the defect validator resolve every tool through this environment and refuse to run against a missing managed tool.
+
+### Tests and validation
+
+```bash
+make test              # pytest unit tests (dataset builder, defect injector, sanitizers)
+make lint              # ruff + mypy over the project sources
+make validate-defects  # GNAT-compile dataset defect pairs, check claimed compiler messages
+make agents-tree       # regenerate the file tree in AGENTS.md
 ```
 
 ## License

@@ -29,16 +29,20 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import os
 import re
-import shutil
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "data" / "processing_scripts"))
+_SCRIPTS_DIR = Path(__file__).resolve().parent
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+sys.path.insert(0, str(_SCRIPTS_DIR.parent / "data" / "processing_scripts"))
 
 import build_dataset as bd
+from alire_env import ToolNotAvailable, alire_env_path, find_tool
 
 _DEFECT_FAMILIES: tuple[str, ...] = bd._DEFECT_FAMILIES
 
@@ -142,6 +146,33 @@ def entry_file(units: list[tuple[str, str, str]]) -> str:
     return bodies[0] if bodies else units[0][1]
 
 
+_GNAT: str | None = None
+
+
+def _gnat() -> str:
+    """Resolve gnat through the Alire environment (cached)."""
+    global _GNAT
+    if _GNAT is None:
+        try:
+            _GNAT = str(find_tool("gnat"))
+        except ToolNotAvailable as exc:
+            print(str(exc), file=sys.stderr)
+            print("  make prove", file=sys.stderr)
+            sys.exit(2)
+    return _GNAT
+
+
+def _alire_subprocess_env() -> dict[str, str]:
+    """Child env with the Alire toolchain first on PATH.
+
+    The gnat driver spawns gcc and other tool binaries itself, so they must
+    resolve to the Alire versions too, not just the top-level gnat.
+    """
+    env = dict(os.environ)
+    env["PATH"] = alire_env_path()
+    return env
+
+
 def compile_snippet(
     workdir: Path,
     code: str,
@@ -177,7 +208,7 @@ def compile_snippet(
     all_output: list[str] = []
     any_error = False
     for _unit_name, unit_fname, _t in units:
-        cmd = ["gnat", "compile", "-q", "-gnatc", "-j0"]
+        cmd = [_gnat(), "compile", "-q", "-gnatc", "-j0"]
         for include_dir in include_dirs or []:
             # gnatmake wants -I and the directory in one token: a separated
             # "-I" "dir" aborts with 'missing source directory name' (which
@@ -192,6 +223,7 @@ def compile_snippet(
                 text=True,
                 timeout=60,
                 check=False,
+                env=_alire_subprocess_env(),
             )
         except subprocess.TimeoutExpired:
             return False, "error: harness compile timeout"
@@ -315,10 +347,8 @@ def main() -> None:
     args = parser.parse_args()
 
     sources = args.source or [Path("../adacovex"), Path("../Ada_CRDT"), Path("../ada-eval")]
-    if shutil.which("gnat") is None:
-        print("gnat not found on PATH. Install GNAT or run under Alire:", file=sys.stderr)
-        print("  alr exec -- python scripts/validate_defects.py", file=sys.stderr)
-        sys.exit(2)
+    # Resolve gnat up front (exits with install instructions when missing).
+    _gnat()
 
     report: dict[str, object] = {"checked": 0, "skipped_originals_failing": 0, "results": {}, "failures": []}
     with tempfile.TemporaryDirectory(prefix="q3as-defects-") as tmp:

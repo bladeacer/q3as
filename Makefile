@@ -1,4 +1,4 @@
-.PHONY: help setup sync download build-dataset train generate eval eval-pipeline prove clean all check-model
+.PHONY: help setup sync download build-dataset train generate eval eval-pipeline prove ada-env test lint validate-defects agents-tree clean all check-model
 
 # bash so `set -o pipefail` works for tee'd targets (training.log capture).
 SHELL := /bin/bash
@@ -25,13 +25,18 @@ help: ## Show this help message
 	@echo "  make eval          - Run baseline evaluation with BLEU + ada-eval metrics"
 	@echo "                      (compilation, test, SPARK proof; base model comparison)"
 	@echo "  make eval-pipeline - Run full ada-eval BUILD/TEST/PROVE pipeline"
-	@echo "  make prove         - Install gnatprove/gprbuild from alire-dev.toml"
+	@echo "  make prove         - Fetch the Alire dev toolchain (gnatprove etc. from alire-dev.toml)"
+	@echo "  make test          - Run the Python unit tests (pytest)"
+	@echo "  make validate-defects - GNAT-compile defect pairs from the sibling repos and check"
+	@echo "                       the claimed compiler messages (scripts/validate_defects.py)"
+	@echo "  make agents-tree   - Regenerate the project file tree inside AGENTS.md"
+	@echo "  make lint          - Run ruff and mypy over the project sources"
 	@echo "  make clean         - Remove generated outputs and caches"
 	@echo ""
 	@echo "Usage: make [target]   (default: help)"
 
 sync: ## Install/update all dependencies
-	UV_LINK_MODE=copy uv	sync
+	UV_LINK_MODE=copy uv sync
 
 setup: ## One-shot bootstrap: shallow-clone sibling repos, .env, uv sync, Python headers
 	./setup.sh
@@ -40,8 +45,7 @@ download: ## Download and sanity-check the Qwen3-8B model
 	HF_HUB_DISABLE_XET=1 uv run python training/download_model.py --model-name unsloth/Qwen3-8B --cache-dir models/qwen3-8b
 
 check-model: ## Check if model exists; download if missing
-	@if [ -f models/qwen3-8b/config.json ] && [ -f models/qwen3-8b/model.safetensors.index.json ] && \
-		uv run python training/download_model.py --no-sanity-check >/dev/null 2>&1; then \
+	@if uv run python training/download_model.py --check-only >/dev/null 2>&1; then \
 		echo "Model already present at models/qwen3-8b - skipping download."; \
 	else \
 		echo "Model not found or incomplete - running download..."; \
@@ -78,8 +82,29 @@ eval: ## Run baseline evaluation (BLEU + compilation/test/SPARK metrics, base co
 eval-pipeline: ## Run full ada-eval BUILD/TEST/PROVE pipeline
 	uv run python eval/eval_pipeline.py --evals build test prove
 
-prove: ## Install gnatprove, gprbuild, gnatformat from dev manifest
-	alr build --manifest alire-dev.toml
+prove: ## Fetch the Alire dev toolchain (gnatprove, gnatdoc, gnatformat)
+	## alr 1.2.1 has no --manifest option, so the dev manifest is copied into
+	## the gitignored .alire-dev workspace and resolved there. Real manifests
+	## are never modified.
+	@mkdir -p .alire-dev
+	@cmp -s alire-dev.toml .alire-dev/alire.toml || cp alire-dev.toml .alire-dev/alire.toml
+	@cd .alire-dev && alr -n update
+
+ada-env: ## Show the PATH alr exec provides (debug helper)
+	@bash scripts/ada_env.sh printenv PATH | tr ':' '\n' | head -8
+
+test: ## Run the Python unit tests
+	uv run pytest tests/ -q
+
+lint: ## Run ruff and mypy over the project sources
+	uv run ruff check data/processing_scripts/build_dataset.py scripts/ eval/ tests/
+	uv run mypy data/processing_scripts/build_dataset.py scripts/alire_env.py scripts/gen_agents_tree.py
+
+validate-defects: ## Compile-check dataset defect pairs with the Alire GNAT
+	uv run python scripts/validate_defects.py
+
+agents-tree: ## Regenerate the project file tree section in AGENTS.md
+	uv run python scripts/gen_agents_tree.py
 
 all: check-model build-dataset train generate eval eval-pipeline ## Run full pipeline: download (if needed), build dataset, train, generate, evaluate
 	@echo ""

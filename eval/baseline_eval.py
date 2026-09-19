@@ -26,11 +26,17 @@ import argparse
 import json
 import logging
 import re
-import shutil
 import sys
 from collections import Counter
 from pathlib import Path
 from typing import Any
+
+# Add scripts/ so the Alire environment helper is importable
+_SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "scripts"
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+
+from alire_env import has_tool
 
 logger = logging.getLogger("q3as_eval")
 
@@ -42,10 +48,10 @@ BASE_MODEL_LABEL = "base_qwen3-8b"
 
 
 def check_tools_available() -> bool:
-    """Check if required GNAT tools are available."""
+    """Check if required GNAT tools are available in the Alire environment."""
     for tool in ["gnatprove", "gprbuild", "gnatformat"]:
-        if shutil.which(tool) is None:
-            logger.warning("Required tool not found: %s", tool)
+        if not has_tool(tool):
+            logger.warning("Required tool not found in the Alire environment: %s", tool)
             return False
     return True
 
@@ -354,8 +360,8 @@ def main() -> None:
     # Check tool availability
     tools_ok = check_tools_available()
     if not tools_ok:
-        logger.warning("GNAT tools (gnatprove, gprbuild, gnatformat) not found.")
-        logger.warning("Install them via `make prove` (alr build --manifest alire-dev.toml).")
+        logger.warning("GNAT tools (gnatprove, gprbuild, gnatformat) not found in the Alire environment.")
+        logger.warning("Install them via `make prove` (Alire dev workspace build).")
         logger.warning("BLEU and compliance metrics will still be computed.")
 
     methodology = load_eval_methodology()
