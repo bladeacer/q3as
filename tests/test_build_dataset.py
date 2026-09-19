@@ -178,7 +178,9 @@ class TestInjectDefectSyntax:
         broken, diagnosis, compiler = result
         assert "package Foo is" not in broken
         assert "package Foo" in broken
-        assert "is" in diagnosis and "keyword" in compiler
+        # GNAT 14 reports the dropped 'is' as missing "is" (verified).
+        assert 'missing "is"' in compiler
+        assert "is" in diagnosis
 
     def test_semicolon_removal(self):
         code = "package Foo is\n   X : Integer := 1;\nend Foo;\n"
@@ -187,7 +189,7 @@ class TestInjectDefectSyntax:
         broken, diagnosis, compiler = result
         # Either the package-is or the semicolon defect applies; the
         # compiler message must be one of the two verified GNAT errors.
-        assert compiler in ('error: missing ";"', 'error: keyword "body" expected here')
+        assert compiler in ('error: missing ";"', 'error: missing "is"')
         assert broken != code
 
 

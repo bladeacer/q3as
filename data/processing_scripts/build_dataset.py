@@ -903,17 +903,22 @@ def inject_defect(code: str, family: str) -> tuple[str, str, str] | None:
 
     if family == "syntax":
         # Drop the 'is' of a package declaration: a classic compile error
-        # (verified against GNAT 14: keyword "body" expected here).
-        m = re.search(r"(\bpackage\s+\w+(\s+\w+)?)\s+is\b", code)
+        # (verified against GNAT 14 for spec, body, and 'with aspect'
+        # forms: the compiler reports missing "is" at the unit name).
+        # The 'is' must follow the unit name on the SAME line: a later
+        # line 'is' would belong to a nested construct, and removing the
+        # wrong 'is' leaves the snippet valid (verified: a body whose
+        # spec is absent kept compiling with the mutated line inside it).
+        m = re.search(r"(\bpackage\s+\w+(\s+\w+)?)\s+is\b[^\n]*$", code, re.MULTILINE)
         if m:
             broken = code[:m.start()] + m.group(1) + " " + code[m.end():]
             return (
                 broken,
                 (
                     "The package declaration misses the keyword is. "
-                    "The compiler reports the error at the package name."
+                    'The compiler reports missing "is" at the unit name.'
                 ),
-                'error: keyword "body" expected here',
+                'error: missing "is"',
             )
         # Drop the semicolon of a simple object declaration.
         m = re.search(r"^\s*(\w[\w.]*)\s*:\s*(?:constant\s+)?[\w.]+", code, re.MULTILINE)
@@ -941,11 +946,46 @@ def inject_defect(code: str, family: str) -> tuple[str, str, str] | None:
             if broken_context == context:
                 return None
             broken = broken_context + unit
+            # The compiler message depends on how the code names the unit
+            # (verified against GNAT 14):
+            # - full dotted name (Ada.Text_IO.Put_Line): the parent chain is
+            #   undefined, plus the missing-with hint.
+            # - short prefix (Text_IO.Put_Line) or the unit name itself
+            #   (Spark_Discrete_Set.Contains): the name is not visible.
+            # - dot-free names: a remaining use clause anchors the
+            #   missing-with hint.
+            last = victim.split(".")[-1]
+            full_prefix_used = "." in victim and bool(
+                re.search(rf"(?<![.\w]){re.escape(victim)}\s*\.", unit)
+            )
+            short_prefix_used = bool(
+                re.search(rf"(?<![.\w]){re.escape(last)}\s*\.", unit)
+            )
+            if full_prefix_used:
+                return (
+                    broken,
+                    (
+                        f"The code uses {victim} but the context clause does not import it. "
+                        "The compiler reports an undefined name and names the missing "
+                        "with clause."
+                    ),
+                    f'error: missing "with {victim};"',
+                )
+            if short_prefix_used:
+                return (
+                    broken,
+                    (
+                        f"The code uses {victim} through the short prefix {last} "
+                        "but the context clause does not import it. "
+                        f'The compiler reports {last} as not visible.'
+                    ),
+                    f'error: "{last}" is not visible',
+                )
             return (
                 broken,
                 (
-                    f"The code uses {victim} but the context clause does not import it. "
-                    "The compiler reports an undefined name and names the missing "
+                    f"The code uses names of {victim} but the context clause "
+                    "does not import it. The compiler names the missing "
                     "with clause."
                 ),
                 f'error: missing "with {victim};"',
@@ -953,70 +993,64 @@ def inject_defect(code: str, family: str) -> tuple[str, str, str] | None:
         return None
 
     if family == "visibility":
-        # Verified against GNAT 14:
-        # - dotted reference (Ada.Text_IO.Put_Line) with the with-clause
-        #   removed -> '"Text_IO" is not visible'
-        # - dot-free reference (Put_Line) with the use-clause removed ->
-        #   '"Put_Line" is not visible'
-        # The with-clause case is the context family's job when the code
-        # only uses dotted names. Here we handle dot-free direct names,
-        # which need a use clause at minimum.
+        # Verified against GNAT 14: removing the use clause while dot-free
+        # names of the package stay in use yields
+        #   error: "Put_Line" is not visible
+        #   error: non-visible declaration at <pkg spec>:<line>
+        # The with-clause case is the context family's job: it knows how
+        # the code names the unit and picks the matching message.
         use_m = re.search(r"^\s*use\s+([\w.]+)\s*;", code, re.MULTILINE)
         if use_m:
             used_pkg = use_m.group(1)
-            short = used_pkg.split(".")[-1]
             # A dotted reference through the package prefix makes the use
             # clause redundant: removing it changes nothing.
+            short = used_pkg.split(".")[-1]
             has_dotted_ref = bool(re.search(rf"(?<![.\w]){re.escape(short)}\.[A-Za-z_]", unit))
-            # Dot-free reference = any identifier from the used package that
-            # is not a language keyword and is immediately followed by an
-            # argument parenthesis. Only call statements qualify reliably.
+            # Dot-free reference = a call statement: an identifier that is
+            # not a language keyword and is immediately followed by an
+            # argument parenthesis.
             keywords = {
                 "begin", "end", "is", "in", "out", "null", "return",
                 "procedure", "function", "package", "type", "subtype",
                 "declare", "if", "then", "else", "elsif", "for", "while",
                 "loop", "case", "when", "exit", "pragma", "new", "range",
+                # Reserved words that can legitimately precede "(" in real
+                # code but never start a call: separate (Parent), not (X).
+                "separate", "overriding", "generic", "not", "and", "or",
+                "xor", "mod", "rem", "abs", "delay", "raise", "select",
+                "accept", "entry", "task", "protected", "body", "renames",
+                "access", "all", "abstract", "limited", "at", "goto",
             }
             candidates = re.findall(r"(?<![.\w:])([A-Za-z_]\w*)\s*\(", unit)
-            has_dot_free_ref = any(c.lower() not in keywords for c in candidates)
-            if not has_dotted_ref and has_dot_free_ref:
+            # Names declared inside the snippet stay visible without the
+            # use clause, so they are not offenders.
+            declared = set(re.findall(r"\b(?:procedure|function)\s+(\w+)", code))
+            declared |= {
+                m for m in re.findall(
+                    r"^\s*(\w+)\s*:\s*(?:constant\s+)?[\w.]+", unit, re.MULTILINE,
+                )
+            }
+            offenders = [
+                c for c in candidates
+                if c.lower() not in keywords and c not in declared
+            ]
+            if not has_dotted_ref and offenders:
                 broken = re.sub(
                     rf"^\s*use\s+{re.escape(used_pkg)}\s*;\s*\n", "", code, flags=re.MULTILINE
                 )
                 if broken != code:
+                    # The first offender in source order is the first name
+                    # the compiler rejects.
                     return (
                         broken,
                         (
                             f"The code references names of {used_pkg} directly. "
                             "The use clause that makes them visible is missing. "
-                            "The compiler reports the name as not visible."
+                            f'The compiler reports {offenders[0]} as not visible.'
                         ),
-                        f'error: "{short}" or its names are not visible',
+                        f'error: "{offenders[0]}" is not visible',
                     )
                 return None
-        with_m = re.search(r"^\s*with\s+([\w.]+)\s*;", code, re.MULTILINE)
-        if with_m and not use_m:
-            imported = with_m.group(1)
-            last = imported.split(".")[-1]
-            has_dotted_ref = bool(re.search(rf"(?<![.\w]){re.escape(last)}\.[A-Za-z_]", unit))
-            # A bare \b{last}\b also matches the middle of Ada.Text_IO
-            # (the dot is a word boundary), so require no dot before the
-            # name: that means the code uses the name as a prefix itself.
-            has_prefix_ref = bool(re.search(rf"(?<![.\w]){re.escape(last)}\b", unit))
-            if not has_dotted_ref and has_prefix_ref:
-                broken = re.sub(
-                    rf"^\s*with\s+{re.escape(imported)}\s*;\s*\n", "", code, flags=re.MULTILINE
-                )
-                if broken != code:
-                    return (
-                        broken,
-                        (
-                            f"The code references names of {imported} directly. "
-                            "The context clause that makes them visible is missing. "
-                            "The compiler reports the name as not visible."
-                        ),
-                        f'error: "{last}" is not visible',
-                    )
         return None
 
     if family == "contract":
