@@ -6,22 +6,49 @@ Specialized fine-tuning initiative targeting the full Ada language spectrum: **A
 
 `q3as` ingests Ada source trees (`.ads`, `.adb`, `.gpr`, `alire.toml`), pairs specification and implementation files, detects the target Ada standard via heuristic rules, and produces a standardized JSONL dataset formatted with the OpenAI/Qwen chat template (`system`, `user`, `assistant` messages) for QLoRA fine-tuning with Unsloth on 8 GB VRAM.
 
+### Training turn kinds
+
+The dataset builder emits five kinds of turns:
+
+| Kind | What it teaches |
+|---|---|
+| `code_pair` | Spec/body completion from real Ada trees |
+| `defect_pair` | Correct code next to deliberately broken variants (syntax, missing context clause, visibility, contract, spec/body mismatch) with a diagnosis and the corrected code. The model learns when code goes wrong instead of hallucinating correctness. |
+| `doc_qa` | Ada code blocks extracted from AdaCore course material, each with a plain completion answer and an STE-compliant explanation answer |
+| `toolchain_qa` | Question and answer turns distilled from the AdaCore agent skills: gnatprove, alire, gnatdoc, gnattest, gnatfuzz |
+
+### Writing style: Simplified Technical English
+
+Every generated explanation follows **ASD-STE100 Simplified Technical English** (distilled from the SimpleEnglish agent skill): active voice, short sentences, no em-dashes, no hedges, one word one meaning, and each technical term defined at first use. The system prompts embed the rule block and a 32-term Ada/SPARK terminology glossary. A sanitizer rewrites prose (never code, identifiers, or quoted errors) and a self-check counts residual violations per build; the counts land in `dataset_metadata.json`.
+
 ## Project Credits
 
 This project builds on and draws data from the following upstream projects:
 
-- **[adacovex](https://github.com/bladeacer/adacovex)** (`../adacovex`) — Zero-dependency Ada/SPARK command line tool for coverage analysis, proof verification, test-result parsing, and multi-standard safety-compliance assessment (DO-178C / ISO 26262 / IEC 62304). Provides Ada/SPARK source code with contract specifications for fine-tuning data. *(Apache-2.0)*
-- **[Ada_CRDT](https://github.com/bladeacer/Ada_CRDT)** (`../Ada_CRDT`) — Conflict-Free Replicated Data Types library for Ada/SPARK. Provides additional Ada specification/implementation pairs for fine-tuning data diversity. *(MIT)*
-- **[Ada-83-TLALOC](https://github.com/ViMoBr/Ada-83-TLALOC)** (`../Ada-83-TLALOC`) — Ada 83 compiler and test suite preserving the legacy of Ada 83 (MIL-STD-1815A-1983). Provides Ada 83-era source code for training data covering legacy Ada 83 patterns. *(GPL-3.0-or-later with GCC runtime exception; test suite CC-BY-SA-4.0)* — **the author has given explicit permission to use this code for model training.**
-- **[ada-eval](https://github.com/AdaCore/ada-eval)** (`../ada-eval`) — Framework for evaluating LLM-based tools for Ada/SPARK use cases. Provides evaluation methodology, compacted and expanded dataset definitions (spark_learn, spark_custom, spark_human_eval_silver), and benchmark categories; its sample sources are also used as Ada code for training data. *(Apache-2.0)*
-- **[AdaCore/learn](https://github.com/AdaCore/learn)** (`../learn`) — Sources for AdaCore's learn.adacore.com website: courses (intro-to-ada, intro-to-spark, advanced-ada, advanced-spark, Guidelines for Safe and Secure Ada/SPARK, GNAT toolchain intros, domain-specific AdaCore technologies), booklets, and labs. Ada code blocks embedded in the RST course material are extracted as documentation-QA style training turns. *(CC-BY-4.0)*
-- **[agent-sh/ada-spark](https://github.com/agent-sh/ada-spark)** (`../ada-spark`) - An agent skill that teaches coding agents to write idiomatic, correct, current Ada and SPARK: a stale-to-current correction map (GNAT Community → Alire + GNAT FSF, `pragma Precondition` → `Pre`/`Post` aspects, CodePeer → GNAT SAS), SPARK assurance levels and proof guidance, and embedded/Ravenscar profiles. SKILL.md and agent-knowledge guidance are embedded into training system prompts. *(MIT)*
+- **[adacovex](https://github.com/bladeacer/adacovex)** (`../adacovex`) - Zero-dependency Ada/SPARK command line tool for coverage analysis, proof verification, test-result parsing, and multi-standard safety-compliance assessment (DO-178C / ISO 26262 / IEC 62304). Provides Ada/SPARK source code with contract specifications for fine-tuning data. *(Apache-2.0)*
+- **[Ada_CRDT](https://github.com/bladeacer/Ada_CRDT)** (`../Ada_CRDT`) - Conflict-Free Replicated Data Types library for Ada/SPARK. Provides additional Ada specification/implementation pairs for fine-tuning data diversity. *(MIT)*
+- **[Ada-83-TLALOC](https://github.com/ViMoBr/Ada-83-TLALOC)** (`../Ada-83-TLALOC`) - Ada 83 compiler and test suite preserving the legacy of Ada 83 (MIL-STD-1815A-1983). Provides Ada 83-era source code for training data covering legacy Ada 83 patterns. *(GPL-3.0-or-later with GCC runtime exception; test suite CC-BY-SA-4.0)* - **the author has given explicit permission to use this code for model training.**
+- **[ada-eval](https://github.com/AdaCore/ada-eval)** (`../ada-eval`) - Framework for evaluating LLM-based tools for Ada/SPARK use cases. Provides evaluation methodology, compacted and expanded dataset definitions (spark_learn, spark_custom, spark_human_eval_silver), and benchmark categories; its sample sources are also used as Ada code for training data. *(Apache-2.0)*
+- **[AdaCore/learn](https://github.com/AdaCore/learn)** (`../learn`) - Sources for AdaCore's learn.adacore.com website: courses (intro-to-ada, intro-to-spark, advanced-ada, advanced-spark, Guidelines for Safe and Secure Ada/SPARK, GNAT toolchain intros, domain-specific AdaCore technologies), booklets, and labs. Ada code blocks embedded in the RST course material are extracted as documentation-QA style training turns. *(CC-BY-4.0)*
+- **[agent-sh/ada-spark](https://github.com/agent-sh/ada-spark)** (`../ada-spark`) - An agent skill that teaches coding agents to write idiomatic, correct, current Ada and SPARK: a stale-to-current correction map (GNAT Community to Alire + GNAT FSF, `pragma Precondition` to `Pre`/`Post` aspects, CodePeer to GNAT SAS), SPARK assurance levels and proof guidance, and embedded/Ravenscar profiles. SKILL.md and agent-knowledge guidance are embedded into training system prompts. *(MIT)*
+- **[AminBlg/SimpleEnglish](https://github.com/AminBlg/SimpleEnglish)** (`../SimpleEnglish`) - An agent skill that makes LLMs write plain English with the discipline of ASD-STE100 Simplified Technical English: short sentences, active voice, simple tenses, one word one meaning, condition before command, no em-dashes, every technical term defined at first use. Its writing rules and slop-to-plain word map govern every explanation this project generates, and a distilled rule block is embedded into training system prompts. *(MIT)*
+- **[AdaCore/skills](https://github.com/AdaCore/skills)** (`../skills`) - AdaCore's official agent skills for their toolchain: gnatprove, alire, gnatdoc, gnattest, and gnatfuzz. The SKILL.md files are embedded into training system prompts and converted to toolchain question/answer turns, so the model learns how gnatprove and the rest of the toolchain are actually used (invocation, output reading, proof workflow, Alire crate management). *(Apache-2.0)*
 
-For training data that is not from my source code repositories, explicit permission was seeked beforehand. We want to be transparent with training data sources. Licensing summary: Apache-2.0 and MIT code is compatible with permissive redistribution with attribution; CC-BY-4.0 course material is used with attribution; the GPL-licensed Ada-83-TLALOC code is used for model training only (weights are not source-code redistribution) and is additionally covered by the author's explicit permission.
+For training data that is not from my source code repositories, explicit permission was seeked beforehand. We want to be transparent with training data sources. Licensing summary: Apache-2.0 and MIT code is compatible with permissive redistribution with attribution; CC-BY-4.0 course material is used with attribution; the GPL-licensed Ada-83-TLALOC code is used for model training only (weights are not source-code redistribution) and is additionally covered by the author's explicit permission. The SimpleEnglish skill paraphrases the ASD-STE100 standard and reproduces no spec text or dictionary content; the same discipline applies to our distilled rule block.
 
 ## Quick Start
 
-### 1. Clone the sibling data repositories
+### 1. Set up the environment
+
+Run the one-shot bootstrap. It shallow-clones the sibling data and guidance repositories into the parent directory, creates `.env` from `.env.dev`, installs dependencies with `uv sync`, and extracts local Python headers for Triton when needed:
+
+```bash
+./setup.sh          # everything
+./setup.sh --repos  # only the sibling repositories
+./setup.sh --deps   # only .env, uv sync, python headers
+```
+
+Or via Make: `make setup`.
 
 The pipeline reads training/eval data from shallow clones in the **parent directory** of this repo:
 
@@ -32,6 +59,8 @@ git clone --depth 1 https://github.com/ViMoBr/Ada-83-TLALOC.git      ../Ada-83-T
 git clone --depth 1 https://github.com/AdaCore/ada-eval.git          ../ada-eval
 git clone --depth 1 https://github.com/AdaCore/learn.git             ../learn
 git clone --depth 1 https://github.com/agent-sh/ada-spark.git        ../ada-spark
+git clone --depth 1 https://github.com/AminBlg/SimpleEnglish.git     ../SimpleEnglish
+git clone --depth 1 https://github.com/AdaCore/skills.git            ../skills
 ```
 
 These stay outside the q3as repository on purpose: the model only reads their code/docs as training data, so there is no reason to vendor copies inside the project (and doing so would bloat the repo and blur licensing provenance).
@@ -82,7 +111,7 @@ The downloaded base model lives at `models/qwen3-8b` and is the single source of
    cp .env.dev .env
    ```
 3. Edit `.env` and replace `your_huggingface_token_here` with your actual token
-4. The `.env` file is git-ignored — your token will not be committed
+4. The `.env` file is git-ignored, so your token will not be committed
 
 The token is loaded automatically from `.env` when running `download_model.py`. You can also set it manually:
 
@@ -95,6 +124,7 @@ uv run python training/download_model.py
 
 ```
 q3as/
+├── setup.sh                      # One-shot bootstrap: sibling repos, .env, deps
 ├── pyproject.toml
 ├── README.md
 ├── data/
@@ -152,8 +182,8 @@ These metrics are compared between the base Qwen3-8B model and the fine-tuned q3
 
 Development tools (gnatprove, gprbuild, gnatformat) are managed via Alire:
 
-- **`alire.toml`** — Clean publishing manifest (no dev toolchain dependencies)
-- **`alire-dev.toml`** — Development manifest declaring `gnatprove`, `gnatdoc_bin`, `gnatformat_bin` as dev dependencies (modeled after `../adacovex/alire-dev.toml` and `../Ada_CRDT/alire-dev.toml`)
+- **`alire.toml`** - Clean publishing manifest (no dev toolchain dependencies)
+- **`alire-dev.toml`** - Development manifest declaring `gnatprove`, `gnatdoc_bin`, `gnatformat_bin` as dev dependencies (modeled after `../adacovex/alire-dev.toml` and `../Ada_CRDT/alire-dev.toml`)
 
 Install the dev toolchain with:
 ```bash

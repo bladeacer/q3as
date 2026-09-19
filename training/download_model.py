@@ -226,7 +226,7 @@ def sanity_check(cache_dir: Path, model_name: str) -> bool:
         logger.info(
             "Model verified - name: %s, params: %s, layers: %d",
             config.model_type,
-            f"{config.num_parameters:,}",
+            f"{sum(p.numel() for p in model.parameters()):,}",
             config.num_hidden_layers,
         )
 

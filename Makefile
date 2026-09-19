@@ -1,11 +1,21 @@
-.PHONY: help sync download build-dataset train generate eval eval-pipeline prove clean all check-model
+.PHONY: help setup sync download build-dataset train generate eval eval-pipeline prove clean all check-model
+
+# bash so `set -o pipefail` works for tee'd targets (training.log capture).
+SHELL := /bin/bash
 
 .DEFAULT_GOAL := help
+
+# Local Python dev headers (no sudo): python3.13-dev debs extracted to ~/.cache
+# so Triton can compile its CUDA driver shim (needs Python.h).
+PY_HDR_ROOT ?= $(HOME)/.cache/q3as-python-headers/usr/include
+PY_HDRS := $(PY_HDR_ROOT)/python3.13:$(PY_HDR_ROOT)/x86_64-linux-gnu:$(PY_HDR_ROOT)
+EXPORT_HEADERS := $(if $(wildcard $(PY_HDR_ROOT)/python3.13/Python.h),CPATH=$(PY_HDRS),)
 
 help: ## Show this help message
 	@echo "q3as - Qwen 3 Ada SPARK - Available targets:"
 	@echo ""
 	@echo "  make all           - Run full pipeline: model download (if needed), dataset, train (logs to training.log), generate, evaluate"
+	@echo "  make setup         - One-shot bootstrap: shallow-clone sibling repos (data + skills), .env, uv sync"
 	@echo "  make sync          - Install/update all dependencies via uv sync"
 	@echo "  make download      - Download and sanity-check the Qwen3-8B model (unsloth/Qwen3-8B -> models/qwen3-8b)"
 	@echo "  make build-dataset - Build the training dataset from Ada source trees"
@@ -21,7 +31,10 @@ help: ## Show this help message
 	@echo "Usage: make [target]   (default: help)"
 
 sync: ## Install/update all dependencies
-	UV_LINK_MODE=copy uv sync
+	UV_LINK_MODE=copy uv	sync
+
+setup: ## One-shot bootstrap: shallow-clone sibling repos, .env, uv sync, Python headers
+	./setup.sh
 
 download: ## Download and sanity-check the Qwen3-8B model
 	HF_HUB_DISABLE_XET=1 uv run python training/download_model.py --model-name unsloth/Qwen3-8B --cache-dir models/qwen3-8b
@@ -37,7 +50,9 @@ check-model: ## Check if model exists; download if missing
 
 build-dataset: ## Build the training dataset from Ada source trees
 	## Includes ../adacovex, ../Ada_CRDT, ../Ada-83-TLALOC, and ../ada-eval as Ada code sources,
-	## ../learn (AdaCore courses, CC-BY-4.0) for doc-QA turns, and ../ada-spark (MIT) guidance in system prompts
+	## ../learn (AdaCore courses, CC-BY-4.0) for doc-QA turns, and agent-skill guidance in
+	## system prompts: ../ada-spark (MIT), ../SimpleEnglish (MIT, STE rules), ../skills (Apache-2.0,
+	## AdaCore toolchain skills). Also emits correct-vs-wrong defect pairs.
 	uv run python data/processing_scripts/build_dataset.py \
 		--input-dir data/raw/ \
 		--extra-input-dir ../adacovex \
@@ -45,10 +60,13 @@ build-dataset: ## Build the training dataset from Ada source trees
 		--extra-input-dir ../Ada-83-TLALOC \
 		--extra-input-dir ../ada-eval \
 		--doc-dir ../learn \
-		--guidance-dir ../ada-spark
+		--guidance-dir ../ada-spark \
+		--guidance-dir ../SimpleEnglish \
+		--guidance-dir ../skills
 
-train: ## Run QLoRA fine-tuning with Unsloth on the local base model (models/qwen3-8b)
-	HF_HUB_DISABLE_XET=1 HF_DEACTIVATE_ASYNC_LOAD=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+train: ## Run QLoRA fine-tuning with Unsloth on the local base model (models/qwen3-8b); full stdout captured to training.log
+	@set -o pipefail; \
+	HF_HUB_DISABLE_XET=1 HF_DEACTIVATE_ASYNC_LOAD=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True $(EXPORT_HEADERS) \
 		uv run python -u training/train_unsloth.py 2>&1 | tee -a training.log
 
 generate: ## Generate Ada code with the fine-tuned and base (local download) models

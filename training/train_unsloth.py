@@ -47,9 +47,10 @@ def parse_args() -> argparse.Namespace:
         help="Path to the training dataset JSONL file.",
     )
     parser.add_argument("--lr", type=float, default=2e-4, help="Learning rate.")
-    parser.add_argument("--batch-size", type=int, default=4, help="Per-device batch size.")
-    parser.add_argument("--gradient-accumulation", type=int, default=4, help="Gradient accumulation steps.")
+    parser.add_argument("--batch-size", type=int, default=1, help="Per-device batch size (8 GB VRAM: keep at 1).")
+    parser.add_argument("--gradient-accumulation", type=int, default=8, help="Gradient accumulation steps (effective batch = batch-size x this).")
     parser.add_argument("--max-steps", type=int, default=500, help="Maximum training steps.")
+    parser.add_argument("--save-steps", type=int, default=100, help="Save a checkpoint every N steps.")
     parser.add_argument("--max-seq-length", type=int, default=2048, help="Maximum sequence length.")
     parser.add_argument("--lora-rank", type=int, default=8, help="LoRA rank.")
     parser.add_argument("--lora-alpha", type=int, default=16, help="LoRA alpha.")
@@ -103,12 +104,12 @@ def setup_training_environment(args: argparse.Namespace) -> dict[str, Any]:
         "seed": args.seed,
         "optim": "adamw_8bit",
         "weight_decay": 0.01,
-        "warmup_ratio": 0.03,
+        "warmup_steps": 10,
         "lr_scheduler_type": "cosine",
         "logging_steps": 10,
         "eval_strategy": "no",
         "save_strategy": "steps",
-        "save_steps": 100,
+        "save_steps": args.save_steps,
         "save_total_limit": 3,
         "fp16": False,
         "bf16": True,
@@ -165,13 +166,14 @@ def main() -> None:
         model = FastLanguageModel.get_peft_model(
             model,
             r=config["lora_rank"],
+            # Attention + MLP projections only. Training embed_tokens/lm_head
+            # (622M params each) blows past 8 GB VRAM.
             target_modules=[
                 "q_proj", "k_proj", "v_proj", "o_proj",
                 "gate_proj", "up_proj", "down_proj",
-                "embed_tokens", "lm_head",
             ],
             lora_alpha=config["lora_alpha"],
-            lora_dropout=0.05,
+            lora_dropout=0,
             bias="none",
             use_gradient_checkpointing="unsloth",
             random_state=config["seed"],
@@ -211,9 +213,25 @@ def main() -> None:
 
         output_dir = Path(config["output_dir"])
 
+        # Free training state before exporting. The merged-16bit save
+        # dequantizes base weights on GPU; leftover optimizer/gradients and
+        # allocator cache OOM an 8 GB card during the merge.
+        import gc
+
+        del trainer
+        gc.collect()
+
+        import torch
+
+        torch.cuda.empty_cache()
+
         # Save a merged 16-bit model (base weights + LoRA) plus the adapter.
         # The eval pipeline (eval/generate.py, eval/baseline_eval.py) loads
         # this output with plain transformers, so the merged form is required.
+        # maximum_memory_usage caps how much VRAM merged weights may occupy
+        # before unsloth spills them to temporary_location on disk (the GPU
+        # still holds the 4-bit base at this point, so keep the cap low).
+
         from unsloth import unsloth_save_model
 
         unsloth_save_model(
@@ -221,6 +239,8 @@ def main() -> None:
             tokenizer,
             save_directory=str(output_dir),
             save_method="merged_16bit",
+            temporary_location="outputs/_unsloth_save_buffers",
+            maximum_memory_usage=0.15,
         )
         logger.info("Merged 16-bit model saved to %s", output_dir)
 
