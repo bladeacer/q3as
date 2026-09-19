@@ -2,10 +2,11 @@ name = "q3as"
 description = "Qwen 3 Ada SPARK fine-tuning pipeline with evaluation"
 version = "0.1.0"
 project-files = []
-authors = ["q3as Contributors"]
-maintainers = ["q3as Contributors"]
+authors = ["bladeacer"]
+maintainers = ["bladeacer <wg.nick.exe@gmail.com>"]
+maintainers-logins = ["bladeacer"]
 licenses = "Apache-2.0"
-website = "https://github.com/q3as/q3as"
+website = "https://github.com/bladeacer/q3as"
 tags = ["ada", "spark", "fine-tuning", "evaluation", "code-generation"]
 
 [environment]
