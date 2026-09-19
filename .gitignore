@@ -5,3 +5,6 @@ data/processed
 outputs
 unsloth_compiled_cache/
 .env
+.venv
+.ruff_cache
+.mypy_cache

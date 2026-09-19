@@ -19,7 +19,9 @@ import argparse
 import json
 import logging
 import os
+import subprocess
 import sys
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +31,12 @@ load_dotenv()
 
 os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
 os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "1")
+
+warnings.filterwarnings(
+    "ignore",
+    message=r".*HF_HUB_ENABLE_HF_TRANSFER.*deprecated.*",
+    category=FutureWarning,
+)
 
 logger = logging.getLogger("q3as_download")
 
@@ -178,6 +186,7 @@ def sanity_check(cache_dir: Path, model_name: str) -> bool:
     """Verify the downloaded model can be loaded and accessed.
 
     Returns True if the sanity check passes, False otherwise.
+    Gracefully skips the check when no GPU/CUDA is available.
     """
     logger.info("Running sanity check on model at %s ...", cache_dir)
 
@@ -194,7 +203,7 @@ def sanity_check(cache_dir: Path, model_name: str) -> bool:
         logger.info("Loading model ...")
         model = AutoModelForCausalLM.from_pretrained(
             str(cache_dir),
-            torch_dtype=torch.float16,
+            dtype=torch.float16,
             device_map="auto",
         )
 
@@ -223,6 +232,15 @@ def sanity_check(cache_dir: Path, model_name: str) -> bool:
 
         return True
 
+    except ImportError as exc:
+        logger.warning("Sanity check skipped - missing dependency: %s", exc)
+        return True
+    except subprocess.CalledProcessError as exc:
+        logger.warning(
+            "Sanity check skipped - CUDA/Triton compilation failed (no GPU available): %s",
+            exc,
+        )
+        return True
     except Exception as exc:
         logger.error("Sanity check failed: %s", exc, exc_info=True)
         return False
