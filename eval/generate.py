@@ -18,13 +18,22 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import logging
+import os
 import re
+import subprocess
 import sys
 import time
 from pathlib import Path
 from typing import Any
+
+# The host may have less RAM than the model needs in bf16 (8B model -> ~16 GB
+# of weights). Setting these before transformers is imported keeps the loader
+# synchronous and bounds what accumulate in the allocator.
+os.environ.setdefault("HF_DEACTIVATE_ASYNC_LOAD", "1")
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 logger = logging.getLogger("q3as_generate")
 GENERATED_DIR = Path("outputs/generated_solutions")
@@ -32,6 +41,10 @@ DEFAULT_BASE_MODEL = Path("models/qwen3-8b")
 _ADA_EVAL_SRC = Path(__file__).resolve().parents[1].parent / "ada-eval" / "src"
 if str(_ADA_EVAL_SRC) not in sys.path:
     sys.path.insert(0, str(_ADA_EVAL_SRC))
+
+# Long prompts push up KV-cache and activation memory at generation time; on
+# a 7 GB host RAM / 8 GB VRAM box they are truncated before tokenization.
+MAX_PROMPT_CHARS = 24000
 
 
 def parse_args() -> argparse.Namespace:
@@ -70,7 +83,50 @@ def parse_args() -> argparse.Namespace:
         "--verbose", "-v", action="store_true",
         help="Enable debug logging.",
     )
+    parser.add_argument(
+        "--worker", action="store_true", help=argparse.SUPPRESS,
+    )
     return parser.parse_args()
+
+
+def _worker_parser() -> argparse.ArgumentParser:
+    """Argument parser for the single-model generation worker subprocess."""
+    parser = argparse.ArgumentParser(description="Single-model generation worker.")
+    parser.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--model-path", type=Path, required=True)
+    parser.add_argument("--base-model-path", type=Path, required=True)
+    parser.add_argument("--model-label", type=str, required=True)
+    parser.add_argument("--dataset", type=str, default=None)
+    parser.add_argument("--max-samples", type=int, default=20)
+    parser.add_argument("--max-new-tokens", type=int, default=1024)
+    parser.add_argument("--temperature", type=float, default=0.7)
+    parser.add_argument("--enable-thinking", action="store_true", default=False)
+    parser.add_argument("--verbose", action="store_true")
+    return parser
+
+
+def _run_worker(args: argparse.Namespace) -> int:
+    """Load one model, generate for all datasets, print a JSON summary, exit.
+
+    Each model runs in its own process: a completed transformers/bitsandbytes
+    load leaves the CUDA context oversized, so a second load in the same
+    process can OOM even after empty_cache. A fresh process starts with a
+    pristine GPU, which keeps dual-model runs inside 8 GB VRAM.
+    """
+    if args.verbose:
+        logging.getLogger().setLevel(logging.DEBUG)
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s [%(levelname)s] [worker] %(message)s"
+    )
+
+    model, tokenizer = load_model(args.model_path, args.base_model_path)
+    results = run_generation_for_model(
+        model, tokenizer, args.model_label,
+        find_expanded_datasets(args.dataset), args,
+    )
+    free_model_memory(model, tokenizer)
+    print(json.dumps(results))
+    return 0
 
 
 def find_expanded_datasets(
@@ -128,22 +184,96 @@ def extract_ada_code(generated_text: str) -> str:
     return generated_text.strip()
 
 
-def load_model(model_path: Path):
-    """Load a model and tokenizer once for efficient reuse."""
-    import torch
-    from transformers import AutoModelForCausalLM, AutoTokenizer
+def checkpoint_is_prequantized_4bit(model_path: Path) -> bool:
+    """True when the safetensors shards hold bitsandbytes-quantized weights.
 
-    load_path = str(model_path)
-    logger.info("Loading model: %s", load_path)
-    tokenizer = AutoTokenizer.from_pretrained(load_path, trust_remote_code=True)
-    model = AutoModelForCausalLM.from_pretrained(
-        load_path,
-        trust_remote_code=True,
-        torch_dtype=torch.bfloat16,
-        device_map="auto",
+    Such checkpoints cannot be re-loaded with a fresh quantization config
+    (the loader would materialize the missing bf16 weights and OOM); the
+    QLoRA adapter route (base model + lora_adapter) must be used instead.
+    """
+    try:
+        from safetensors import safe_open
+    except ImportError:
+        return False
+    for shard in sorted(model_path.glob("*.safetensors")):
+        try:
+            with safe_open(shard, framework="pt") as f:
+                if any("quant_state" in k or "base_layer" in k for k in f):
+                    return True
+        except Exception:  # noqa: BLE001, S112  (probe is best-effort)
+            continue
+    return False
+
+
+def load_model(model_path: Path, base_model_path: Path):
+    """Load a model and tokenizer once for efficient reuse.
+
+    Two checkpoint layouts are supported:
+
+    - QLoRA checkpoints with a ``lora_adapter/`` subdirectory (what
+      training/train_unsloth.py writes): the local base model is loaded in
+      4-bit NF4 and the adapter is applied on top. This is standard QLoRA
+      inference and matches training-time behavior exactly.
+    - Truly merged checkpoints: loaded directly, quantized to 4-bit NF4
+      on load.
+
+    4-bit loading keeps the whole 8B model in GPU VRAM (~5.5 GB) instead
+    of spilling bf16 weights into system RAM, which OOMs hosts with less
+    RAM than a bf16 copy of the model needs. ``device_map="auto"`` is
+    deliberately avoided: it offloads overflow weights to system RAM.
+    """
+    import torch
+    from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+
+    bnb_config = BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_compute_dtype=torch.bfloat16,
+        bnb_4bit_quant_type="nf4",
+        bnb_4bit_use_double_quant=True,
     )
+
+    tokenizer = AutoTokenizer.from_pretrained(str(model_path), trust_remote_code=True)
+    model: Any
+    adapter_dir = model_path / "lora_adapter"
+    if adapter_dir.is_dir():
+        from peft import PeftModel
+
+        logger.info(
+            "Loading 4-bit base %s + LoRA adapter %s", base_model_path, adapter_dir
+        )
+        base_model = AutoModelForCausalLM.from_pretrained(
+            str(base_model_path),
+            trust_remote_code=True,
+            quantization_config=bnb_config,
+        )
+        model = PeftModel.from_pretrained(base_model, str(adapter_dir))
+    else:
+        if checkpoint_is_prequantized_4bit(model_path):
+            raise RuntimeError(
+                f"{model_path} is a 4-bit serialized checkpoint without a "
+                "lora_adapter/ subdirectory; it cannot be loaded directly. "
+                "Re-run `make train` or pass a checkpoint that contains "
+                "lora_adapter/."
+            )
+        logger.info("Loading merged model in 4-bit NF4: %s", model_path)
+        model = AutoModelForCausalLM.from_pretrained(
+            str(model_path),
+            trust_remote_code=True,
+            quantization_config=bnb_config,
+        )
     model.eval()
     return model, tokenizer
+
+
+def free_model_memory(model, tokenizer) -> None:
+    """Release a model's GPU and host memory before loading the next one."""
+    import torch
+
+    del model, tokenizer
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
 
 
 def generate_batch(
@@ -159,6 +289,9 @@ def generate_batch(
     results: list[str] = []
     for prompt in prompts:
         try:
+            # Cap prompt size: huge prompts blow up KV-cache and host memory
+            # on small-RAM hosts.
+            prompt = prompt[:MAX_PROMPT_CHARS]
             messages = [{"role": "user", "content": prompt}]
             text = tokenizer.apply_chat_template(
                 messages,
@@ -235,17 +368,15 @@ def run_generation_for_model(
                             files[file_path.relative_to(root)] = file_path.read_bytes()
                 return files
 
-            # Project files needed to build (main.gpr, src/, ...). The file at
-            # location.path is replaced with the model's generation.
-            sources = read_dir_bytes(sample_dir / "base")
-            unit_tests = read_dir_bytes(sample_dir / "tests")
-
+            # generated_solution must be a complete buildable project: ada-eval
+            # runs gprbuild/gnatformat inside it (BUILD) and proves it (PROVE).
+            # Start from the base project tree and overlay the model's code at
+            # the location the prompt asked to fill (the convention ada-eval's
+            # own generation agents use).
+            generated_solution = dict(sources)
             location = sample["location"]
             gen_path = location.get("path", "generated.adb") if isinstance(location, dict) else "generated.adb"
-            gen_filename = Path(gen_path).name
-            if gen_filename.endswith(".ads"):
-                gen_filename = gen_filename[:-4] + ".adb"
-            generated_solution = {Path(gen_filename): ada_code.encode("utf-8")}
+            generated_solution[Path(gen_path)] = ada_code.encode("utf-8")
 
             packed = sample_type(
                 name=sample["name"],
@@ -302,32 +433,50 @@ def main() -> None:
         )
         sys.exit(1)
 
-    datasets = find_expanded_datasets(args.dataset)
-    if not datasets:
+    if not find_expanded_datasets(args.dataset):
         logger.error("No datasets found")
         sys.exit(1)
 
     GENERATED_DIR.mkdir(parents=True, exist_ok=True)
-    summary: dict[str, Any] = {}
 
-    # Generate with fine-tuned model
-    ft_model, ft_tokenizer = load_model(args.model)
-    summary["fine_tuned"] = run_generation_for_model(
-        ft_model, ft_tokenizer, "fine_tuned", datasets, args
-    )
-    del ft_model
+    # One subprocess per model: each from_pretrained gets a pristine GPU,
+    # so the second model load cannot OOM against leftover CUDA context
+    # state from the first.
+    def spawn(label: str, model_path: Path) -> dict[str, Any]:
+        cmd = [
+            sys.executable, str(Path(__file__).resolve()), "--worker",
+            "--model-path", str(model_path),
+            "--base-model-path", str(args.base_model),
+            "--model-label", label,
+            "--max-samples", str(args.max_samples),
+            "--max-new-tokens", str(args.max_new_tokens),
+            "--temperature", str(args.temperature),
+        ]
+        if args.dataset:
+            cmd += ["--dataset", args.dataset]
+        if args.enable_thinking:
+            cmd.append("--enable-thinking")
+        if args.verbose:
+            cmd.append("--verbose")
+        logger.info("Launching worker for %s: %s", label, model_path)
+        proc = subprocess.run(cmd, check=False, capture_output=True, text=True)
+        sys.stdout.write(proc.stdout)
+        if proc.stderr:
+            sys.stderr.write(proc.stderr)
+        if proc.returncode != 0:
+            logger.error("Worker for %s failed with exit code %d", label, proc.returncode)
+            return {"by_dataset": {}, "total": 0, "output_dir": str(GENERATED_DIR / label)}
+        try:
+            return json.loads(proc.stdout.strip().splitlines()[-1])
+        except (json.JSONDecodeError, IndexError):
+            logger.error("Could not parse worker summary for %s", label)
+            return {"by_dataset": {}, "total": 0, "output_dir": str(GENERATED_DIR / label)}
 
-    # Generate with base model (same local download used for training)
-    base_model, base_tokenizer = load_model(args.base_model)
     base_label = f"base_{args.base_model.name}"
-    summary[base_label] = run_generation_for_model(
-        base_model, base_tokenizer, base_label, datasets, args
-    )
-    del base_model
-
-    import torch
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
+    summary: dict[str, Any] = {
+        "fine_tuned": spawn("fine_tuned", args.model),
+        base_label: spawn(base_label, args.base_model),
+    }
 
     summary["max_samples"] = args.max_samples
     summary["dataset"] = args.dataset or "all"
@@ -343,4 +492,6 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    if "--worker" in sys.argv:
+        sys.exit(_run_worker(_worker_parser().parse_args()))
     main()

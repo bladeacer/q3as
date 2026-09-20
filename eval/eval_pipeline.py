@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -35,7 +36,7 @@ _SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "scripts"
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
-from alire_env import has_tool
+from alire_env import alire_env_path, has_tool
 
 logger = logging.getLogger("q3as_eval_pipeline")
 
@@ -44,6 +45,17 @@ GENERATED_DIR = Path("outputs/generated_solutions")
 
 FINE_TUNED_LABEL = "fine_tuned"
 DEFAULT_BASE_LABEL = "base_qwen3-8b"
+
+
+def ensure_alire_path() -> None:
+    """Put the Alire toolchain on this process' PATH.
+
+    ada-eval resolves gnatprove/gprbuild/gnatformat with shutil.which and
+    inherits os.environ in its subprocess calls, so the Alire environment
+    (the same PATH `scripts/ada_env.sh` provides) must be exported before
+    evaluate_directory runs. alire_env_path() is cached after the first call.
+    """
+    os.environ["PATH"] = alire_env_path()
 
 
 def check_tools_available(evals: list[str]) -> tuple[bool, list[str]]:
@@ -297,6 +309,9 @@ def main() -> None:
     logger.info("Evals: %s", args.evals)
     logger.info("Jobs: %d", args.jobs)
     logger.info("Fine-tuned label: %s | Base label: %s", args.fine_tuned_label, args.base_label)
+
+    # Export the Alire environment so ada-eval resolves the toolchain.
+    ensure_alire_path()
 
     # Check tool availability
     tools_ok, missing_tools = check_tools_available(args.evals)

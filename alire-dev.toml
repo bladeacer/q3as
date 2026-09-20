@@ -24,9 +24,11 @@ tags = ["ada", "spark", "fine-tuning", "evaluation", "code-generation"]
 # Version notes (alr 1.2.1 on this Debian box, community index snapshot):
 # - gnatprove 16.x is not in the local index (newest: 13.2.1); pin to that.
 #   Check availability with `alr show gnatprove` when the index is updated.
-# - gnatdoc_bin / gnatformat_bin do not exist in the local index at all
-#   (gnatdoc exists but only as a long source build; q3as never calls it).
-#   gnatformat is only an optional fallback in ada-eval's BUILD eval; fetch
-#   its binary from the GNAT-FSF-builds releases if strict-warning builds
-#   need it.
+# - gnatdoc_bin / gnatformat_bin do not exist in the stable-1.2.1 community
+#   index snapshot (gnatdoc exists but only as a long source build; q3as
+#   never calls gnatdoc). gnatformat is required by ada-eval's BUILD eval,
+#   so the official gnatformat_bin 26.0.0 binary crate is resolved from the
+#   repo-local q3as-local-index/ (vendored from alire-index stable-1.4.0),
+#   registered in the user config ahead of the community index.
 gnatprove = "^13.2.1"
+gnatformat_bin = "^26.0.0"
