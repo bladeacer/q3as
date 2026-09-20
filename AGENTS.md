@@ -95,10 +95,17 @@ community index lacks.
 q3as/
    data/
        processed/
+           ada_ast_units.jsonl
            dataset.jsonl
            dataset_metadata.json
+           dataset_test.jsonl
+           dataset_train.jsonl
+           dataset_val.jsonl
+           docs_chunks.jsonl
        processing_scripts/
            build_dataset.py
+           parse_ada_ast.py
+           parse_docs.py
        raw/
    deploy/
        Modelfile
@@ -123,6 +130,9 @@ q3as/
        validate_defects.py
    tests/
        test_build_dataset.py
+       test_defect_families.py
+       test_generate.py
+       test_parsers.py
    training/
        download_model.py
        train_unsloth.py

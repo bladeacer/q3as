@@ -49,10 +49,12 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import multiprocessing
 import os
 import random
 import re
 import textwrap
+import zlib
 from pathlib import Path
 from typing import Any
 
@@ -857,7 +859,81 @@ def strip_noisy_comments(code: str) -> str:
 # would report. Defects are chosen per-snippet by applicability checks, so
 # every broken variant is plausible and the diagnosis is factual.
 
-_DEFECT_FAMILIES = ("syntax", "context", "visibility", "contract", "mismatch")
+_DEFECT_FAMILIES = (
+    "syntax", "context", "visibility", "contract", "mismatch",
+    "typo", "hallucinated", "ordering", "scoping", "type", "lang_confusion",
+)
+
+# Roots of the GNAT predefined library. A with clause corrupted under one of
+# these roots makes GNAT report the unit as not predefined; any other root
+# makes it search for a source file. The injector only corrupts predefined
+# units so the claimed message is deterministic.
+_PREDEFINED_ROOTS = ("Ada", "System", "GNAT", "Interfaces")
+
+# Verified against GNAT 14 (see scripts/validate_defects.py):
+# - a misspelled identifier:            error: "Xx" is undefined
+# - a hallucinated predefined unit:     error: "Ada.Text_Iox" is not a
+#                                       predefined library unit
+# - a declaration after begin:          error: declarations mixed with
+#                                       statements is a GNAT-specific
+#                                       extension
+# - a numeric literal in a Boolean:     error: expected type
+#                                       "Standard.Boolean"
+# - a C-style '=' assignment:           error: "=" should be ":="
+
+
+def _gnat_unit_display(unit: str) -> str:
+    """Return *unit* the way GNAT echoes it in error messages.
+
+    GNAT canonicalizes identifiers the way it builds file names: the first
+    letter and letters right after underscores stay uppercase, other
+    uppercase letters are lowercased (verified: 'Ada.Text_IOx' is echoed as
+    'Ada.Text_Iox'). The claimed compiler message must use the echoed form.
+    """
+    out: list[str] = []
+    upper_next = True
+    for ch in unit:
+        if ch in "_.":
+            upper_next = True
+            out.append(ch)
+        elif upper_next and ch.isalpha():
+            out.append(ch.upper())
+            upper_next = False
+        else:
+            out.append(ch.lower())
+    return "".join(out)
+
+
+def _code_without_comments(code: str) -> str:
+    """Strip -- line comments so name searches do not hit prose."""
+    return re.sub(r"--[^\n]*", "", code)
+
+
+_COMMENT_SPAN = re.compile(r"--[^\n]*")
+# Ada strings are single-line; "" is the escaped quote.
+_STRING_SPAN = re.compile(r'"(?:[^"]|"")*"')
+
+
+def _protected_spans(code: str) -> list[tuple[int, int]]:
+    """Spans of comments and string literals: identifiers there are prose."""
+    spans = [(m.start(), m.end()) for m in _COMMENT_SPAN.finditer(code)]
+    spans.extend((m.start(), m.end()) for m in _STRING_SPAN.finditer(code))
+    return spans
+
+
+def _first_use(code: str, name: str, start: int, spans: list[tuple[int, int]]) -> int | None:
+    """Offset of the first real (non-comment, non-string) use of *name*.
+
+    Offsets are computed directly on *code* so they can be used to cut the
+    original text: searching comment-stripped text and applying the index
+    to the original corrupts an unrelated span whenever a comment precedes
+    the use site.
+    """
+    for match in re.finditer(rf"\b{re.escape(name)}\b", code[start:]):
+        pos = start + match.start()
+        if not any(s <= pos < e for s, e in spans):
+            return pos
+    return None
 
 
 def _extract_with_clauses(code: str) -> list[str]:
@@ -938,6 +1014,13 @@ def inject_defect(code: str, family: str) -> tuple[str, str, str] | None:
     if family == "context":
         withs = _extract_with_clauses(code)
         referenced = [w for w in withs if re.search(r"\b" + re.escape(w.split(".")[-1]) + r"\b", unit)]
+        # A with clause carried by both spec and body survives the removal
+        # of its first copy: the snippet would compile clean and the claimed
+        # error would be a false claim.
+        referenced = [
+            w for w in referenced
+            if len(re.findall(rf"^\s*with\s+{re.escape(w)}\s*;", code, re.MULTILINE)) == 1
+        ]
         if referenced:
             victim = referenced[0]
             broken_context = re.sub(
@@ -1034,6 +1117,10 @@ def inject_defect(code: str, family: str) -> tuple[str, str, str] | None:
                 c for c in candidates
                 if c.lower() not in keywords and c not in declared
             ]
+            # A use clause carried by both spec and body survives the
+            # removal of one copy: skip duplicated use clauses.
+            if len(re.findall(rf"^\s*use\s+{re.escape(used_pkg)}\s*;", code, re.MULTILINE)) > 1:
+                return None
             if not has_dotted_ref and offenders:
                 broken = re.sub(
                     rf"^\s*use\s+{re.escape(used_pkg)}\s*;\s*\n", "", code, flags=re.MULTILINE
@@ -1106,12 +1193,220 @@ def inject_defect(code: str, family: str) -> tuple[str, str, str] | None:
             )
         return None
 
+    if family == "typo":
+        # Misspell one identifier at a single use site (the declaration and
+        # the other references keep the correct spelling). GNAT reports the
+        # typo'd name as undefined. Use sites are located span-aware on the
+        # original text: a comment-stripped index would corrupt unrelated
+        # code whenever a comment precedes the use site.
+        spans = _protected_spans(code)
+        for dm in re.finditer(r"^\s*(\w+)\s*:\s*(?:constant\s+)?[\w.]+", code, re.MULTILINE):
+            name = dm.group(1)
+            if len(name) < 3:
+                continue
+            typo = name[0] + name[2] + name[1] + name[3:]
+            if typo == name or _first_use(code, typo, 0, spans) is not None:
+                continue
+            pos = _first_use(code, name, dm.end(), spans)
+            if pos is None:
+                continue
+            broken = code[:pos] + typo + code[pos + len(name):]
+            return (
+                broken,
+                (
+                    f"The name {name} is misspelled as {typo} at one use site. "
+                    "The declaration and the other references keep the original "
+                    f"spelling. The compiler reports {typo} as undefined."
+                ),
+                f'error: "{typo}" is undefined',
+            )
+        return None
+
+    if family == "hallucinated":
+        # Corrupt one predefined with clause into a unit that does not
+        # exist: the model-style hallucination of a plausible library name.
+        # Only predefined roots are corrupted: GNAT then reports the unit
+        # as not predefined, a deterministic message. A non-predefined root
+        # would make the message depend on whether the root file resolves.
+        for victim in _extract_with_clauses(code):
+            root_component = victim.split(".")[0]
+            if root_component not in _PREDEFINED_ROOTS:
+                continue
+            if len(re.findall(rf"^\s*with\s+{re.escape(victim)}\s*;", code, re.MULTILINE)) > 1:
+                continue  # the body's duplicate with keeps the build alive
+            bad_unit = f"{victim}x"
+            display = _gnat_unit_display(bad_unit)
+            broken = re.sub(
+                rf"^\s*with\s+{re.escape(victim)}\s*;",
+                f"with {bad_unit};",
+                code,
+                count=1,
+                flags=re.MULTILINE,
+            )
+            if broken == code:
+                return None
+            return (
+                broken,
+                (
+                    f"The context clause names {display}, a unit that does "
+                    "not exist. The intended unit is the one the code uses. "
+                    "The compiler reports the name as not a predefined "
+                    "library unit."
+                ),
+                f'error: "{display}" is not a predefined library unit',
+            )
+        return None
+
+    if family == "ordering":
+        # Move one object declaration out of a subprogram's declarative part
+        # and drop it between the statements: Standard Ada requires
+        # declarations to precede the statements of the same part.
+        body_m = re.search(
+            r"\b(?:procedure|function)\s+\w+[^\n]*\bis\b(.*?)\bbegin\b(.*?)\bend\b",
+            code, re.DOTALL,
+        )
+        if body_m:
+            decl_m = re.search(
+                r"^\s*\w[\w.]*\s*:\s*[\w.]+[^;]*;\s*$", body_m.group(1), re.MULTILINE,
+            )
+            if decl_m:
+                line_text = decl_m.group(0).strip()
+                # Remove exactly the declaration LINE (the aspect-spanning
+                # match may include surrounding whitespace/newlines), then
+                # re-insert it before the first end after begin.
+                line_m = re.search(
+                    rf"^[ \t]*{re.escape(line_text)}[ \t]*$", code, re.MULTILINE,
+                )
+                if line_m:
+                    line_end = code.find("\n", line_m.end())
+                    broken = code[:line_m.start()] + (
+                        "" if line_end == -1 else code[line_end + 1:]
+                    )
+                    begin_m = re.search(r"\bbegin\b", broken)
+                    end_m = re.search(r"\bend\b", broken[begin_m.end():]) if begin_m else None
+                    if begin_m and end_m:
+                        insert_at = begin_m.end() + end_m.start()
+                        broken = (
+                            broken[:insert_at]
+                            + "   " + line_text + "\n"
+                            + broken[insert_at:]
+                        )
+                        if broken != code and broken.strip():
+                            return (
+                                broken,
+                                (
+                                    "A declaration sits between the statements. "
+                                    "Standard Ada requires declarations before the "
+                                    "statements of the same part. The compiler "
+                                    "reports the mixed declarations and refuses the "
+                                    "unit."
+                                ),
+                                "error: declarations mixed with statements",
+                            )
+        return None
+
+    if family == "scoping":
+        # Remove an object declaration whose name stays in use: the name is
+        # no longer visible in the scope that needs it.
+        spans = _protected_spans(code)
+        for dm in re.finditer(r"^\s*(\w+)\s*:\s*(?:constant\s+)?[\w.]+", code, re.MULTILINE):
+            name = dm.group(1)
+            # Declaration shape only: "Name :=" (an assignment statement)
+            # also contains a colon, so the type name after it must be part
+            # of the pattern or every assignment inflates the count.
+            decl_count = len(re.findall(rf"^\s*{name}\s*:\s*(?:constant\s+)?[\w.]", code, re.MULTILINE))
+            if decl_count != 1 or _first_use(code, name, dm.end(), spans) is None:
+                continue
+            line_start = code.rfind("\n", 0, dm.start()) + 1
+            line_end = code.find("\n", dm.end())
+            broken = code[:line_start] + ("" if line_end == -1 else code[line_end + 1:])
+            if broken == code or not broken.strip():
+                continue
+            return (
+                broken,
+                (
+                    f"The declaration of {name} is missing from the scope that "
+                    f"uses it. The remaining references to {name} name an "
+                    "entity the compiler cannot see."
+                ),
+                f'error: "{name}" is undefined',
+            )
+        return None
+
+    if family == "type":
+        # Change a numeric object's type to Boolean: the numeric initializer
+        # or the later numeric assignment no longer matches. Only corrupt an
+        # object that demonstrably receives a numeric value, so the broken
+        # variant cannot compile clean.
+        numeric = r"(?:Integer|Natural|Positive|Long_Integer|Long_Long_Integer|Short_Integer|Float|Long_Float)"
+        for dm in re.finditer(rf"^\s*(\w+)\s*:\s*({numeric})\s*(:=[^;]*)?;", code, re.MULTILINE):
+            name, old_type, initializer = dm.group(1), dm.group(2), dm.group(3) or ""
+            rest = _code_without_comments(code[dm.end():])
+            gets_numeric = bool(
+                re.search(r":=\s*[-+]?\d", initializer)
+                or re.search(rf"\b{name}\s*:=\s*[-+]?\d", rest)
+            )
+            if not gets_numeric or re.search(rf"\b{name}\s*:=\s*(?:True|False)\b", rest):
+                continue
+            broken = code[:dm.start(2)] + "Boolean" + code[dm.end(2):]
+            if initializer.strip():
+                where = f"the initializer of {name}"
+            else:
+                where = f"the later assignments to {name}"
+            return (
+                broken,
+                (
+                    f"The object {name} is declared Boolean but was {old_type}. "
+                    f"{where.capitalize()} supply a numeric value. The compiler "
+                    "expects a Boolean type and rejects the unit."
+                ),
+                'error: expected type "Standard.Boolean"',
+            )
+        return None
+
+    if family == "lang_confusion":
+        # Replace the first statement-position ':=' with '=': the C-style
+        # assignment operator does not exist in Ada. Occurrences inside
+        # string literals are skipped: rewriting a string cannot fail the
+        # build and would fake a clean compile.
+        begin_m = re.search(r"\bbegin\b", code)
+        if not begin_m:
+            return None
+        spans = _protected_spans(code)
+        for am in re.finditer(r":=", code[begin_m.end():]):
+            pos = begin_m.end() + am.start()
+            if any(s <= pos < e for s, e in spans):
+                continue  # inside a comment or string literal
+            broken = code[:pos] + "=" + code[pos + 2:]
+            return (
+                broken,
+                (
+                    "The statement assigns with =, the C-style operator. Ada "
+                    "writes assignment as := and uses = for equality only. The "
+                    "compiler reports the operator and suggests the Ada form."
+                ),
+                'error: "=" should be ":="',
+            )
+        return None
+
     return None
 
 
 _DEFECT_FAMILY_ORDER: tuple[str, ...] = _DEFECT_FAMILIES
 # Cap defect turns per pair so the dataset does not skew negative.
-_MAX_DEFECTS_PER_PAIR = 2
+_MAX_DEFECTS_PER_PAIR = 3
+
+# The same defect question asked several ways: the fine-tune must recognize
+# the defect class regardless of the natural-language wrapper around it.
+# Selection is content-derived (crc32 of the broken snippet), so the choice
+# stays identical no matter how many worker processes built the dataset.
+_DEFECT_USER_PHRASINGS = (
+    "The following {standard} code for `{package}` does not compile. Find the defect and provide the corrected code.",
+    "This {standard} snippet for `{package}` fails to build. Identify the defect and give the corrected code.",
+    "Something is wrong with this {standard} code for `{package}`. Find the defect and provide the corrected code.",
+    "The compiler rejects this {standard} unit `{package}`. Name the defect and supply the corrected code.",
+    "Review this {standard} code for `{package}`. It contains one defect. Find it and provide the corrected code.",
+)
 
 
 def build_defect_turns(
@@ -1132,7 +1427,11 @@ def build_defect_turns(
     """
     turns: list[dict[str, list[dict[str, str]]]] = []
     emitted = 0
-    for family in _DEFECT_FAMILY_ORDER:
+    # Rotate the family order per snippet (content-derived) so the cap does
+    # not always starve the same late families on every pair.
+    rotation = zlib.crc32(code.encode("utf-8")) % len(_DEFECT_FAMILY_ORDER)
+    family_order = _DEFECT_FAMILY_ORDER[rotation:] + _DEFECT_FAMILY_ORDER[:rotation]
+    for family in family_order:
         if emitted >= _MAX_DEFECTS_PER_PAIR:
             break
         result = inject_defect(code, family)
@@ -1143,11 +1442,12 @@ def build_defect_turns(
             continue
         diagnosis = sanitize_prose(diagnosis)
         emitted += 1
+        phrase = _DEFECT_USER_PHRASINGS[zlib.crc32(broken.encode("utf-8")) % len(_DEFECT_USER_PHRASINGS)]
         user_msg = (
-            f"The following {_standard_label(standard)} code for `{package or 'this unit'}` does not "
-            f"compile. Find the defect and provide the corrected code.\n\n"
-            f"```ada\n{broken}\n```\n\n"
-            f"Source: {source}"
+            phrase.format(standard=_standard_label(standard), package=package or "this unit")
+            + "\n\n"
+            + f"```ada\n{broken}\n```\n\n"
+            + f"Source: {source}"
         )
         assistant_msg = (
             f"The code has this defect. {diagnosis}\n\n"
@@ -1199,10 +1499,18 @@ def _compose_system_prompt(
     return "\n\n".join(p for p in parts if p)
 
 
-def _sample_guidance(guidance_text: str, every_n: int = 4) -> str:
-    """Return guidance_text on a deterministic 1-in-N subset of calls."""
+def _sample_guidance(guidance_text: str, every_n: int = 4, key: str = "") -> str:
+    """Return guidance_text on a deterministic 1-in-N subset of items.
+
+    With *key* (usually the snippet content), the choice derives from its
+    crc32, so the subset is identical no matter how many worker processes
+    or what order the dataset is built in. Without a key, the module RNG
+    decides (serial callers only).
+    """
     if not guidance_text:
         return ""
+    if key:
+        return guidance_text if zlib.crc32(key.encode("utf-8")) % every_n == 0 else ""
     if _rng.random() < 1.0 / every_n:
         return guidance_text
     return ""
@@ -1229,39 +1537,67 @@ def _looks_like_ada(code: str) -> bool:
     return any(k in lowered for k in keywords)
 
 
-def extract_ada_code_blocks(doc_root: Path) -> list[str]:
+def _ada_blocks_from_file(doc_path: Path) -> list[str]:
+    """Extract candidate Ada code blocks from one documentation file.
+
+    Module-level so worker processes can map over files (picklable).
+    """
+    try:
+        content = doc_path.read_text(encoding="utf-8")
+    except (UnicodeDecodeError, OSError):
+        return []
+    found = _RST_ADA_BLOCK.findall(content) + _MD_ADA_BLOCK.findall(content)
+    blocks: list[str] = []
+    for raw in found:
+        code = textwrap.dedent(raw).strip("\n")
+        if not (30 <= len(code) <= 4000):
+            continue
+        if not _looks_like_ada(code):
+            continue
+        blocks.append(code)
+    return blocks
+
+
+def _collect_doc_blocks(
+    files: list[Path],
+    imap=None,
+) -> list[str]:
+    """Extract and deduplicate Ada code blocks across documentation files.
+
+    *imap* is a ``Pool.imap``-like callable mapping one file to its blocks;
+    when absent, files are processed serially. Either way the output order
+    follows the input file order, so results are identical.
+    """
+    blocks: list[str] = []
+    seen: set[str] = set()
+    per_file = imap(_ada_blocks_from_file, files, chunksize=4) if imap else map(_ada_blocks_from_file, files)
+    for file_blocks in per_file:
+        for code in file_blocks:
+            key = re.sub(r"\s+", " ", code)
+            if key in seen:
+                continue
+            seen.add(key)
+            blocks.append(code)
+    return blocks
+
+
+def extract_ada_code_blocks(doc_root: Path, imap=None) -> list[str]:
     """Extract Ada code blocks from RST and Markdown files under doc_root.
 
     Deduplicates blocks and keeps only snippets that look like Ada units.
     """
-    blocks: list[str] = []
-    seen: set[str] = set()
+    files: list[Path] = []
     for pattern in ("*.rst", "*.md"):
-        for doc_path in sorted(doc_root.rglob(pattern)):
-            try:
-                content = doc_path.read_text(encoding="utf-8")
-            except (UnicodeDecodeError, OSError):
-                continue
-            found = _RST_ADA_BLOCK.findall(content) + _MD_ADA_BLOCK.findall(content)
-            for raw in found:
-                code = textwrap.dedent(raw).strip("\n")
-                if not (30 <= len(code) <= 4000):
-                    continue
-                if not _looks_like_ada(code):
-                    continue
-                key = re.sub(r"\s+", " ", code)
-                if key in seen:
-                    continue
-                seen.add(key)
-                blocks.append(code)
+        files.extend(sorted(doc_root.rglob(pattern)))
+    blocks = _collect_doc_blocks(files, imap)
     logger.info("Extracted %d unique Ada code blocks from %s", len(blocks), doc_root)
     return blocks
 
 
 def build_doc_training_turns(
-    doc_sources: list[Path],
+    doc_blocks: list[str],
     guidance_text: str = "",
-) -> list[dict[str, list[dict[str, str]]]]:
+) -> list[tuple[str, dict[str, list[dict[str, str]]]]]:
     """Build documentation-QA style training turns from Ada code blocks.
 
     Two turn kinds per code block:
@@ -1272,50 +1608,50 @@ def build_doc_training_turns(
       Simplified Technical English and defines each technical term at
       its first use. These turns teach the model to write docs that
       obey the STE rules it is prompted with.
+
+    Returns (group_id, turn) pairs: both turns of one code block share a
+    group so the train/val/test split never separates them.
     """
-    turns: list[dict[str, list[dict[str, str]]]] = []
-    for doc_root in doc_sources:
-        if not doc_root.exists():
-            logger.warning("Documentation source not found, skipping: %s", doc_root)
-            continue
-        for code in extract_ada_code_blocks(doc_root):
-            standard = detect_ada_standard(code)
-            cleaned_code = strip_noisy_comments(code)
-            user_msg = (
-                f"Explain the following {_standard_label(standard)} code and describe what it demonstrates.\n\n"
-                f"```ada\n{cleaned_code}\n```"
-            )
-            # Plain completion answer
-            turns.append({
-                "messages": [
-                    {"role": "user", "content": user_msg},
-                    {"role": "assistant", "content": f"```ada\n{cleaned_code}\n```"},
-                ],
-            })
-            # STE explanation answer: written by the rules we distill,
-            # with each technical term defined at first use.
-            ste_explanation = _ste_explanation(cleaned_code, standard)
-            ste_user = (
-                f"Explain the following {_standard_label(standard)} code for documentation. "
-                "Follow Simplified Technical English rules and define technical "
-                "terms at first use.\n\n"
-                f"```ada\n{cleaned_code}\n```"
-            )
-            turns.append({
-                "messages": [
-                    {
-                        "role": "system",
-                        "content": _compose_system_prompt(standard, STE_RULE_BLOCK, build_technical_term_glossary()),
-                    },
-                    {"role": "user", "content": ste_user},
-                    {"role": "assistant", "content": ste_explanation},
-                ],
-            })
-    if turns and guidance_text:
+    grouped: list[tuple[str, dict[str, list[dict[str, str]]]]] = []
+    for code in doc_blocks:
+        group = f"doc:{zlib.crc32(code.encode('utf-8'))}"
+        standard = detect_ada_standard(code)
+        cleaned_code = strip_noisy_comments(code)
+        user_msg = (
+            f"Explain the following {_standard_label(standard)} code and describe what it demonstrates.\n\n"
+            f"```ada\n{cleaned_code}\n```"
+        )
+        # Plain completion answer
+        grouped.append((group, {
+            "messages": [
+                {"role": "user", "content": user_msg},
+                {"role": "assistant", "content": f"```ada\n{cleaned_code}\n```"},
+            ],
+        }))
+        # STE explanation answer: written by the rules we distill,
+        # with each technical term defined at first use.
+        ste_explanation = _ste_explanation(cleaned_code, standard)
+        ste_user = (
+            f"Explain the following {_standard_label(standard)} code for documentation. "
+            "Follow Simplified Technical English rules and define technical "
+            "terms at first use.\n\n"
+            f"```ada\n{cleaned_code}\n```"
+        )
+        grouped.append((group, {
+            "messages": [
+                {
+                    "role": "system",
+                    "content": _compose_system_prompt(standard, STE_RULE_BLOCK, build_technical_term_glossary()),
+                },
+                {"role": "user", "content": ste_user},
+                {"role": "assistant", "content": ste_explanation},
+            ],
+        }))
+    if grouped and guidance_text:
         # Variant system prompts carrying the agent-skill guidance teach the
         # model to write current-toolchain Ada/SPARK (contracts, Alire, proof).
-        sample_turns = turns[: max(len(turns) // 4, 1)]
-        for turn in sample_turns:
+        sample_turns = grouped[: max(len(grouped) // 4, 1)]
+        for _group, turn in sample_turns:
             turn["messages"].insert(0, {
                 "role": "system",
                 "content": (
@@ -1325,7 +1661,7 @@ def build_doc_training_turns(
                     f"{guidance_text}"
                 ),
             })
-    return turns
+    return grouped
 
 
 def _ste_explanation(code: str, standard: str) -> str:
@@ -1475,20 +1811,22 @@ def build_toolchain_qa_turns(
     toolchain_docs: dict[str, str],
     ste_rules: str,
     glossary: str,
-) -> list[dict[str, list[dict[str, str]]]]:
+) -> list[tuple[str, dict[str, list[dict[str, str]]]]]:
     """Build question/answer turns from the AdaCore agent skills.
 
     For each skill, asks its canonical questions and answers with the
     relevant section of the skill documentation, rewritten to the STE
     style. These turns ground the model in real toolchain usage: gnatprove
     invocation rules, Alire workflows, gnattest VCS rules, and so on.
+
+    Returns (group_id, turn) pairs; one question's turns share a group.
     """
-    turns: list[dict[str, list[dict[str, str]]]] = []
+    grouped: list[tuple[str, dict[str, list[dict[str, str]]]]] = []
     for skill_name, questions in _TOOLCHAIN_QUESTIONS.items():
         doc_text = toolchain_docs.get(skill_name, "")
         if not doc_text:
             continue
-        for question, anchor_regex, fallback in questions:
+        for question_idx, (question, anchor_regex, fallback) in enumerate(questions):
             chunk = _extract_answer_chunk(doc_text, anchor_regex, fallback)
             if not chunk:
                 continue
@@ -1499,7 +1837,7 @@ def build_toolchain_qa_turns(
                 "Follow the commands exactly. Code, flags, and paths stay unchanged."
             )
             assistant_msg = sanitize_prose(intro) + "\n\n" + answer
-            turns.append({
+            grouped.append((f"qa:{skill_name}:{question_idx}", {
                 "messages": [
                     {
                         "role": "system",
@@ -1508,9 +1846,9 @@ def build_toolchain_qa_turns(
                     {"role": "user", "content": question},
                     {"role": "assistant", "content": assistant_msg},
                 ],
-            })
-    logger.info("Built %d toolchain QA turns from AdaCore skills", len(turns))
-    return turns
+            }))
+    logger.info("Built %d toolchain QA turns from AdaCore skills", len(grouped))
+    return grouped
 
 
 def _ste_clean_markdown(text: str) -> str:
@@ -1609,6 +1947,212 @@ def format_training_turn(
 
 
 # --------------------------------------------------------------------------- #
+# Multiprocessing helpers (stdlib multiprocessing, fork start method)
+# --------------------------------------------------------------------------- #
+
+# Context shared with worker processes. Set once in the parent before the
+# Pool forks; workers inherit it, so per-task payloads stay small.
+_BUILD_CONTEXT: dict[str, Any] = {}
+
+
+def _worker_init() -> None:
+    """Quiet the dataset logger inside worker processes.
+
+    Parent-side progress lines stay; per-file skip warnings are folded into
+    the aggregated counts instead of interleaving from every worker.
+    """
+    logging.getLogger("q3as_build_dataset").setLevel(logging.ERROR)
+
+
+def _make_pool(workers: int, task_count: int):
+    """Create a fork-based Pool, or None for the serial path.
+
+    Serial when only one worker is requested or the workload is tiny: a
+    Pool costs more than it saves below a handful of tasks.
+    """
+    if workers <= 1 or task_count < 8:
+        return None
+    try:
+        ctx = multiprocessing.get_context("fork")
+    except ValueError:
+        logger.warning("Fork start method unavailable - building serially")
+        return None
+    return ctx.Pool(processes=min(workers, task_count), initializer=_worker_init)
+
+
+def _process_pair_task(
+    task: dict[str, Any],
+) -> tuple[str, list[dict[str, list[dict[str, str]]]], dict[str, int]]:
+    """Read, sanitize, and build turns for one spec/body pair.
+
+    Pure function of *task* plus the inherited _BUILD_CONTEXT, so it runs
+    in any worker process. Returns (group_id, turns, per-kind counts).
+    """
+    ste_rules = _BUILD_CONTEXT["ste_rules"]
+    glossary = _BUILD_CONTEXT["glossary"]
+    guidance_text = _BUILD_CONTEXT["guidance_text"]
+    context = _BUILD_CONTEXT["context"]
+
+    spec_path = task["spec"]
+    impl_path = task["impl"]
+    package = task["package"]
+    source = task["source"]
+
+    spec_content: str | None = read_and_sanitize(Path(spec_path)) if spec_path else None
+    impl_content: str | None = read_and_sanitize(Path(impl_path)) if impl_path else None
+    if spec_content is None and impl_content is None:
+        return task["group"], [], {}
+
+    combined_content = ""
+    if spec_content:
+        combined_content += spec_content + "\n"
+    if impl_content:
+        combined_content += impl_content + "\n"
+
+    standard = detect_ada_standard(combined_content)
+
+    # Clean noisy inline comments so the model learns STE comments.
+    if spec_content:
+        spec_content = strip_noisy_comments(spec_content)
+    if impl_content:
+        impl_content = strip_noisy_comments(impl_content)
+
+    # Include .gpr context if available (resolved once per input directory).
+    if task["gpr_content"]:
+        combined_content += (
+            f"\n---\nProject file reference ({task['gpr_name']}):\n{task['gpr_content']}\n"
+        )
+
+    counts: dict[str, int] = {}
+    turns: list[dict[str, list[dict[str, str]]]] = []
+    turn = format_training_turn(
+        standard, spec_content, impl_content, package, context,
+        source=source,
+        guidance_text=_sample_guidance(guidance_text, key=combined_content),
+        ste_rules=ste_rules,
+        glossary=glossary,
+    )
+    if turn["messages"]:
+        turns.append(turn)
+        counts["code_pair"] = 1
+
+    # Correct-vs-wrong defect pairs from the combined unit.
+    if task["enable_defect_pairs"] and combined_content.strip():
+        defect_turns = build_defect_turns(
+            combined_content.strip(), standard, package, source,
+            ste_rules, glossary,
+        )
+        turns.extend(defect_turns)
+        counts["defect_pair"] = len(defect_turns)
+
+    return task["group"], turns, counts
+
+
+def assign_splits(
+    groups: list[str],
+    seed: int = _RNG_SEED,
+    val_ratio: float = 0.05,
+    test_ratio: float = 0.05,
+) -> dict[str, str]:
+    """Assign each turn group to train/val/test deterministically.
+
+    Whole groups go to one split, so turns derived from the same source
+    (a code pair and its defect pairs, both doc turns of one block) never
+    leak across splits. Groups are sorted, then shuffled with *seed*, so
+    the assignment is independent of build order and worker count.
+    """
+    unique = sorted(set(groups))
+    rng = random.Random(seed)
+    rng.shuffle(unique)
+    n = len(unique)
+    if n == 1:
+        return {unique[0]: "train"}
+    if n == 2:
+        return {unique[0]: "train", unique[1]: "val"}
+    n_test = max(1, round(n * test_ratio))
+    n_val = max(1, round(n * val_ratio))
+    n_test = min(n_test, n - 2)
+    n_val = min(n_val, n - n_test - 1)
+    assignment: dict[str, str] = {g: "train" for g in unique}
+    for g in unique[:n_test]:
+        assignment[g] = "test"
+    for g in unique[n_test:n_test + n_val]:
+        assignment[g] = "val"
+    return assignment
+
+
+# --------------------------------------------------------------------------- #
+# Extra-turn ingestion (parser outputs: docs chunks, Ada AST units)
+# --------------------------------------------------------------------------- #
+
+# Turn-kind buckets for records produced by the parser modules.
+def _extra_turn_kind(meta: dict[str, Any]) -> str:
+    kind = str(meta.get("kind", "extra"))
+    if kind == "doc_section":
+        return "doc_section"
+    if kind.startswith("ast_"):
+        return "ast_qa"
+    return "extra"
+
+
+def _extra_turn_group(record: dict[str, Any], index: int) -> str:
+    """Split group for one extra record.
+
+    The Ada AST parser tags its records (impl + contract turns of one
+    subprogram share a group). Doc-section records group by source and
+    section so the same section never straddles two splits.
+    """
+    meta = record.get("meta") or {}
+    group = meta.get("group")
+    if group:
+        return str(group)
+    source = str(meta.get("source", ""))
+    section = str(meta.get("section", ""))
+    if source or section:
+        return f"extra:{zlib.crc32((source + '\x00' + section).encode('utf-8'))}"
+    return f"extra:record:{index}"
+
+
+def _ingest_extra_turns(
+    extra_paths: list[Path],
+    all_grouped: list[tuple[str, dict[str, list[dict[str, str]]]]],
+    turn_counts: dict[str, int],
+) -> None:
+    """Load parser-produced JSONL turn files into the grouped turn pool."""
+    for extra_path in extra_paths:
+        if not extra_path.exists():
+            logger.warning("Extra turns file not found, skipping: %s", extra_path)
+            continue
+        ingested = 0
+        try:
+            with open(extra_path, "r", encoding="utf-8") as f:
+                for index, line in enumerate(f):
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        record = json.loads(line)
+                    except json.JSONDecodeError:
+                        logger.warning("Skipping invalid JSON in %s line %d", extra_path, index + 1)
+                        continue
+                    messages = record.get("messages") or []
+                    if len(messages) < 2:
+                        continue
+                    meta = record.get("meta") or {}
+                    all_grouped.append((_extra_turn_group(record, index), {"messages": messages}))
+                    kind = _extra_turn_kind(meta)
+                    turn_counts[kind] = turn_counts.get(kind, 0) + 1
+                    ingested += 1
+        except OSError as exc:
+            logger.warning("Cannot read extra turns file %s: %s", extra_path, exc)
+            continue
+        if ingested:
+            logger.info("Ingested %d extra turns from %s", ingested, extra_path)
+        else:
+            logger.warning("No usable turns in extra turns file: %s", extra_path)
+
+
+# --------------------------------------------------------------------------- #
 # Main Pipeline
 # --------------------------------------------------------------------------- #
 
@@ -1621,6 +2165,8 @@ def build_dataset(
     doc_dirs: list[Path] | None = None,
     guidance_dirs: list[Path] | None = None,
     enable_defect_pairs: bool = True,
+    workers: int = 0,
+    extra_turns: list[Path] | None = None,
 ) -> int:
     """Run the full ingestion -> pairing -> sanitization -> JSONL pipeline.
 
@@ -1631,9 +2177,22 @@ def build_dataset(
     generates correct-vs-wrong defect pairs plus toolchain QA turns.
     Derives dataset structure from ada-eval methodology if available.
 
+    Pair processing and documentation extraction run on a stdlib
+    multiprocessing Pool (*workers* processes, fork start method; 0 = one
+    per CPU core, 1 = serial). All randomness is content-derived or seeded,
+    so the output is byte-identical for any worker count.
+
+    Every record gets a ``split`` field (train/val/test, ~90/5/5 by turn
+    groups) and the same records are written to dataset_train.jsonl,
+    dataset_val.jsonl, and dataset_test.jsonl beside the main file.
+
+    *extra_turns* are pre-built chat JSONL files from the parser modules
+    (parse_docs.py heading chunks, parse_ada_ast.py semantic units); they
+    join the same seeded, group-aware split as the rest of the corpus.
+
     Returns the number of valid training turns written to the output file.
     """
-    all_turns: list[dict[str, list[dict[str, str]]]] = []
+    all_grouped: list[tuple[str, dict[str, list[dict[str, str]]]]] = []
     turn_counts: dict[str, int] = {}
     eval_info = eval_methodology or {}
 
@@ -1655,6 +2214,16 @@ def build_dataset(
             len(eval_info.get("compacted_datasets", [])),
         )
 
+    # One task per spec/body pair. File reads, sanitization, standard
+    # detection, and turn building are pure functions of the task, so they
+    # distribute across worker processes without shared state.
+    _BUILD_CONTEXT.update({
+        "ste_rules": ste_rules,
+        "glossary": glossary,
+        "guidance_text": guidance_text,
+        "context": context,
+    })
+    tasks: list[dict[str, Any]] = []
     for input_dir in input_dirs + extra_input_dirs:
         resolved_input = input_dir.resolve()
         logger.info("Processing input directory: %s -> %s", input_dir, resolved_input)
@@ -1669,83 +2238,81 @@ def build_dataset(
 
         pairs = pair_files(discovered)
 
+        # Resolve one .gpr reference per input directory (as the serial
+        # loop did) so workers do not all re-read the same project file.
+        gpr_content = ""
+        gpr_name = ""
+        if discovered.get("gpr"):
+            for gpr_path in discovered["gpr"][:3]:
+                candidate = read_and_sanitize(gpr_path)
+                if candidate:
+                    gpr_content = candidate
+                    gpr_name = gpr_path.name
+                    break
+
+        source = str(resolved_input)
         for idx, pair in enumerate(pairs):
             spec_path = pair["spec"]
             impl_path = pair["impl"]
             package = pair["package"]
-            if isinstance(package, Path):
-                package = str(package)
-            source = str(resolved_input)
+            tasks.append({
+                "group": f"pair:{source}:{idx}",
+                "spec": str(spec_path) if isinstance(spec_path, Path) else None,
+                "impl": str(impl_path) if isinstance(impl_path, Path) else None,
+                "package": str(package) if package else None,
+                "source": source,
+                "gpr_content": gpr_content,
+                "gpr_name": gpr_name,
+                "enable_defect_pairs": enable_defect_pairs,
+            })
 
-            spec_content: str | None = None
-            impl_content: str | None = None
+    if workers <= 0:
+        workers = os.cpu_count() or 1
+    pool = _make_pool(workers, len(tasks))
+    imap = pool.imap if pool else None
+    if pool:
+        logger.info("Building %d pairs with %d worker processes", len(tasks), workers)
+        results = list(pool.imap(
+            _process_pair_task, tasks, chunksize=max(1, len(tasks) // (workers * 4)),
+        ))
+    else:
+        results = [_process_pair_task(task) for task in tasks]
 
-            if isinstance(spec_path, Path):
-                spec_content = read_and_sanitize(spec_path)
-            if isinstance(impl_path, Path):
-                impl_content = read_and_sanitize(impl_path)
-
-            if spec_content is None and impl_content is None:
-                logger.warning("Skipping pair %d - both spec and impl unparseable", idx)
-                continue
-
-            combined_content = ""
-            if spec_content:
-                combined_content += spec_content + "\n"
-            if impl_content:
-                combined_content += impl_content + "\n"
-
-            standard = detect_ada_standard(combined_content)
-            logger.debug(
-                "Pair %d - Package: %s | Standard: %s | Source: %s",
-                idx, package, standard, source,
-            )
-
-            # Clean noisy inline comments so the model learns STE comments.
-            if spec_content:
-                spec_content = strip_noisy_comments(spec_content)
-            if impl_content:
-                impl_content = strip_noisy_comments(impl_content)
-
-            # Include .gpr context if available
-            if discovered.get("gpr"):
-                for gpr_path in discovered["gpr"][:3]:
-                    gpr_content = read_and_sanitize(gpr_path)
-                    if gpr_content:
-                        combined_content += f"\n---\nProject file reference ({gpr_path.name}):\n{gpr_content}\n"
-                        break
-
-            turn = format_training_turn(
-                standard, spec_content, impl_content, package, context,
-                source=source,
-                guidance_text=_sample_guidance(guidance_text),
-                ste_rules=ste_rules,
-                glossary=glossary,
-            )
-            if turn["messages"]:
-                all_turns.append(turn)
-                turn_counts["code_pair"] = turn_counts.get("code_pair", 0) + 1
-
-            # Correct-vs-wrong defect pairs from the combined unit.
-            if enable_defect_pairs and combined_content.strip():
-                defect_turns = build_defect_turns(
-                    combined_content.strip(), standard, package, source,
-                    ste_rules, glossary,
-                )
-                all_turns.extend(defect_turns)
-                turn_counts["defect_pair"] = turn_counts.get("defect_pair", 0) + len(defect_turns)
+    for group, turns, counts in results:
+        for turn in turns:
+            all_grouped.append((group, turn))
+        for key, value in counts.items():
+            turn_counts[key] = turn_counts.get(key, 0) + value
 
     # Documentation-QA turns from code blocks embedded in course material
-    if doc_dirs:
-        doc_turns = build_doc_training_turns(doc_dirs, guidance_text)
-        all_turns.extend(doc_turns)
-        turn_counts["doc_qa"] = turn_counts.get("doc_qa", 0) + len(doc_turns)
+    doc_files: list[Path] = []
+    for doc_root in doc_dirs or []:
+        if not doc_root.exists():
+            logger.warning("Documentation source not found, skipping: %s", doc_root)
+            continue
+        for pattern in ("*.rst", "*.md"):
+            doc_files.extend(sorted(doc_root.rglob(pattern)))
+    if doc_files:
+        doc_blocks = _collect_doc_blocks(doc_files, imap)
+        logger.info("Extracted %d unique Ada code blocks from documentation", len(doc_blocks))
+        doc_grouped = build_doc_training_turns(doc_blocks, guidance_text)
+        all_grouped.extend(doc_grouped)
+        turn_counts["doc_qa"] = turn_counts.get("doc_qa", 0) + len(doc_grouped)
+
+    if pool:
+        pool.close()
+        pool.join()
 
     # Toolchain QA turns from the AdaCore skills
     if toolchain_docs:
-        qa_turns = build_toolchain_qa_turns(toolchain_docs, ste_rules, glossary)
-        all_turns.extend(qa_turns)
-        turn_counts["toolchain_qa"] = turn_counts.get("toolchain_qa", 0) + len(qa_turns)
+        qa_grouped = build_toolchain_qa_turns(toolchain_docs, ste_rules, glossary)
+        all_grouped.extend(qa_grouped)
+        turn_counts["toolchain_qa"] = turn_counts.get("toolchain_qa", 0) + len(qa_grouped)
+
+    # Pre-built turns from the parser modules (doc chunks, Ada AST units).
+    _ingest_extra_turns(extra_turns or [], all_grouped, turn_counts)
+
+    all_turns = [turn for _group, turn in all_grouped]
 
     # Self-check: count STE violations in our own generated assistant prose.
     # Messages with code fences are exempt: the fence itself triggers the
@@ -1764,17 +2331,47 @@ def build_dataset(
             violation_count,
         )
 
-    # Write JSONL output
+    # Deterministic, group-aware train/val/test split (~90/5/5).
+    split_seed = _RNG_SEED
+    split_of = assign_splits([group for group, _ in all_grouped], seed=split_seed)
+    split_counts: dict[str, int] = {"train": 0, "val": 0, "test": 0}
+    for group, _turn in all_grouped:
+        split_counts[split_of[group]] += 1
+
+    # Write JSONL output: the main file carries every record with its split
+    # tag; the three split files hold the same records pre-filtered.
     output_file.parent.mkdir(parents=True, exist_ok=True)
-    with open(output_file, "w", encoding="utf-8") as f:
-        for turn in all_turns:
-            f.write(json.dumps(turn, ensure_ascii=False) + "\n")
+    split_paths = {
+        name: output_file.parent / f"dataset_{name}.jsonl"
+        for name in ("train", "val", "test")
+    }
+    with (
+        open(output_file, "w", encoding="utf-8") as f_all,
+        open(split_paths["train"], "w", encoding="utf-8") as f_train,
+        open(split_paths["val"], "w", encoding="utf-8") as f_val,
+        open(split_paths["test"], "w", encoding="utf-8") as f_test,
+    ):
+        handles = {"train": f_train, "val": f_val, "test": f_test}
+        for group, turn in all_grouped:
+            record: dict[str, Any] = dict(turn)
+            record["split"] = split_of[group]
+            line = json.dumps(record, ensure_ascii=False) + "\n"
+            f_all.write(line)
+            handles[split_of[group]].write(line)
 
     # Write evaluation methodology alongside the dataset
     meta_path = output_file.parent / "dataset_metadata.json"
     metadata: dict[str, Any] = {
         "total_turns": len(all_turns),
         "turn_counts_by_kind": turn_counts,
+        "splits": {
+            "seed": split_seed,
+            "strategy": "group-aware: every turn from one source pair or doc block stays in one split",
+            "ratios": {"train": 0.90, "val": 0.05, "test": 0.05},
+            "counts": split_counts,
+            "files": {name: str(path) for name, path in split_paths.items()},
+        },
+        "workers": workers,
         "writing_style": {
             "standard": "ASD-STE100 (distilled from the SimpleEnglish agent skill)",
             "em_dashes": "banned",
@@ -1789,9 +2386,10 @@ def build_dataset(
     logger.info("Dataset metadata written to %s", meta_path)
 
     logger.info(
-        "Dataset written to %s - %d training turns (%s).",
+        "Dataset written to %s - %d training turns (%s); splits: train=%d val=%d test=%d.",
         output_file, len(all_turns),
         ", ".join(f"{k}={v}" for k, v in sorted(turn_counts.items())) or "no turns",
+        split_counts["train"], split_counts["val"], split_counts["test"],
     )
     return len(all_turns)
 
@@ -1837,6 +2435,17 @@ def main() -> None:
         help="Disable correct-vs-wrong defect pair generation.",
     )
     parser.add_argument(
+        "--workers", type=int, default=0,
+        help="Worker processes for pair/doc processing (0 = one per CPU "
+             "core, 1 = serial). Output is identical for any value.",
+    )
+    parser.add_argument(
+        "--extra-turns", type=Path, action="append", default=None,
+        help="Pre-built chat JSONL from the parser modules to merge into "
+             "the dataset (repeatable). Defaults to the two standard "
+             "parser outputs when they exist.",
+    )
+    parser.add_argument(
         "--verbose", "-v", action="store_true",
         help="Enable debug-level logging.",
     )
@@ -1863,6 +2472,17 @@ def main() -> None:
             logger.warning("Input directory not found: %s", d)
 
     output_file = args.output_dir / "dataset.jsonl"
+    extra_turns = args.extra_turns
+    if extra_turns is None:
+        # Auto-integrate the standard parser outputs when they exist, so
+        # `make build-dataset` picks up new data without extra flags.
+        extra_turns = [
+            path for path in (
+                DEFAULT_OUTPUT_DIR / "docs_chunks.jsonl",
+                DEFAULT_OUTPUT_DIR / "ada_ast_units.jsonl",
+            )
+            if path.exists()
+        ]
     count = build_dataset(
         input_dirs=[args.input_dir],
         extra_input_dirs=extra_dirs,
@@ -1872,6 +2492,8 @@ def main() -> None:
         doc_dirs=doc_dirs,
         guidance_dirs=guidance_dirs,
         enable_defect_pairs=not args.no_defect_pairs,
+        workers=args.workers,
+        extra_turns=extra_turns,
     )
     print(f"Dataset built: {count} training turns -> {output_file}")
 

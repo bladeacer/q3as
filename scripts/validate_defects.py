@@ -47,6 +47,51 @@ from alire_env import ToolNotAvailable, alire_env_path, find_tool
 _DEFECT_FAMILIES: tuple[str, ...] = bd._DEFECT_FAMILIES
 
 
+_UNIT_END = re.compile(r"\bend\s+\w[\w.]*\s*;")
+_CONTEXT_LINE = re.compile(r"\s*(?:with|use)\s+\w|\s*pragma\s+\w")
+
+
+def _split_trailing_context(text: str) -> tuple[str, str]:
+    """Split a unit's text into (unit, trailing context lines).
+
+    In a concatenated snippet, the context clauses of one compilation unit
+    (its with/use/pragma lines) sit between the previous unit's ``end`` and
+    this unit's ``package`` keyword, so the previous unit's slice swallows
+    them. Left in place, a spec file would carry the body's with clauses and
+    the body would compile without them (baseline fails, pair skipped).
+    The unit's own ``end <name>;`` is the last one in its text; everything
+    after it that looks like a context clause moves to the next unit.
+    """
+    ends = list(_UNIT_END.finditer(text))
+    if not ends:
+        return text, ""
+    split_at = ends[-1].end()
+    head, tail = text[:split_at], text[split_at:]
+    carry: list[str] = []
+    rest: list[str] = []
+    for line in tail.splitlines():
+        if _CONTEXT_LINE.match(line):
+            carry.append(line)
+        else:
+            rest.append(line)
+    if not carry:
+        return text, ""
+    head += "\n".join(rest).rstrip()
+    return head, "\n".join(carry)
+
+
+def _carry_trailing_context(
+    units: list[tuple[str, str, str]],
+) -> list[tuple[str, str, str]]:
+    """Move each unit's trailing with/use lines to the following unit."""
+    for i in range(len(units) - 1):
+        head, carry = _split_trailing_context(units[i][2])
+        if carry:
+            units[i] = (units[i][0], units[i][1], head)
+            units[i + 1] = (units[i + 1][0], units[i + 1][1], carry + "\n" + units[i + 1][2])
+    return units
+
+
 def split_units(code: str) -> list[tuple[str, str, str]]:
     """Split a concatenated Ada snippet into (unit_name, file_name, text).
 
@@ -105,7 +150,9 @@ def split_units(code: str) -> list[tuple[str, str, str]]:
     # to identify and write it.
     first_start = starts[0][0] if starts else len(code)
     prefix = code[:first_start]
-    head = re.match(r"\s*package\s+(body\s+)?((\w+)(?:\.\w+)*)", prefix)
+    # re.search, not re.match: the broken first unit may be preceded by its
+    # own with/use lines, and the head pattern must still find it.
+    head = re.search(r"^\s*package\s+(body\s+)?((\w+)(?:\.\w+)*)", prefix, re.MULTILINE)
     if head:
         is_body_h = bool(head.group(1))
         full_h = head.group(2)
@@ -117,7 +164,7 @@ def split_units(code: str) -> list[tuple[str, str, str]]:
             ext_h = ".adb" if is_body_h else ".ads"
             units.insert(0, (short_h, full_h.lower().replace(".", "-") + ext_h, prefix.strip()))
     if units:
-        return units
+        return _carry_trailing_context(units)
     # Tolerant fallback for intentionally broken snippets, such as the
     # syntax family's dropped 'is': the strict pattern needs 'is' but the
     # broken unit still has a name and an 'end <name>;'. Without the

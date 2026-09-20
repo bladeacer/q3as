@@ -97,8 +97,8 @@ test: ## Run the Python unit tests
 	uv run pytest tests/ -q
 
 lint: ## Run ruff and mypy over the project sources
-	uv run ruff check data/processing_scripts/build_dataset.py scripts/ eval/ tests/
-	uv run mypy data/processing_scripts/build_dataset.py scripts/alire_env.py scripts/gen_agents_tree.py
+	uv run ruff check data/processing_scripts/ scripts/ eval/ tests/
+	uv run mypy data/processing_scripts/build_dataset.py data/processing_scripts/parse_docs.py data/processing_scripts/parse_ada_ast.py scripts/alire_env.py scripts/gen_agents_tree.py
 
 validate-defects: ## Compile-check dataset defect pairs with the Alire GNAT
 	uv run python scripts/validate_defects.py
