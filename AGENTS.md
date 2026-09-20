@@ -8,61 +8,40 @@ which commands to use. Regenerate the tree below with `make agents-tree`.
 ## Pipeline at a glance
 
 1. `make download` fetches `unsloth/Qwen3-8B` to `models/qwen3-8b/`.
-2. `make build-dataset` walks Ada source trees of the sibling repos and emits
-   `data/processed/dataset.jsonl` (chat-format turns: code, doc-QA, defect
-   pairs, toolchain QA).
-3. `make train` runs QLoRA fine-tuning (Unsloth) and writes checkpoints to
-   `outputs/q3as/`.
-4. `make generate` produces Ada solutions with both models into
+2. `make parse-data` runs the parser modules (doc chunking, AST extraction)
+   into `data/processed/*.jsonl`.
+3. `make build-dataset` walks Ada source trees of the sibling repos, ingests
+   the parser outputs, and emits `data/processed/dataset.jsonl` plus the
+   train/val/test split files (chat-format turns: code, doc-QA, defect
+   pairs, contract-writing, toolchain QA).
+4. `make train` runs QLoRA fine-tuning (Unsloth) with seeded early stopping
+   and writes checkpoints to `outputs/q3as/`.
+5. `make generate` produces Ada solutions with both models into
    `outputs/generated_solutions/<label>/`.
-5. `make eval` and `make eval-pipeline` score them (BLEU, compilation, unit
+6. `make eval` and `make eval-pipeline` score them (BLEU, compilation, unit
    tests, SPARK proofs) and write reports to `outputs/`.
+
+End-user and developer documentation lives in `docs/` (architecture,
+datasets and training, data provenance, toolchain setup, evaluation);
+README links to it. Keep those pages current when behavior changes.
 
 ## Data provenance and eval integrity
 
-Training data comes from these sources, and none of them may contain
-ada-eval evaluation content:
+**Full documentation: `docs/data-provenance.md` - keep it in sync.** When a
+new data source is added (new `--input-dir`/`--extra-input-dir`, new parser
+source, new sibling repo), update that page's source table and license
+notes, then run `make check-integrity` before building. The same applies
+when the guard, the defect families, or the split logic change: update
+`docs/datasets-and-training.md`.
 
-- Sibling repos (`../adacovex`, `../Ada_CRDT`, `../Ada-83-TLALOC`, and the
-  docs in `../learn`): spec/body pairs, doc-QA, AST-derived turns.
-- `../ada-spark`, `../SimpleEnglish`, `../skills`: guidance and toolchain QA
-  (system prompts and prose only, never eval content).
-- `../ada-eval`: **eval-proper only.** Everything under
-  `../ada-eval/data/base/{expanded,compacted}` are the same 19 samples q3as
-  is scored on, and `canonical_solution` there is the literal answer key.
-  The parsers do walk that tree for AST/contract turns, so every record
-  derived from it is guarded (below). The sample-authoring recipe in the
-  ada-eval README ("Adding a new Sample") is documentation, not data.
-
-**The eval guard (`data/processing_scripts/eval_guard.py`).** It hashes all
-19 eval samples' base projects, canonical solutions, tests, prompts, and any
-`data/generated`/`data/evaluated` completions in two forms: normalized text
-(case-folded, comments stripped, whitespace collapsed) and a structural form
-(user identifiers alpha-renamed by first occurrence; numbers and logic kept,
-so a changed bound changes the hash). Every chat record's code fences are
-extracted with the same parser the corpus uses and compared against the
-blocklist; eval prompt text is also caught as a substring. `build_dataset`
-drops the whole group of any record that matches (one bad turn implies its
-siblings are paraphrases of the same eval content) and records the count in
-`dataset_metadata.json` under `splits.eval_guard`.
-
-This catches more than copy-paste: `make check-integrity` has confirmed
-sibling-repo code that is structurally identical to an eval sample after
-renaming (for example a `STARS` procedure), and `../learn` doc examples that
-are verbatim eval subprograms. Detection is content-based, so it works no
-matter which repo a turn claims as its source.
-
-**Rules for future changes:**
-
-1. Never train on `canonical_solution`, `base/`, `tests/`, `prompt.md`, or
-   compacted records from ada-eval. `--input-dir ../ada-eval` in parser
-   targets is allowed only because the guard removes derived matches.
-2. After any dataset change run `make check-integrity` (exit 0 required)
-   alongside `make validate-defects`.
-3. Adding new eval samples to ada-eval automatically grows the blocklist;
-   rebuild the dataset afterward. No new dataset record may match them.
-4. If the guard reports `degraded` (ada-eval missing), builds proceed but
-   `make check-integrity` exits 2: integrity is unverified, not proven.
+The contract in short: everything under `../ada-eval/data` is eval-proper
+(the 19 benchmark samples and their canonical solutions); the guard
+(`data/processing_scripts/eval_guard.py`) hashes every eval subprogram and
+prompt in normalized and alpha-renamed structural forms and
+`build_dataset` drops any matching record group before splitting.
+`make check-integrity` must exit 0 after any dataset change. Never train
+on `canonical_solution`, `base/`, `tests/`, `prompt.md`, or compacted
+records from ada-eval.
 
 ## Where the important files live
 
@@ -160,6 +139,12 @@ q3as/
        raw/
    deploy/
        Modelfile
+   docs/
+       architecture.md
+       data-provenance.md
+       datasets-and-training.md
+       evaluation.md
+       toolchain-setup.md
    eval/
        results/
        baseline_eval.py

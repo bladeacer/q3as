@@ -195,6 +195,23 @@ def _clean_section_body(body: str) -> str:
     return "\n".join(lines).strip()
 
 
+# The same doc-section request phrased several ways. All variants ask for
+# an STE-compliant explanation; only the natural-language wrapper differs.
+# Ada code inside the answers is never rephrased: syntax is fixed.
+_DOC_USER_PHRASINGS = (
+    ('Explain the section "{title}" from {source}. Follow Simplified '
+    'Technical English rules and define technical terms at first use.'),
+    ('What does the section "{title}" in {source} say? Write the answer in '
+    'Simplified Technical English and define technical terms at first use.'),
+    ('Summarize "{title}" from {source} for an engineer who is new to the '
+    'topic. Use Simplified Technical English rules.'),
+    ('Give a Simplified Technical English explanation of "{title}" from '
+    '{source}. Define each technical term at its first use.'),
+    ('Teach the topic "{title}" from {source}. Write short active sentences '
+    'and follow Simplified Technical English rules.'),
+)
+
+
 def build_section_turn(
     section: dict[str, Any],
     min_chars: int = MIN_SECTION_CHARS,
@@ -213,11 +230,14 @@ def build_section_turn(
         return None
     title_str = " > ".join(title_path)
     source = str(section.get("source", ""))
-    user_msg = (
-        f'Explain the section "{title_str}" from {source}. '
-        "Follow Simplified Technical English rules and define technical "
-        "terms at first use."
-    )
+    source = source.replace("\\", "/").rsplit("/", 1)[-1] if source else source
+    # The same ask, phrased several ways. Selection is content-derived
+    # (crc32 of the section title), so the choice is stable across builds
+    # and worker counts. Prose answers stay STE; only the question varies.
+    phrasing = _DOC_USER_PHRASINGS[
+        zlib.crc32(title_str.encode("utf-8")) % len(_DOC_USER_PHRASINGS)
+    ]
+    user_msg = phrasing.format(title=title_str, source=source or "the AdaCore course material")
     system_msg = bd.STE_RULE_BLOCK + "\n\n" + bd._TECH_TERM_DEFINITION_PROMPT
     return {
         "messages": [

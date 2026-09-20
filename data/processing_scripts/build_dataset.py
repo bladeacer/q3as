@@ -440,6 +440,18 @@ def _collect_skill_docs(root: Path, dir_name: str) -> list[Path]:
 _ADACORE_SKILL_PRIORITY = ["gnatprove", "alire", "gnatdoc", "gnattest", "gnatfuzz"]
 
 
+def _source_label(source: str) -> str:
+    """Machine-independent source label for dataset text.
+
+    Input directories are resolved to absolute paths at discovery time, so
+    embedding them in user messages would hard-code the build machine's
+    filesystem layout into the trained model. Only the final component is
+    meaningful across machines (repo or file name), and it is deterministic.
+    """
+    normalized = source.replace("\\", "/")
+    return normalized.rsplit("/", 1)[-1] or source
+
+
 def _standard_label(standard: str) -> str:
     """Map the detector's 'Unknown' to a natural prompt label."""
     return "Ada" if standard in ("Unknown", "") else standard
@@ -862,6 +874,8 @@ def strip_noisy_comments(code: str) -> str:
 _DEFECT_FAMILIES = (
     "syntax", "context", "visibility", "contract", "mismatch",
     "typo", "hallucinated", "ordering", "scoping", "type", "lang_confusion",
+    "wrong_ref", "nonexistent_call", "bad_typing", "arity", "stray_aspect",
+    "old_misuse",
 )
 
 # Roots of the GNAT predefined library. A with clause corrupted under one of
@@ -880,6 +894,18 @@ _PREDEFINED_ROOTS = ("Ada", "System", "GNAT", "Interfaces")
 # - a numeric literal in a Boolean:     error: expected type
 #                                       "Standard.Boolean"
 # - a C-style '=' assignment:           error: "=" should be ":="
+# - a wrong selected component:         error: "Foo_Line" not declared in
+#                                       "Text_IO"
+# - a call to an undeclared name:       error: "Compute_Stat" is undefined
+# - a string into a numeric object:     error: expected type
+#                                       "Standard.Integer" / found a
+#                                       string type
+# - extra argument in a call:           error: too many arguments in call
+#                                       to "P"
+# - aspect inside a package spec:       error: aspect specifications not
+#                                       allowed here
+# - 'Old outside a postcondition:       error: attribute "Old" can only
+#                                       appear in postcondition
 
 
 def _gnat_unit_display(unit: str) -> str:
@@ -1389,7 +1415,212 @@ def inject_defect(code: str, family: str) -> tuple[str, str, str] | None:
             )
         return None
 
+    if family == "wrong_ref":
+        # Corrupt a selected component name: Foo_Line -> Fo_Line. The unit
+        # compiles, the component does not exist in it. Only predefined
+        # units are corrupted so the claimed message is deterministic.
+        spans = _protected_spans(code)
+        for wm in re.finditer(r"\b(Ada|System|GNAT|Interfaces)[\w.]*\.\s*(\w+)", code):
+            unit, component = wm.group(1), wm.group(2)
+            prefix = code[wm.start():wm.start(2)].rstrip(". \t")
+            pos = wm.start(2)
+            if any(s <= pos < e for s, e in spans) or len(component) < 4:
+                continue
+            if not re.search(r"^\s*with\s+" + re.escape(prefix) + r"\s*;", code, re.MULTILINE):
+                continue
+            cut = max(1, len(component) // 4)
+            corrupted = component[:len(component) - cut]
+            if corrupted == component:
+                continue
+            broken = code[:wm.start(2)] + corrupted + code[wm.end(2):]
+            display = prefix.split(".")[-1]
+            return (
+                broken,
+                (
+                    f"The code calls {corrupted}, which is not declared in the "
+                    f"unit {display}. The reference points at a component that "
+                    "does not exist. The compiler reports the missing "
+                    "declaration."
+                ),
+                f'error: "{corrupted}" not declared in "{display}"',
+            )
+        return None
+
+    if family == "nonexistent_call":
+        # Corrupt the name of a locally declared procedure at a real call
+        # site (never an ``end`` label); the call then names an entity that
+        # does not exist.
+        spans = _protected_spans(code)
+        for pm in re.finditer(r"^\s*procedure\s+(\w+)\s*(?:\([^)]*\))?\s*is\b", code, re.MULTILINE):
+            name = pm.group(1)
+            if len(name) < 4:
+                continue
+            for call_m in re.finditer(rf"(?<!end\s)\b{name}\b\s*(?:\([^)]*\))?\s*;", code):
+                pos = call_m.start()
+                if any(s <= pos < e for s, e in spans):
+                    continue
+                before = code[max(0, pos - 30):pos]
+                if re.search(r"\bend\s*$", before):
+                    continue  # an end label, not a call
+                cut = max(1, len(name) // 3)
+                corrupted = name[:len(name) - cut]
+                if corrupted == name:
+                    continue
+                broken = code[:pos] + corrupted + code[pos + len(name):]
+                if broken != code:
+                    return (
+                        broken,
+                        (
+                            f"The code calls {corrupted}, which is not declared "
+                            f"anywhere in scope. The declared procedure is {name}. "
+                            "A wrong or invented name in a call produces this "
+                            "error."
+                        ),
+                        f'error: "{_gnat_unit_display(corrupted)}" is undefined',
+                    )
+        return None
+
+    if family == "bad_typing":
+        # Assign a string literal to a numeric object: the value's type
+        # cannot match the declared numeric type.
+        begin_m = re.search(r"\bbegin\b", code)
+        if begin_m:
+            numeric = r"(?:Integer|Natural|Positive|Long_Integer|Long_Long_Integer|Short_Integer|Float|Long_Float)"
+            for dm in re.finditer(rf"^\s*(\w+)\s*:\s*{numeric}\s*(:=[^;]*)?;", code[:begin_m.start()], re.MULTILINE):
+                name = dm.group(1)
+                assign_m = re.search(rf"\b{name}\s*:=\s*[^;]+;", code[begin_m.end():])
+                if not assign_m:
+                    continue
+                pos = begin_m.end() + assign_m.start()
+                assign_part = assign_m.group(0)
+                rhs_m = re.search(r":=\s*(.+?);", assign_part, re.DOTALL)
+                rhs = rhs_m.group(1).strip() if rhs_m else ""
+                if rhs.startswith('"') and rhs.endswith('"'):
+                    continue  # already a string; nothing to corrupt
+                new_rhs = '"' + rhs.strip('"\'') + '"'
+                broken = code[:pos] + re.sub(r":=\s*.+?;", f":= {new_rhs};", assign_part, flags=re.DOTALL) + code[pos + len(assign_part):]
+                if broken != code:
+                    return (
+                        broken,
+                        (
+                            f"The statement assigns a string value to {name}, a "
+                            "numeric object. The value type cannot match the "
+                            "declared type. The compiler expects the numeric "
+                            "type and rejects the string."
+                        ),
+                        f'error: expected type "Standard.{_old_type_for(name, code)}"',
+                    )
+        return None
+
+    if family == "arity":
+        # Add a spurious argument to a call of a locally declared
+        # subprogram: the visible declaration cannot accept it.
+        begin_m = re.search(r"\bbegin\b", code)
+        if begin_m:
+            for pm in re.finditer(r"^\s*(?:procedure|function)\s+(\w+)\s*\(([^)]*)\)", code[:begin_m.start()], re.MULTILINE):
+                name, params = pm.group(1), pm.group(2)
+                if not params.strip():
+                    continue
+                arg_call: re.Match[str] | None = re.search(rf"\b{name}\s*(\([^)]*\))\s*;", code[begin_m.end():])
+                if not arg_call or "=>" in arg_call.group(1):
+                    # Named associations would trigger a different error
+                    # (positional after named), not the arg-count one.
+                    continue
+                pos = begin_m.end() + arg_call.start()
+                broken = (
+                    code[:pos]
+                    + re.sub(r"\(([^)]*)\)\s*;", lambda mm: "(" + mm.group(1) + ", 0);", arg_call.group(0))
+                    + code[pos + len(arg_call.group(0)):]
+                )
+                if broken != code:
+                    count = len([p for p in params.split(";") if p.strip()])
+                    return (
+                        broken,
+                        (
+                            f"The call of {name} passes more arguments than the "
+                            f"declaration accepts. The declaration takes {count} "
+                            "argument(s). The compiler counts the arguments and "
+                            "rejects the call."
+                        ),
+                        f'error: too many arguments in call to "{_gnat_unit_display(name)}"',
+                    )
+        return None
+
+    if family == "stray_aspect":
+        # Insert an aspect clause where aspects are not allowed: directly
+        # inside a package spec body (before the first declaration).
+        pkg_m = re.search(r"^\s*package\s+(?:body\s+)?(\w[\w.]*)\s+is\s*$", code, re.MULTILINE | re.IGNORECASE)
+        if pkg_m:
+            insert_at = pkg_m.end()
+            broken = code[:insert_at] + "\n   with Pre => True;" + code[insert_at:]
+            if broken != code:
+                return (
+                    broken,
+                    (
+                        "An aspect specification sits inside the package "
+                        "declarative part. Aspects attach to declarations such "
+                        "as subprograms and objects, not to the package itself "
+                        "at this position. The compiler rejects the clause."
+                    ),
+                    "error: aspect specifications not allowed here",
+                )
+        return None
+
+    if family == "old_misuse":
+        # Put 'Old into a precondition: 'Old reads the value at the entry
+        # point, and only postconditions can do that. Probed message:
+        # error: attribute "Old" can only appear in postcondition.
+        if "'Old" in code:
+            return None
+        fm = re.search(
+            r"\bfunction\s+(\w+)\s*\(([^)]*)\)[^;]*?\bwith\s+Pre\s*=>\s*([^;]+);",
+            code, re.DOTALL,
+        )
+        if fm:
+            params = fm.group(2)
+            param_m = re.search(r"\b(\w+)\s*:\s*", params)
+            pre_expr = fm.group(3)
+            if param_m and param_m.group(1) in pre_expr and not re.search(r"\b\w+'", pre_expr):
+                param = param_m.group(1)
+                pre_start = fm.start(3)
+                pre_ref: re.Match[str] | None = re.search(rf"\b{param}\b", pre_expr)
+                if pre_ref is None:
+                    return None
+                broken = code[:pre_start + pre_ref.start()] + param + "'Old" + code[pre_start + pre_ref.end():]
+                if broken != code:
+                    return (
+                        broken,
+                        (
+                            f"The precondition of {fm.group(1)} reads {param}'Old. "
+                            "Old refers to the value of an expression at the "
+                            "entry point. Only postconditions can read that "
+                            "value, so the compiler rejects the clause."
+                        ),
+                        'error: attribute "Old" can only appear in postcondition',
+                    )
+        return None
+
     return None
+
+
+def _prefix_up_to(code: str, pos: int) -> str:
+    """Dotted prefix (Ada, Ada.Text_IO, ...) ending just before *pos*."""
+    start = max(code.rfind(";", 0, pos), code.rfind("\n", 0, pos), 0)
+    line = code[start:pos]
+    m = re.search(r"\b(Ada|System|GNAT|Interfaces)(?:\.\w+)+$", line)
+    return m.group(0) if m else (m.group(0) if (m := re.search(r"\b\w+(?:\.\w+)+$", line)) else "")
+
+
+def _old_type_for(name: str, code: str) -> str:
+    """Base type of *name*'s declaration for GNAT's 'expected type' message.
+
+    GNAT reports the base type, not the subtype: an object declared Natural
+    expects "Standard.Integer" (verified). Subtypes with a differently
+    named root map to that root; everything else is its own base.
+    """
+    m = re.search(rf"^\s*{name}\s*:\s*(\w+)\s*(:=)?\s*;", code, re.MULTILINE)
+    declared = m.group(1) if m else "Integer"
+    return {"Natural": "Integer", "Positive": "Integer"}.get(declared, declared)
 
 
 _DEFECT_FAMILY_ORDER: tuple[str, ...] = _DEFECT_FAMILIES
@@ -1447,7 +1678,7 @@ def build_defect_turns(
             phrase.format(standard=_standard_label(standard), package=package or "this unit")
             + "\n\n"
             + f"```ada\n{broken}\n```\n\n"
-            + f"Source: {source}"
+            + f"Source: {_source_label(source)}"
         )
         assistant_msg = (
             f"The code has this defect. {diagnosis}\n\n"
@@ -1484,7 +1715,9 @@ def _compose_system_prompt(
     """
     parts = [
         (
-            f"You are an Ada language expert specializing in {_standard_label(standard)}. "
+            "You are an Ada/SPARK language expert. You work with the full Ada "
+            "language spectrum from Ada 83 to Ada 2022, including SPARK 2014. "
+            f"This task targets {_standard_label(standard)}. "
             "You produce safe, correct, standards-compliant Ada code, and you "
             "diagnose broken code accurately. You write explanations that follow "
             "Simplified Technical English (ASD-STE100) rules."
@@ -1655,7 +1888,9 @@ def build_doc_training_turns(
             turn["messages"].insert(0, {
                 "role": "system",
                 "content": (
-                    "You are a specialized Ada/SPARK AI agent. You write strictly "
+                    "You are a specialized Ada/SPARK AI agent. You work with the "
+                    "full Ada language spectrum from Ada 83 to Ada 2022, including "
+                    "SPARK 2014. You write strictly "
                     "conforming, idiomatic code, prioritize contract annotations "
                     "(Pre/Post), and target the current GNAT/Alire toolchain.\n\n"
                     f"{guidance_text}"
@@ -1897,7 +2132,9 @@ def format_training_turn(
     system_msg = _compose_system_prompt(standard, ste_rules, glossary)
     if guidance_text:
         system_msg += "\n\n" + (
-            "You are a specialized Ada/SPARK AI agent. You write strictly "
+            "You are a specialized Ada/SPARK AI agent. You work with the full "
+            "Ada language spectrum from Ada 83 to Ada 2022, including SPARK "
+            "2014. You write strictly "
             "conforming, idiomatic code, prioritize contract annotations "
             "(Pre/Post), and target the current GNAT/Alire toolchain.\n\n"
             f"{guidance_text}"
@@ -1907,7 +2144,7 @@ def format_training_turn(
     if spec_content and impl_content:
         user_msg = (
             f"Ada {_standard_label(standard)} - Package specification for `{package}`.\n\n"
-            f"Source: {source}\n\n"
+            f"Source: {_source_label(source)}\n\n"
             f"Please complete the following package body based on the "
             f"specification below.\n\n---\n\n"
             f"```ada\n{spec_content}\n```\n\n"
@@ -1917,7 +2154,7 @@ def format_training_turn(
     elif spec_content and not impl_content:
         user_msg = (
             f"Ada {_standard_label(standard)} - Package specification for `{package}`.\n\n"
-            f"Source: {source}\n\n"
+            f"Source: {_source_label(source)}\n\n"
             f"Please provide the full package body implementation for "
             f"the following specification.\n\n---\n\n"
             f"```ada\n{spec_content}\n```\n\n"
@@ -1927,7 +2164,7 @@ def format_training_turn(
     elif impl_content and not spec_content:
         user_msg = (
             f"Ada {_standard_label(standard)} - Implementation unit for `{package}`.\n\n"
-            f"Source: {source}\n\n"
+            f"Source: {_source_label(source)}\n\n"
             f"Please provide the corresponding package specification "
             f"(`.ads` file) for this implementation.\n\n---\n\n"
             f"```ada\n{impl_content}\n```\n\n"
@@ -2117,6 +2354,16 @@ def _extra_turn_kind(meta: dict[str, Any]) -> str:
     return "extra"
 
 
+# Fence blocks in arbitrary messages (assistant replies, user prompts).
+_FENCE_BLOCK_RE = re.compile(r"```(?:ada)?\n(.*?)```", re.DOTALL)
+
+
+def _detect_standard_for_block(code: str) -> str:
+    """Standard for ingested code: content-derived, defaults to SPARK 2014."""
+    std = detect_ada_standard(code)
+    return std if std not in ("Unknown", "") else "SPARK 2014"
+
+
 def _extra_turn_group(record: dict[str, Any], index: int) -> str:
     """Split group for one extra record.
 
@@ -2141,12 +2388,19 @@ def _ingest_extra_turns(
     all_grouped: list[tuple[str, dict[str, list[dict[str, str]]]]],
     turn_counts: dict[str, int],
 ) -> None:
-    """Load parser-produced JSONL turn files into the grouped turn pool."""
+    """Load parser-produced JSONL turn files into the grouped turn pool.
+
+    Records whose assistant reply carries an Ada code block (impl, contract
+    write, type turns) also get defect turns: the injected families run on
+    the extracted code itself, so AST-derived training data gets the same
+    broken-example coverage as the pair pipeline.
+    """
     for extra_path in extra_paths:
         if not extra_path.exists():
             logger.warning("Extra turns file not found, skipping: %s", extra_path)
             continue
         ingested = 0
+        defect_turns = 0
         try:
             with open(extra_path, "r", encoding="utf-8") as f:
                 for index, line in enumerate(f):
@@ -2162,15 +2416,39 @@ def _ingest_extra_turns(
                     if len(messages) < 2:
                         continue
                     meta = record.get("meta") or {}
-                    all_grouped.append((_extra_turn_group(record, index), {"messages": messages}))
+                    group = _extra_turn_group(record, index)
+                    all_grouped.append((group, {"messages": messages}))
                     kind = _extra_turn_kind(meta)
                     turn_counts[kind] = turn_counts.get(kind, 0) + 1
                     ingested += 1
+
+                    # Defect pairs from the record's own code (same group, so
+                    # they never straddle splits).
+                    code_blocks = _FENCE_BLOCK_RE.findall(
+                        "\n".join(m.get("content", "") for m in messages)
+                    )
+                    if code_blocks:
+                        std = meta.get("standard") or _detect_standard_for_block(code_blocks[0])
+                        new_defects = build_defect_turns(
+                            code_blocks[0], std,
+                            meta.get("unit") or None,
+                            meta.get("source", ""),
+                            STE_RULE_BLOCK,
+                            build_technical_term_glossary(),
+                        )
+                        for dturn in new_defects:
+                            all_grouped.append((group, dturn))
+                            defect_turns += 1
         except OSError as exc:
             logger.warning("Cannot read extra turns file %s: %s", extra_path, exc)
             continue
+        if defect_turns:
+            turn_counts["ast_defect"] = turn_counts.get("ast_defect", 0) + defect_turns
         if ingested:
-            logger.info("Ingested %d extra turns from %s", ingested, extra_path)
+            logger.info(
+                "Ingested %d extra turns from %s (+%d defect turns)",
+                ingested, extra_path, defect_turns,
+            )
         else:
             logger.warning("No usable turns in extra turns file: %s", extra_path)
 

@@ -306,6 +306,11 @@ def _standard_label(code: str) -> str:
     return bd._standard_label(bd.detect_ada_standard(code))
 
 
+def _source_label(path_str: str) -> str:
+    """Machine-independent label: final path component only."""
+    return path_str.replace("\\", "/").rsplit("/", 1)[-1] if path_str else path_str
+
+
 def _strip_aspects(spec_text: str) -> str:
     """Remove the aspect clause (``with Pre => ... ;``) from a declaration.
 
@@ -330,7 +335,7 @@ def build_ada_ast_turns(
         if not spec_text:
             continue
         standard = _standard_label(spec_text)
-        source = pair.get("file", "")
+        source = _source_label(pair.get("file", ""))
         if pair["has_body"]:
             records.append({
                 "messages": [
@@ -417,7 +422,7 @@ def build_ada_ast_turns(
             ],
             "meta": {
                 "kind": "ast_type", "unit": name,
-                "source": type_unit.get("file", ""),
+                "source": _source_label(type_unit.get("file", "")),
                 "group": f"ast:{zlib.crc32(text.encode('utf-8'))}",
             },
         })
