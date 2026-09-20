@@ -58,6 +58,8 @@ import zlib
 from pathlib import Path
 from typing import Any
 
+import code_variants
+
 # --------------------------------------------------------------------------- #
 # Constants
 # --------------------------------------------------------------------------- #
@@ -2351,6 +2353,8 @@ def _extra_turn_kind(meta: dict[str, Any]) -> str:
         return "doc_section"
     if kind.startswith("ast_"):
         return "ast_qa"
+    if kind.startswith("contract_synth_"):
+        return "contract_synth"
     return "extra"
 
 
@@ -2401,6 +2405,7 @@ def _ingest_extra_turns(
             continue
         ingested = 0
         defect_turns = 0
+        variant_turns_count = 0
         try:
             with open(extra_path, "r", encoding="utf-8") as f:
                 for index, line in enumerate(f):
@@ -2439,15 +2444,26 @@ def _ingest_extra_turns(
                         for dturn in new_defects:
                             all_grouped.append((group, dturn))
                             defect_turns += 1
+
+                        # Correct-variant turns (renamed, reordered) from the
+                        # original record only - never from its defect turns,
+                        # whose broken code must stay tied to the original.
+                        if not meta.get("kind", "").endswith(("_fix", "_defect")):
+                            vturns = code_variants.variant_turns(record)
+                            for _vgroup, vturn in vturns:
+                                all_grouped.append((group, vturn))
+                                variant_turns_count += 1
         except OSError as exc:
             logger.warning("Cannot read extra turns file %s: %s", extra_path, exc)
             continue
         if defect_turns:
             turn_counts["ast_defect"] = turn_counts.get("ast_defect", 0) + defect_turns
+        if variant_turns_count:
+            turn_counts["variant"] = turn_counts.get("variant", 0) + variant_turns_count
         if ingested:
             logger.info(
-                "Ingested %d extra turns from %s (+%d defect turns)",
-                ingested, extra_path, defect_turns,
+                "Ingested %d extra turns from %s (+%d defect, +%d variant turns)",
+                ingested, extra_path, defect_turns, variant_turns_count,
             )
         else:
             logger.warning("No usable turns in extra turns file: %s", extra_path)
@@ -2808,6 +2824,7 @@ def main() -> None:
             path for path in (
                 DEFAULT_OUTPUT_DIR / "docs_chunks.jsonl",
                 DEFAULT_OUTPUT_DIR / "ada_ast_units.jsonl",
+                DEFAULT_OUTPUT_DIR / "contract_mutations.jsonl",
             )
             if path.exists()
         ]

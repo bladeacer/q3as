@@ -16,7 +16,7 @@ Sanity checks:
 
 Usage:
     uv run python training/download_model.py
-    uv run python training/download_model.py --model-name unsloth/Qwen3-8B --cache-dir models/qwen3-8b
+    uv run python training/download_model.py --model-name Qwen/Qwen3-8B --cache-dir models/qwen3-8b
     uv run python training/download_model.py --no-sanity-check
     uv run python training/download_model.py --sanity-deep
     uv run python training/download_model.py --force
@@ -63,7 +63,7 @@ _REQUIRED_FILES = {
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Download and sanity-check the Qwen3-8B model.")
     parser.add_argument(
-        "--model-name", type=str, default="unsloth/Qwen3-8B",
+        "--model-name", type=str, default="Qwen/Qwen3-8B",
         help="HuggingFace model identifier to download.",
     )
     parser.add_argument(
@@ -199,7 +199,7 @@ def _read_existing_metadata(cache_dir: Path) -> dict[str, Any]:
             pass
 
     return {
-        "model_name": "unsloth/Qwen3-8B",
+        "model_name": "Qwen/Qwen3-8B",
         "cache_dir": str(cache_dir),
         "file_count": file_count,
         "total_size_bytes": total_size,

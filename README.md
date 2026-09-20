@@ -15,6 +15,7 @@ Every generated explanation follows **ASD-STE100 Simplified Technical English**:
 | [Data provenance](docs/data-provenance.md) | Data sources, licenses, eval-integrity guard |
 | [Toolchain setup](docs/toolchain-setup.md) | Alire management, vendored index for outdated `alr` |
 | [Evaluation](docs/evaluation.md) | Benchmark, metrics, interpretation, running |
+| [Results index](docs/results/README.md) | Per-version eval summaries and the last-3 comparison table |
 
 ## Project Credits
 
@@ -71,7 +72,7 @@ uv run python data/processing_scripts/build_dataset.py --input-dir data/raw/ --e
 uv run python training/train_unsloth.py
 
 # Generate Ada code with both base and fine-tuned models
-# (--base-model defaults to the local download models/qwen3-8b, i.e. unsloth/Qwen3-8B)
+# (--base-model defaults to the local download models/qwen3-8b, i.e. Qwen/Qwen3-8B)
 uv run python eval/generate.py --model outputs/q3as --base-model models/qwen3-8b
 
 # Run full evaluation (BLEU + compilation/test/SPARK metrics, base comparison)
@@ -85,9 +86,9 @@ Alternatively, you can use the Makefile directly.
 
 ## Hugging Face Token Setup
 
-The model download script uses `huggingface_hub` with `hf_transfer` for accelerated downloads. If you are downloading gated models (e.g. `unsloth/Qwen3-8B`), you need a Hugging Face access token.
+q3as downloads the **official [`Qwen/Qwen3-8B`](https://huggingface.co/Qwen/Qwen3-8B)** checkpoint. Unsloth is the training framework only (patched kernels and QLoRA); the weights are Qwen's original release, never an unsloth-provisioned copy. If the repo requires accepting a license, you need a Hugging Face access token.
 
-The downloaded base model lives at `models/qwen3-8b` and is the single source of truth for the pipeline: training (`train_unsloth.py`), generation (`generate.py`), and evaluation (`baseline_eval.py`) all default to that local copy of `unsloth/Qwen3-8B`, so the same downloaded weights are used end to end.
+The downloaded base model lives at `models/qwen3-8b` and is the single source of truth for the pipeline: training (`train_unsloth.py`), generation (`generate.py`), and evaluation (`baseline_eval.py`) all default to that local copy of `Qwen/Qwen3-8B`, so the same downloaded weights are used end to end.
 
 1. Create a token at [https://huggingface.co/settings/tokens](https://huggingface.co/settings/tokens)
 2. Copy the placeholder environment file:

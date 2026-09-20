@@ -7,7 +7,8 @@ which commands to use. Regenerate the tree below with `make agents-tree`.
 
 ## Pipeline at a glance
 
-1. `make download` fetches `unsloth/Qwen3-8B` to `models/qwen3-8b/`.
+1. `make download` fetches the official `Qwen/Qwen3-8B` to `models/qwen3-8b/`
+   (Unsloth is the training framework only, never the weight source).
 2. `make parse-data` runs the parser modules (doc chunking, AST extraction)
    into `data/processed/*.jsonl`.
 3. `make build-dataset` walks Ada source trees of the sibling repos, ingests
@@ -19,7 +20,9 @@ which commands to use. Regenerate the tree below with `make agents-tree`.
 5. `make generate` produces Ada solutions with both models into
    `outputs/generated_solutions/<label>/`.
 6. `make eval` and `make eval-pipeline` score them (BLEU, compilation, unit
-   tests, SPARK proofs) and write reports to `outputs/`.
+   tests, SPARK proofs) and write reports to `outputs/`; `make eval-report`
+   writes the versioned summary to `docs/results/result-vX.Y.Z.md` (version
+   from `alire.toml`, bumped with `make bump-version`).
 
 End-user and developer documentation lives in `docs/` (architecture,
 datasets and training, data provenance, toolchain setup, evaluation);
@@ -125,6 +128,7 @@ q3as/
    data/
        processed/
            ada_ast_units.jsonl
+           contract_mutations.jsonl
            dataset.jsonl
            dataset_metadata.json
            dataset_test.jsonl
@@ -133,6 +137,7 @@ q3as/
            docs_chunks.jsonl
        processing_scripts/
            build_dataset.py
+           code_variants.py
            eval_guard.py
            parse_ada_ast.py
            parse_docs.py
@@ -140,6 +145,10 @@ q3as/
    deploy/
        Modelfile
    docs/
+       results/
+           README.md
+           result-data-v0.1.0.json
+           result-v0.1.0.md
        architecture.md
        data-provenance.md
        datasets-and-training.md
@@ -162,14 +171,21 @@ q3as/
    scripts/
        ada_env.sh
        alire_env.py
+       bump_version.py
        gen_agents_tree.py
+       gen_contract_mutations.py
+       gen_eval_report.py
        validate_defects.py
    tests/
        test_build_dataset.py
+       test_code_variants.py
        test_defect_families.py
        test_eval_guard.py
        test_generate.py
        test_parsers.py
+       test_reporting.py
+   tools/
+       check-links.py
    training/
        download_model.py
        train_unsloth.py

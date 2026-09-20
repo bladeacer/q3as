@@ -11,7 +11,7 @@ model. Evaluation metrics include:
 - SPARK verification success rate (via ada-eval PROVE)
 
 The base model defaults to the LOCAL download (models/qwen3-8b, i.e.
-unsloth/Qwen3-8B) - the same weights used for fine-tuning - so that
+Qwen/Qwen3-8B) - the same weights used for fine-tuning - so that
 the comparison isolates the effect of fine-tuning.
 
 Usage:
@@ -74,7 +74,7 @@ DEFAULT_STANDARD_KEYWORDS: dict[str, list[str]] = {
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Baseline evaluation for q3as model.")
     parser.add_argument("--model", type=Path, default=Path("outputs/q3as"), help="Fine-tuned model checkpoint path.")
-    parser.add_argument("--base-model", type=Path, default=DEFAULT_BASE_MODEL, help="Base model path (default: local models/qwen3-8b download of unsloth/Qwen3-8B).")
+    parser.add_argument("--base-model", type=Path, default=DEFAULT_BASE_MODEL, help="Base model path (default: local models/qwen3-8b download of Qwen/Qwen3-8B).")
     parser.add_argument("--dataset", type=Path, default=Path("data/processed/dataset.jsonl"), help="Evaluation dataset.")
     parser.add_argument("--max-samples", type=int, default=50, help="Maximum number of samples to evaluate.")
     parser.add_argument("--evals", nargs="+", choices=["build", "test", "prove"], default=["build", "test", "prove"], help="Evaluation types to run via ada-eval.")

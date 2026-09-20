@@ -1,0 +1,97 @@
+{
+  "version": "0.1.0",
+  "generated_at": "2026-09-20 15:38 UTC",
+  "ada_eval": {
+    "base_qwen3-8b": {
+      "samples": 19,
+      "build": 7,
+      "build_pct": 36.8,
+      "test": 4,
+      "test_pct": 21.1,
+      "proved": 0,
+      "unproved": 6,
+      "prove_errors": 13,
+      "proved_checks": {
+        "VC_OVERFLOW_CHECK": 4,
+        "SUBPROGRAM_TERMINATION": 3,
+        "VC_INDEX_CHECK": 2,
+        "VC_RANGE_CHECK": 2,
+        "VC_POSTCONDITION": 1,
+        "UNINITIALIZED": 1,
+        "VC_PRECONDITION": 1
+      },
+      "unproved_checks": {
+        "VC_OVERFLOW_CHECK": 7,
+        "SUBPROGRAM_TERMINATION": 2,
+        "VC_POSTCONDITION": 1,
+        "VC_FP_OVERFLOW_CHECK": 1,
+        "VC_INDEX_CHECK": 1,
+        "VC_RANGE_CHECK": 1,
+        "VC_PRECONDITION": 1
+      },
+      "datasets": {
+        "spark_spark_custom": {
+          "samples": 2,
+          "build": 2,
+          "test": 2
+        },
+        "spark_spark_human_eval_silver": {
+          "samples": 4,
+          "build": 2,
+          "test": 0
+        },
+        "spark_spark_learn": {
+          "samples": 13,
+          "build": 3,
+          "test": 2
+        }
+      }
+    },
+    "fine_tuned": {
+      "samples": 19,
+      "build": 16,
+      "build_pct": 84.2,
+      "test": 11,
+      "test_pct": 57.9,
+      "proved": 0,
+      "unproved": 14,
+      "prove_errors": 5,
+      "proved_checks": {
+        "SUBPROGRAM_TERMINATION": 8,
+        "VC_INDEX_CHECK": 7,
+        "VC_OVERFLOW_CHECK": 7,
+        "VC_RANGE_CHECK": 4,
+        "UNINITIALIZED": 3,
+        "VC_PRECONDITION": 2
+      },
+      "unproved_checks": {
+        "VC_OVERFLOW_CHECK": 8,
+        "VC_POSTCONDITION": 3,
+        "UNINITIALIZED": 3,
+        "VC_RAISE": 2,
+        "DEPENDS_MISSING": 2,
+        "SUBPROGRAM_TERMINATION": 1,
+        "VC_FP_OVERFLOW_CHECK": 1,
+        "VC_PRECONDITION": 1
+      },
+      "datasets": {
+        "spark_spark_custom": {
+          "samples": 2,
+          "build": 2,
+          "test": 2
+        },
+        "spark_spark_human_eval_silver": {
+          "samples": 4,
+          "build": 2,
+          "test": 0
+        },
+        "spark_spark_learn": {
+          "samples": 13,
+          "build": 12,
+          "test": 9
+        }
+      }
+    }
+  },
+  "pipeline_report_note": "======================================================================\nQ3AS EVALUATION REPORT: BASE vs FINE-TUNED MODEL\n======================================================================\n--- base_qwen3-8b ---\n  Compilation: 7/19 passed (36.8%)\n  Unit Tests:  4/19 passed (21.1%)"
+}

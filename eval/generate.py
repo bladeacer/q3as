@@ -13,7 +13,7 @@ prompt's target path) and overlaid on the base tree, so the packed
 generated_solution is a complete, buildable ada-eval project.
 
 The base model defaults to the LOCAL download (models/qwen3-8b, i.e.
-unsloth/Qwen3-8B) so that training and evaluation use exactly the same
+Qwen/Qwen3-8B) so that training and evaluation use exactly the same
 downloaded base weights.
 
 Usage:
@@ -65,7 +65,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--base-model", type=Path, default=DEFAULT_BASE_MODEL,
-        help="Base model path (default: local models/qwen3-8b download of unsloth/Qwen3-8B).",
+        help="Base model path (default: local models/qwen3-8b download of Qwen/Qwen3-8B).",
     )
     parser.add_argument(
         "--dataset", type=str, default=None,

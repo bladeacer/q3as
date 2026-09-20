@@ -5,7 +5,7 @@ quantization optimized for 8 GB VRAM. Uses the Unsloth library for efficient
 LoRA fine-tuning with the OpenAI/Qwen chat template format.
 
 By default this trains the LOCAL base model downloaded by download_model.py
-(models/qwen3-8b, unsloth/Qwen3-8B) so that training, generation, and
+(models/qwen3-8b, Qwen/Qwen3-8B) so that training, generation, and
 evaluation all use exactly the same base weights. Passing a HuggingFace id
 via --model-name re-downloads/uses that revision instead.
 

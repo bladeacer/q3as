@@ -4,7 +4,7 @@ What each part of q3as does and how the pieces connect.
 
 ## Pipeline at a glance
 
-1. `make download` fetches `unsloth/Qwen3-8B` to `models/qwen3-8b/`.
+1. `make download` fetches the official [`Qwen/Qwen3-8B`](https://huggingface.co/Qwen/Qwen3-8B) to `models/qwen3-8b/`. Unsloth is the training framework only (patched kernels, QLoRA); the weights are always Qwen's original release.
 2. `make parse-data` runs the parser modules (heading-aware doc chunking,
    AST extraction) into standalone JSONL under `data/processed/`.
 3. `make build-dataset` walks the Ada source trees of the sibling repos,
