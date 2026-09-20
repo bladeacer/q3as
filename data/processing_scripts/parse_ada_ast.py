@@ -306,6 +306,17 @@ def _standard_label(code: str) -> str:
     return bd._standard_label(bd.detect_ada_standard(code))
 
 
+def _strip_aspects(spec_text: str) -> str:
+    """Remove the aspect clause (``with Pre => ... ;``) from a declaration.
+
+    Aspect expressions contain no semicolons, so everything from the aspect
+    marker ``with`` to the terminating semicolon is the clause. A declaration
+    without aspects is returned unchanged, which callers use as the signal
+    that no contract-completion turn can be built.
+    """
+    return re.sub(r"\s+\bwith\b[^;]*(?=;)", "", spec_text, count=1, flags=re.DOTALL)
+
+
 def build_ada_ast_turns(
     specs: list[dict[str, Any]],
     bodies: list[dict[str, Any]],
@@ -357,6 +368,40 @@ def build_ada_ast_turns(
                     "group": f"ast:{zlib.crc32(spec_text.encode('utf-8'))}",
                 },
             })
+
+            # Spec-to-contract completion: show the bare declaration, ask for
+            # the contract. This is the write-side skill the eval measures:
+            # choosing Pre/Post/Global/Depends that make a subprogram provable.
+            # The contract must be earned from real code, so blocklist hits are
+            # removed by the eval guard before any split is written.
+            bare = _strip_aspects(spec_text)
+            if bare != spec_text:
+                # Rebuild the full declaration: bare signature minus its
+                # terminating semicolon, one aspect clause, comma-separated
+                # aspects (repeated `with` markers are not valid Ada).
+                decl = bare.rstrip()
+                if decl.endswith(";"):
+                    decl = decl[:-1].rstrip()
+                aspects_str = ",\n        ".join(
+                    f"{aspect_name} => {expr}"
+                    for aspect_name, expr in pair["aspects"].items()
+                )
+                contract_decl = f"{decl}\n   with {aspects_str};"
+                records.append({
+                    "messages": [
+                        {"role": "user", "content": (
+                            f"Write the SPARK contract for this {standard} "
+                            f"subprogram `{name}`. Give the declaration with "
+                            "its aspect clauses (Pre, Post, Global, Depends) "
+                            "only.\n\n```ada\n" + bare + "\n```"
+                        )},
+                        {"role": "assistant", "content": f"```ada\n{contract_decl}\n```"},
+                    ],
+                    "meta": {
+                        "kind": "ast_contract_write", "unit": name, "source": source,
+                        "group": f"ast:{zlib.crc32(spec_text.encode('utf-8'))}",
+                    },
+                })
     for type_unit in types:
         name = type_unit["name"]
         text = type_unit["text"]

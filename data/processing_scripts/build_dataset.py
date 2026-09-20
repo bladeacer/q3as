@@ -2335,6 +2335,22 @@ def build_dataset(
     # Pre-built turns from the parser modules (doc chunks, Ada AST units).
     _ingest_extra_turns(extra_turns or [], all_grouped, turn_counts)
 
+    # Eval-integrity guard: drop any group whose content matches the ada-eval
+    # evaluation suite (verbatim, reformatted, or identifier-renamed). One
+    # bad turn poisons its whole group. Runs before dedup and split so no
+    # eval-derived record can reach any split file.
+    import eval_guard
+
+    all_grouped, guard_dropped, guard_reasons = eval_guard.contaminated_groups(all_grouped)
+    guard_sigs = eval_guard.load_eval_signatures()
+    if guard_dropped:
+        logger.warning(
+            "Eval guard dropped %d records in %d groups: %s",
+            guard_dropped,
+            len(set(guard_reasons)),
+            ", ".join(sorted(set(guard_reasons))[:10]),
+        )
+
     # Remove cross-group exact duplicates before splitting (see docstring).
     all_grouped, deduped_count = dedup_grouped(all_grouped)
     if deduped_count:
@@ -2396,6 +2412,11 @@ def build_dataset(
             "seed": split_seed,
             "strategy": "group-aware: every turn from one source pair or doc block stays in one split",
             "deduped_duplicates": deduped_count,
+            "eval_guard": {
+                "degraded": guard_sigs.degraded,
+                "blocked_signatures": len(guard_sigs),
+                "dropped_records": guard_dropped,
+            },
             "ratios": {"train": 0.90, "val": 0.05, "test": 0.05},
             "counts": split_counts,
             "files": {name: str(path) for name, path in split_paths.items()},

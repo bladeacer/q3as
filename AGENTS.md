@@ -18,12 +18,62 @@ which commands to use. Regenerate the tree below with `make agents-tree`.
 5. `make eval` and `make eval-pipeline` score them (BLEU, compilation, unit
    tests, SPARK proofs) and write reports to `outputs/`.
 
+## Data provenance and eval integrity
+
+Training data comes from these sources, and none of them may contain
+ada-eval evaluation content:
+
+- Sibling repos (`../adacovex`, `../Ada_CRDT`, `../Ada-83-TLALOC`, and the
+  docs in `../learn`): spec/body pairs, doc-QA, AST-derived turns.
+- `../ada-spark`, `../SimpleEnglish`, `../skills`: guidance and toolchain QA
+  (system prompts and prose only, never eval content).
+- `../ada-eval`: **eval-proper only.** Everything under
+  `../ada-eval/data/base/{expanded,compacted}` are the same 19 samples q3as
+  is scored on, and `canonical_solution` there is the literal answer key.
+  The parsers do walk that tree for AST/contract turns, so every record
+  derived from it is guarded (below). The sample-authoring recipe in the
+  ada-eval README ("Adding a new Sample") is documentation, not data.
+
+**The eval guard (`data/processing_scripts/eval_guard.py`).** It hashes all
+19 eval samples' base projects, canonical solutions, tests, prompts, and any
+`data/generated`/`data/evaluated` completions in two forms: normalized text
+(case-folded, comments stripped, whitespace collapsed) and a structural form
+(user identifiers alpha-renamed by first occurrence; numbers and logic kept,
+so a changed bound changes the hash). Every chat record's code fences are
+extracted with the same parser the corpus uses and compared against the
+blocklist; eval prompt text is also caught as a substring. `build_dataset`
+drops the whole group of any record that matches (one bad turn implies its
+siblings are paraphrases of the same eval content) and records the count in
+`dataset_metadata.json` under `splits.eval_guard`.
+
+This catches more than copy-paste: `make check-integrity` has confirmed
+sibling-repo code that is structurally identical to an eval sample after
+renaming (for example a `STARS` procedure), and `../learn` doc examples that
+are verbatim eval subprograms. Detection is content-based, so it works no
+matter which repo a turn claims as its source.
+
+**Rules for future changes:**
+
+1. Never train on `canonical_solution`, `base/`, `tests/`, `prompt.md`, or
+   compacted records from ada-eval. `--input-dir ../ada-eval` in parser
+   targets is allowed only because the guard removes derived matches.
+2. After any dataset change run `make check-integrity` (exit 0 required)
+   alongside `make validate-defects`.
+3. Adding new eval samples to ada-eval automatically grows the blocklist;
+   rebuild the dataset afterward. No new dataset record may match them.
+4. If the guard reports `degraded` (ada-eval missing), builds proceed but
+   `make check-integrity` exits 2: integrity is unverified, not proven.
+
 ## Where the important files live
 
 - `data/processing_scripts/build_dataset.py` - the dataset builder. Discovers
   and pairs Ada sources, sanitizes prose into Simplified Technical English
   (STE), injects correct-vs-wrong defect pairs (five families), distills
   agent-skill guidance into system prompts, and writes JSONL plus metadata.
+- `data/processing_scripts/eval_guard.py` - eval-integrity guard. Hashes every
+  Ada subprogram and prompt in `../ada-eval/data` (normalized and
+  alpha-renamed structural forms) and drops any training record matching
+  them; `make check-integrity` fails if a split file contains eval content.
 - `data/processing_scripts/` - dataset helpers live beside the builder.
 - `training/download_model.py` - HF model download plus terminating sanity
   checks (light by default; deep GPU check runs in a child process with a
@@ -104,6 +154,7 @@ q3as/
            docs_chunks.jsonl
        processing_scripts/
            build_dataset.py
+           eval_guard.py
            parse_ada_ast.py
            parse_docs.py
        raw/
@@ -131,6 +182,7 @@ q3as/
    tests/
        test_build_dataset.py
        test_defect_families.py
+       test_eval_guard.py
        test_generate.py
        test_parsers.py
    training/

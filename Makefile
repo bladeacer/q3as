@@ -1,4 +1,4 @@
-.PHONY: help setup sync download build-dataset parse-data train generate eval eval-pipeline prove ada-env test lint validate-defects agents-tree clean all check-model
+.PHONY: help setup sync download build-dataset parse-data check-integrity train generate eval eval-pipeline prove ada-env test lint validate-defects agents-tree clean all check-model
 
 # bash so `set -o pipefail` works for tee'd targets (training.log capture).
 SHELL := /bin/bash
@@ -101,7 +101,7 @@ test: ## Run the Python unit tests
 
 lint: ## Run ruff and mypy over the project sources
 	uv run ruff check data/processing_scripts/ scripts/ eval/ tests/
-	uv run mypy data/processing_scripts/build_dataset.py data/processing_scripts/parse_docs.py data/processing_scripts/parse_ada_ast.py scripts/alire_env.py scripts/gen_agents_tree.py
+	uv run mypy data/processing_scripts/build_dataset.py data/processing_scripts/parse_docs.py data/processing_scripts/parse_ada_ast.py data/processing_scripts/eval_guard.py scripts/alire_env.py scripts/gen_agents_tree.py
 
 validate-defects: ## Compile-check dataset defect pairs with the Alire GNAT
 	uv run python scripts/validate_defects.py
@@ -109,6 +109,9 @@ validate-defects: ## Compile-check dataset defect pairs with the Alire GNAT
 parse-data: ## Run the parser modules into data/processed/ extra JSONL
 	uv run python data/processing_scripts/parse_docs.py --input-dir ../learn --output data/processed/docs_chunks.jsonl
 	uv run python data/processing_scripts/parse_ada_ast.py --input-dir ../adacovex --input-dir ../Ada_CRDT --input-dir ../ada-eval --output data/processed/ada_ast_units.jsonl
+
+check-integrity: ## Fail if any split file contains ada-eval evaluation content
+	uv run python data/processing_scripts/eval_guard.py data/processed/dataset_train.jsonl data/processed/dataset_val.jsonl data/processed/dataset_test.jsonl
 
 agents-tree: ## Regenerate the project file tree section in AGENTS.md
 	uv run python scripts/gen_agents_tree.py
