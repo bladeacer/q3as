@@ -29,6 +29,7 @@ import gc
 import json
 import logging
 import os
+import random
 import re
 import subprocess
 import sys
@@ -87,6 +88,10 @@ def parse_args() -> argparse.Namespace:
         help="Enable Qwen3 thinking mode during generation.",
     )
     parser.add_argument(
+        "--seed", type=int, default=42,
+        help="Random seed for reproducible sampling on identical hardware.",
+    )
+    parser.add_argument(
         "--system-prompt", type=Path, default=Path(__file__).resolve().parent / "system_prompt_spark.txt",
         help="System prompt for chat messages. Default: the SPARK 2014 system "
         "prompt the fine-tune was trained with (eval/system_prompt_spark.txt). "
@@ -115,6 +120,7 @@ def _worker_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-new-tokens", type=int, default=1024)
     parser.add_argument("--temperature", type=float, default=0.7)
     parser.add_argument("--enable-thinking", action="store_true", default=False)
+    parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
         "--system-prompt", type=Path,
         default=Path(__file__).resolve().parent / "system_prompt_spark.txt",
@@ -137,6 +143,7 @@ def _run_worker(args: argparse.Namespace) -> int:
         level=logging.INFO, format="%(asctime)s [%(levelname)s] [worker] %(message)s"
     )
 
+    set_generation_seed(args.seed)
     args.system_prompt = _load_system_prompt(args.system_prompt)
     model, tokenizer = load_model(args.model_path, args.base_model_path)
     results = run_generation_for_model(
@@ -260,6 +267,8 @@ def parse_generated_files(reply: str, default_path: Path) -> dict[Path, str]:
     fenced block maps that block to *default_path*; a reply with no fences is
     used verbatim at *default_path*, matching the pre-context behavior.
     """
+    if not reply.strip():
+        return {}
     files: dict[Path, str] = {}
     for match in _FILE_BLOCK_RE.finditer(reply):
         path = _safe_source_path(match.group("path"))
@@ -403,6 +412,33 @@ def free_model_memory(model, tokenizer) -> None:
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
         torch.cuda.synchronize()
+
+
+def set_generation_seed(seed: int) -> None:
+    """Seed every RNG the generation path touches.
+
+    transformers.set_seed covers random, numpy, torch (CPU and all CUDA
+    devices). This gives run-to-run reproducible sampling on identical
+    hardware; CUDA kernels themselves stay non-bitwise-deterministic, which
+    is the expected ~99% functional reproducibility for fine-tuned sampling.
+    """
+    random.seed(seed)
+    try:
+        import numpy as np
+
+        np.random.seed(seed)
+    except ImportError:
+        pass
+    try:
+        from transformers import set_seed as hf_set_seed
+
+        hf_set_seed(seed)
+    except ImportError:
+        import torch  # deferred: heavy import
+
+        torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
 
 
 def _load_system_prompt(path: Path) -> str | None:
@@ -611,6 +647,7 @@ def main() -> None:
             cmd += ["--dataset", args.dataset]
         if args.enable_thinking:
             cmd.append("--enable-thinking")
+        cmd += ["--seed", str(args.seed)]
         if args.system_prompt:
             cmd += ["--system-prompt", str(args.system_prompt)]
         if args.verbose:
