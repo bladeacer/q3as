@@ -2048,6 +2048,28 @@ def _process_pair_task(
     return task["group"], turns, counts
 
 
+def dedup_grouped(
+    all_grouped: list[tuple[str, dict[str, list[dict[str, str]]]]],
+) -> tuple[list[tuple[str, dict[str, list[dict[str, str]]]]], int]:
+    """Drop exact-duplicate turns, keeping the first occurrence.
+
+    The same content can be generated in two different groups: a package
+    spec extracted through different source paths, identical doc sections
+    in sibling repos. Group-aware splitting cannot catch that, and copies
+    that straddle splits would leak eval answers into training. Returns
+    the deduplicated list and the number of dropped records.
+    """
+    seen: set[str] = set()
+    deduped: list[tuple[str, dict[str, list[dict[str, str]]]]] = []
+    for group, turn in all_grouped:
+        signature = json.dumps(turn["messages"], sort_keys=True)
+        if signature in seen:
+            continue
+        seen.add(signature)
+        deduped.append((group, turn))
+    return deduped, len(all_grouped) - len(deduped)
+
+
 def assign_splits(
     groups: list[str],
     seed: int = _RNG_SEED,
@@ -2109,7 +2131,8 @@ def _extra_turn_group(record: dict[str, Any], index: int) -> str:
     source = str(meta.get("source", ""))
     section = str(meta.get("section", ""))
     if source or section:
-        return f"extra:{zlib.crc32((source + '\x00' + section).encode('utf-8'))}"
+        key = (source + "\x00" + section).encode("utf-8")
+        return f"extra:{zlib.crc32(key)}"
     return f"extra:record:{index}"
 
 
@@ -2312,6 +2335,11 @@ def build_dataset(
     # Pre-built turns from the parser modules (doc chunks, Ada AST units).
     _ingest_extra_turns(extra_turns or [], all_grouped, turn_counts)
 
+    # Remove cross-group exact duplicates before splitting (see docstring).
+    all_grouped, deduped_count = dedup_grouped(all_grouped)
+    if deduped_count:
+        logger.info("Removed %d exact duplicate turns before splitting", deduped_count)
+
     all_turns = [turn for _group, turn in all_grouped]
 
     # Self-check: count STE violations in our own generated assistant prose.
@@ -2367,6 +2395,7 @@ def build_dataset(
         "splits": {
             "seed": split_seed,
             "strategy": "group-aware: every turn from one source pair or doc block stays in one split",
+            "deduped_duplicates": deduped_count,
             "ratios": {"train": 0.90, "val": 0.05, "test": 0.05},
             "counts": split_counts,
             "files": {name: str(path) for name, path in split_paths.items()},

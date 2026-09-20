@@ -239,3 +239,127 @@ class TestAssignSplits:
         two = bd.assign_splits(["a", "b"])
         assert set(two.values()) <= {"train", "val"}
         assert len(two) == 2
+
+
+class TestDedupGrouped:
+    @staticmethod
+    def _turn(text: str) -> dict[str, list[dict[str, str]]]:
+        return {"messages": [
+            {"role": "user", "content": text},
+            {"role": "assistant", "content": text + " answer"},
+        ]}
+
+    def test_identical_content_in_different_groups_is_deduped(self):
+        # Regression: identical records generated from two different groups
+        # (same spec via different source paths) landed in different splits.
+        grouped = [("pair:a:0", self._turn("spec")), ("pair:b:3", self._turn("spec"))]
+        deduped, dropped = bd.dedup_grouped(grouped)
+        assert dropped == 1
+        assert len(deduped) == 1
+        assert deduped[0][0] == "pair:a:0"  # first occurrence wins
+
+    def test_distinct_content_is_kept(self):
+        grouped = [("pair:a:0", self._turn("one")), ("pair:b:0", self._turn("two"))]
+        deduped, dropped = bd.dedup_grouped(grouped)
+        assert dropped == 0
+        assert len(deduped) == 2
+
+    def test_empty_input(self):
+        assert bd.dedup_grouped([]) == ([], 0)
+
+
+# --------------------------------------------------------------------------- #
+# Extra-turns ingestion (parser outputs)
+# --------------------------------------------------------------------------- #
+
+
+class TestExtraTurnGrouping:
+    def test_ast_records_use_parser_group(self):
+        record = {"meta": {"kind": "ast_impl", "group": "ast:123"}}
+        assert bd._extra_turn_group(record, 0) == "ast:123"
+
+    def test_doc_records_group_by_content(self):
+        record = {"meta": {"kind": "doc_section", "source": "s.md", "section": "T"}}
+        assert bd._extra_turn_group(record, 0) == bd._extra_turn_group(record, 99)
+
+    def test_fallback_group_uses_index(self):
+        assert bd._extra_turn_group({"meta": {}}, 7) == "extra:record:7"
+
+    def test_kind_buckets(self):
+        assert bd._extra_turn_kind({"kind": "doc_section"}) == "doc_section"
+        assert bd._extra_turn_kind({"kind": "ast_impl"}) == "ast_qa"
+        assert bd._extra_turn_kind({"kind": "ast_contract"}) == "ast_qa"
+        assert bd._extra_turn_kind({"kind": "ast_type"}) == "ast_qa"
+        assert bd._extra_turn_kind({}) == "extra"
+
+
+class TestExtraTurnsIntegration:
+    def test_ingest_counts_splits_and_malformed_skip(self, tmp_path):
+        import json
+
+        (tmp_path / "pkg.ads").write_text(
+            "package Pkg is\n   procedure Op (X : Integer);\nend Pkg;\n"
+        )
+        (tmp_path / "pkg.adb").write_text(
+            "package body Pkg is\n   procedure Op (X : Integer) is\n   begin\n"
+            "      null;\n   end Op;\nend Pkg;\n"
+        )
+        doc = {
+            "messages": [{"role": "user", "content": "u-doc"}, {"role": "assistant", "content": "a-doc"}],
+            "meta": {"kind": "doc_section", "source": "learn/x.md", "section": "Foo"},
+        }
+        ast_impl = {
+            "messages": [{"role": "user", "content": "u-impl"}, {"role": "assistant", "content": "a-impl"}],
+            "meta": {"kind": "ast_impl", "unit": "Op", "group": "ast:123"},
+        }
+        ast_contract = {
+            "messages": [{"role": "user", "content": "u-contract"}, {"role": "assistant", "content": "a-contract"}],
+            "meta": {"kind": "ast_contract", "unit": "Op", "group": "ast:123"},
+        }
+        extra = tmp_path / "extra.jsonl"
+        extra.write_text(
+            "\n".join(json.dumps(r) for r in (doc, ast_impl, ast_contract))
+            + "\n{bad json}\n",
+            encoding="utf-8",
+        )
+        out = tmp_path / "dataset.jsonl"
+        count = bd.build_dataset(
+            input_dirs=[tmp_path],
+            extra_input_dirs=[],
+            output_file=out,
+            doc_dirs=[],
+            guidance_dirs=[],
+            workers=1,
+            extra_turns=[extra],
+        )
+        meta = json.loads((tmp_path / "dataset_metadata.json").read_text())
+        kinds = meta["turn_counts_by_kind"]
+        assert kinds["doc_section"] == 1
+        assert kinds["ast_qa"] == 2
+        assert meta["total_turns"] == count
+        splits = meta["splits"]["counts"]
+        assert splits["train"] + splits["val"] + splits["test"] == count
+
+        # The two AST turns of one subprogram share a split (same group).
+        records = [json.loads(line) for line in out.read_text().splitlines()]
+        by_user = {r["messages"][-2]["content"]: r["split"] for r in records}
+        assert by_user["u-impl"] == by_user["u-contract"]
+        assert by_user["u-doc"] in {"train", "val", "test"}
+
+    def test_missing_extra_file_is_skipped(self, tmp_path):
+        import json
+
+        (tmp_path / "pkg.ads").write_text("package Pkg is\n   X : Integer;\nend Pkg;\n")
+        out = tmp_path / "dataset.jsonl"
+        count = bd.build_dataset(
+            input_dirs=[tmp_path],
+            extra_input_dirs=[],
+            output_file=out,
+            doc_dirs=[],
+            guidance_dirs=[],
+            workers=1,
+            extra_turns=[tmp_path / "nope.jsonl"],
+        )
+        meta = json.loads((tmp_path / "dataset_metadata.json").read_text())
+        assert "doc_section" not in meta["turn_counts_by_kind"]
+        assert count == meta["total_turns"]

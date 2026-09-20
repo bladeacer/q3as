@@ -1,4 +1,4 @@
-.PHONY: help setup sync download build-dataset train generate eval eval-pipeline prove ada-env test lint validate-defects agents-tree clean all check-model
+.PHONY: help setup sync download build-dataset parse-data train generate eval eval-pipeline prove ada-env test lint validate-defects agents-tree clean all check-model
 
 # bash so `set -o pipefail` works for tee'd targets (training.log capture).
 SHELL := /bin/bash
@@ -20,6 +20,9 @@ help: ## Show this help message
 	@echo "  make download      - Download and sanity-check the Qwen3-8B model (unsloth/Qwen3-8B -> models/qwen3-8b)"
 	@echo "  make build-dataset - Build the training dataset from Ada source trees"
 	@echo "                      (includes ../adacovex, ../Ada_CRDT, ../Ada-83-TLALOC, ../ada-eval by default)"
+	@echo "                      plus parser outputs (docs chunks, Ada AST units) when present"
+	@echo "  make parse-data    - Run the parser modules: heading-aware doc chunking and"
+	@echo "                       libadalang/structural Ada AST extraction into JSONL"
 	@echo "  make train         - Run QLoRA fine-tuning with Unsloth on the local base model"
 	@echo "  make generate      - Generate Ada code with the fine-tuned and base models"
 	@echo "  make eval          - Run baseline evaluation with BLEU + ada-eval metrics"
@@ -102,6 +105,10 @@ lint: ## Run ruff and mypy over the project sources
 
 validate-defects: ## Compile-check dataset defect pairs with the Alire GNAT
 	uv run python scripts/validate_defects.py
+
+parse-data: ## Run the parser modules into data/processed/ extra JSONL
+	uv run python data/processing_scripts/parse_docs.py --input-dir ../learn --output data/processed/docs_chunks.jsonl
+	uv run python data/processing_scripts/parse_ada_ast.py --input-dir ../adacovex --input-dir ../Ada_CRDT --input-dir ../ada-eval --output data/processed/ada_ast_units.jsonl
 
 agents-tree: ## Regenerate the project file tree section in AGENTS.md
 	uv run python scripts/gen_agents_tree.py
