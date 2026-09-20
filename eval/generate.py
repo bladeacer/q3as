@@ -5,6 +5,13 @@ the base Qwen3-8B model and the fine-tuned q3as model, and writes
 generated solutions as packed ada-eval datasets (JSONL) so that
 BUILD/TEST/PROVE evaluations can be run directly with ada-eval.
 
+Each prompt carries the task plus the full base project tree (the
+training data shows sources in the user turn, and prompt.md assumes an
+agent with repo access). The reply is parsed into updated project files
+("File: <path>" entries, falling back to a single fenced block at the
+prompt's target path) and overlaid on the base tree, so the packed
+generated_solution is a complete, buildable ada-eval project.
+
 The base model defaults to the LOCAL download (models/qwen3-8b, i.e.
 unsloth/Qwen3-8B) so that training and evaluation use exactly the same
 downloaded base weights.
@@ -80,6 +87,13 @@ def parse_args() -> argparse.Namespace:
         help="Enable Qwen3 thinking mode during generation.",
     )
     parser.add_argument(
+        "--system-prompt", type=Path, default=Path(__file__).resolve().parent / "system_prompt_spark.txt",
+        help="System prompt for chat messages. Default: the SPARK 2014 system "
+        "prompt the fine-tune was trained with (eval/system_prompt_spark.txt). "
+        "The fine-tuned model is off-distribution without it and replies "
+        "conversationally instead of with Ada code.",
+    )
+    parser.add_argument(
         "--verbose", "-v", action="store_true",
         help="Enable debug logging.",
     )
@@ -101,6 +115,10 @@ def _worker_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-new-tokens", type=int, default=1024)
     parser.add_argument("--temperature", type=float, default=0.7)
     parser.add_argument("--enable-thinking", action="store_true", default=False)
+    parser.add_argument(
+        "--system-prompt", type=Path,
+        default=Path(__file__).resolve().parent / "system_prompt_spark.txt",
+    )
     parser.add_argument("--verbose", action="store_true")
     return parser
 
@@ -119,6 +137,7 @@ def _run_worker(args: argparse.Namespace) -> int:
         level=logging.INFO, format="%(asctime)s [%(levelname)s] [worker] %(message)s"
     )
 
+    args.system_prompt = _load_system_prompt(args.system_prompt)
     model, tokenizer = load_model(args.model_path, args.base_model_path)
     results = run_generation_for_model(
         model, tokenizer, args.model_label,
@@ -144,8 +163,22 @@ def find_expanded_datasets(
     ]
 
 
+def read_dir_text(root: Path) -> dict[Path, str]:
+    """Return all files under *root* as {relative_path: text} (best effort)."""
+    files: dict[Path, str] = {}
+    if root.is_dir():
+        for file_path in sorted(root.rglob("*")):
+            if not file_path.is_file():
+                continue
+            try:
+                files[file_path.relative_to(root)] = file_path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                continue
+    return files
+
+
 def load_sample_prompts(expanded_dir: Path) -> list[dict[str, Any]]:
-    """Load sample names, prompts, and locations from an expanded dataset."""
+    """Load sample names, prompts, locations, and base sources from an expanded dataset."""
     samples: list[dict[str, Any]] = []
     for sample_dir in sorted(expanded_dir.iterdir()):
         if not sample_dir.is_dir():
@@ -166,6 +199,7 @@ def load_sample_prompts(expanded_dir: Path) -> list[dict[str, Any]]:
                 "prompt": prompt,
                 "location": other_data.get("location", {}),
                 "comments": comments,
+                "sources_text": read_dir_text(sample_dir / "base"),
                 "canonical_evaluation_results": other_data.get("canonical_evaluation_results", []),
             })
         except (json.JSONDecodeError, OSError):
@@ -182,6 +216,101 @@ def extract_ada_code(generated_text: str) -> str:
     if match:
         return match.group(1).strip()
     return generated_text.strip()
+
+
+# Reply paths are restricted to project source files; prose lines that merely
+# start with "File:" must not become overlay entries.
+_ALLOWED_SOURCE_SUFFIXES = frozenset({".ads", ".adb", ".gpr", ".adc"})
+_FILE_BLOCK_RE = re.compile(
+    r"File:\s*(?P<path>\S+)\s*\n+```[^\n]*\n(?P<body>.*?)```",
+    re.DOTALL,
+)
+
+
+def _safe_source_path(raw: str) -> Path | None:
+    """Normalize a model-provided file path; None when it is not usable."""
+    path = Path(Path(raw.strip().strip("`\"':;,.")).as_posix())
+    if path.is_absolute() or ".." in path.parts or not path.parts:
+        return None
+    if path.suffix not in _ALLOWED_SOURCE_SUFFIXES:
+        return None
+    return path
+
+
+def parse_generated_files(reply: str, default_path: Path) -> dict[Path, str]:
+    """Parse a model reply into {relative_path: full file content}.
+
+    The expected reply format (requested by build_user_prompt) is one entry
+    per changed file:
+
+        File: src/foo.ads
+        ```ada
+        <full updated file content>
+        ```
+
+    Only entries next to *default_path* (the prompt's target directory) are
+    kept: small models echo every project file they were shown, and their
+    reconstructed main.gpr/main.adc copies are corrupt (duplicate package
+    sections, code inside a configuration pragma file), which breaks BUILD
+    even when the model's Ada code is valid. Project files (main.gpr,
+    main.adc) stay as shipped in the base tree.
+
+    Fallbacks keep single-file replies working (the fine-tune was trained on
+    one fenced block per answer): a reply without "File:" headers but with a
+    fenced block maps that block to *default_path*; a reply with no fences is
+    used verbatim at *default_path*, matching the pre-context behavior.
+    """
+    files: dict[Path, str] = {}
+    for match in _FILE_BLOCK_RE.finditer(reply):
+        path = _safe_source_path(match.group("path"))
+        if path is None:
+            continue
+        files[path] = match.group("body").strip() + "\n"
+    target_dir = default_path.parent
+    overlay = {p: c for p, c in files.items() if p.parent == target_dir}
+    dropped = sorted(str(p) for p in files if p.parent != target_dir)
+    if dropped:
+        logger.warning("Ignoring model output for non-source files: %s", ", ".join(dropped))
+    if overlay:
+        return overlay
+    fenced = extract_ada_code(reply)
+    if fenced:
+        return {default_path: fenced + "\n"}
+    return {default_path: reply.strip() + "\n"}
+
+
+def build_user_prompt(sample: dict[str, Any]) -> str:
+    """Build the user prompt: the task plus every project source file.
+
+    The raw prompt.md assumes an agent with repo access ("make Absolute_Value
+    provable" never shows the code). Feeding it alone leaves the model writing
+    blind, so both models produced prose or unrelated Ada at the overlaid
+    path, and every BUILD/TEST/PROVE evaluation failed. The training data
+    shows sources in the user turn, so the eval prompt must do the same.
+    """
+    location = sample.get("location")
+    target_path = location.get("path", "generated.adb") if isinstance(location, dict) else "generated.adb"
+    target_dir = Path(target_path).parent
+    target_dir_desc = str(target_dir) if str(target_dir) not in ("", ".") else "the project root"
+
+    sections: list[str] = [sample["prompt"].strip(), "", "Project files:", ""]
+    for rel_path, content in sorted(sample.get("sources_text", {}).items()):
+        sections.append(f"File: {rel_path}")
+        sections.append("```ada")
+        sections.append(content.rstrip("\n"))
+        sections.append("```")
+        sections.append("")
+    sections.extend([
+        "Update the project files so the request above is satisfied.",
+        f"Only files in {target_dir_desc} may change. The project files outside",
+        "it stay as they are.",
+        "Reply with the complete updated content of every file you change.",
+        'For each changed file, write a line "File: <path>", then the full',
+        "file content in one ```ada fenced block.",
+        f"Always include the file {target_path} in the reply.",
+        "Do not include files you do not change.",
+    ])
+    return "\n".join(sections)
 
 
 def checkpoint_is_prequantized_4bit(model_path: Path) -> bool:
@@ -276,6 +405,16 @@ def free_model_memory(model, tokenizer) -> None:
         torch.cuda.synchronize()
 
 
+def _load_system_prompt(path: Path) -> str | None:
+    """Read the training-time system prompt, if present."""
+    try:
+        prompt = path.read_text(encoding="utf-8").strip()
+        return prompt or None
+    except OSError:
+        logger.warning("System prompt file %s not found; using no system prompt", path)
+        return None
+
+
 def generate_batch(
     model,
     tokenizer,
@@ -283,6 +422,7 @@ def generate_batch(
     max_new_tokens: int,
     temperature: float,
     enable_thinking: bool = False,
+    system_prompt: str | None = None,
 ) -> list[str]:
     """Generate code for a batch of prompts using the model's chat template."""
     import torch
@@ -292,7 +432,10 @@ def generate_batch(
             # Cap prompt size: huge prompts blow up KV-cache and host memory
             # on small-RAM hosts.
             prompt = prompt[:MAX_PROMPT_CHARS]
-            messages = [{"role": "user", "content": prompt}]
+            messages = []
+            if system_prompt:
+                messages.append({"role": "system", "content": system_prompt})
+            messages.append({"role": "user", "content": prompt})
             text = tokenizer.apply_chat_template(
                 messages,
                 tokenize=False,
@@ -312,7 +455,9 @@ def generate_batch(
                 output[0][inputs["input_ids"].shape[1]:],
                 skip_special_tokens=True,
             )
-            results.append(extract_ada_code(generated))
+            # Return the raw reply; parse_generated_files maps it to project
+            # files later (multi-file entries, single block, or raw text).
+            results.append(generated.strip())
         except Exception as exc:  # noqa: BLE001  (keep generating remaining prompts)
             logger.error("Generation failed: %s", exc)
             results.append("")
@@ -341,11 +486,12 @@ def run_generation_for_model(
             by_dataset[dataset_name] = 0
             continue
 
-        prompts = [s["prompt"] for s in samples]
+        prompts = [build_user_prompt(s) for s in samples]
         start = time.perf_counter()
         generated_codes = generate_batch(
             model, tokenizer, prompts,
             args.max_new_tokens, args.temperature, args.enable_thinking,
+            system_prompt=args.system_prompt,
         )
         elapsed_ms = int((time.perf_counter() - start) * 1000)
 
@@ -368,15 +514,24 @@ def run_generation_for_model(
                             files[file_path.relative_to(root)] = file_path.read_bytes()
                 return files
 
+            sources = read_dir_bytes(sample_dir / "base")
+            unit_tests = read_dir_bytes(sample_dir / "tests")
+
             # generated_solution must be a complete buildable project: ada-eval
             # runs gprbuild/gnatformat inside it (BUILD) and proves it (PROVE).
-            # Start from the base project tree and overlay the model's code at
-            # the location the prompt asked to fill (the convention ada-eval's
-            # own generation agents use).
+            # Start from the base project tree and overlay the model's updated
+            # files. Parse the reply (multi-file "File:" entries, single fenced
+            # block, or raw text) so conversational output still lands at the
+            # target path instead of silently dropping the sample.
             generated_solution = dict(sources)
             location = sample["location"]
-            gen_path = location.get("path", "generated.adb") if isinstance(location, dict) else "generated.adb"
-            generated_solution[Path(gen_path)] = ada_code.encode("utf-8")
+            gen_path = Path(
+                location.get("path", "generated.adb") if isinstance(location, dict) else "generated.adb"
+            )
+            for rel_path, content in parse_generated_files(ada_code, gen_path).items():
+                if sources.get(rel_path) == content.encode("utf-8"):
+                    continue  # identical echo of the base file - nothing to apply
+                generated_solution[rel_path] = content.encode("utf-8")
 
             packed = sample_type(
                 name=sample["name"],
@@ -456,6 +611,8 @@ def main() -> None:
             cmd += ["--dataset", args.dataset]
         if args.enable_thinking:
             cmd.append("--enable-thinking")
+        if args.system_prompt:
+            cmd += ["--system-prompt", str(args.system_prompt)]
         if args.verbose:
             cmd.append("--verbose")
         logger.info("Launching worker for %s: %s", label, model_path)

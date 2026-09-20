@@ -44,10 +44,16 @@ which commands to use. Regenerate the tree below with `make agents-tree`.
   resolves binaries through the Alire environment for subprocess calls.
 - `scripts/gen_agents_tree.py` - rewrites the file tree section below.
 - `alire.toml` / `alire-dev.toml` - publishing and dev manifests. Dev-only
-  toolchain deps (gnatprove) live in the dev manifest.
+  toolchain deps (gnatprove, gnatformat) live in the dev manifest.
+- `q3as-local-index/` - vendored Alire index (mirrors the crates q3as needs
+  from the community index branch `stable-1.4.0`). setup.sh registers it
+  ahead of the community index when the installed `alr` is older than the
+  latest release, so modern binary crates (gnatprove 16.x, gnatformat 26.x)
+  install on old distro alr packages (e.g. alr 1.2.1 on Debian).
 - `setup.sh` - one-shot bootstrap: shallow-clones the sibling repos, creates
-  `.env` from `.env.dev` (never overwrites), runs `uv sync`, extracts local
-  Python headers for Triton.
+  `.env` from `.env.dev` (never overwrites), registers the vendored Alire
+  index when `alr` is outdated, runs `uv sync`, extracts local Python
+  headers for Triton.
 - `Makefile` - entry points for every step; `make help` lists them.
 - `deploy/Modelfile` - Ollama deployment definition for the fine-tuned model.
 - `tests/` - pytest unit tests for the dataset builder and helpers
@@ -65,7 +71,9 @@ manifest declares the toolchain; commands run through `alr exec`:
 `make prove` syncs the toolchain. Because alr 1.2.1 has no `--manifest`
 option, it copies `alire-dev.toml` into the gitignored `.alire-dev/`
 workspace and runs `alr update` there; the real manifests are never modified
-by tooling.
+by tooling. On old alr the vendored `q3as-local-index/` (registered by
+`setup.sh`) supplies the modern binary crates the pinned `stable-1.2.1`
+community index lacks.
 
 ## Conventions
 
@@ -99,6 +107,15 @@ q3as/
        baseline_eval.py
        eval_pipeline.py
        generate.py
+       system_prompt_spark.txt
+   q3as-local-index/
+       index/
+           gn/
+               gnatformat_bin/
+                   gnatformat_bin-26.0.0.toml
+               gnatprove/
+                   gnatprove-16.1.0.toml
+           index.toml
    scripts/
        ada_env.sh
        alire_env.py

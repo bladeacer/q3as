@@ -21,14 +21,13 @@ website = "https://github.com/bladeacer/q3as"
 tags = ["ada", "spark", "fine-tuning", "evaluation", "code-generation"]
 
 [[depends-on]]
-# Version notes (alr 1.2.1 on this Debian box, community index snapshot):
-# - gnatprove 16.x is not in the local index (newest: 13.2.1); pin to that.
-#   Check availability with `alr show gnatprove` when the index is updated.
-# - gnatdoc_bin / gnatformat_bin do not exist in the stable-1.2.1 community
-#   index snapshot (gnatdoc exists but only as a long source build; q3as
-#   never calls gnatdoc). gnatformat is required by ada-eval's BUILD eval,
-#   so the official gnatformat_bin 26.0.0 binary crate is resolved from the
-#   repo-local q3as-local-index/ (vendored from alire-index stable-1.4.0),
-#   registered in the user config ahead of the community index.
-gnatprove = "^13.2.1"
+# Version notes:
+# - gnatprove and gnatformat resolve to the modern binary releases from the
+#   community index (branch stable-1.4.0). Old `alr` releases (e.g. 1.2.1 on
+#   Debian) cannot read that branch, so setup.sh registers the repo-local
+#   q3as-local-index/ (a vendored mirror of the needed crates) ahead of the
+#   community index; new alr releases read stable-1.4.0 directly.
+# - gnatdoc is not pinned: it exists only as a long source build and q3as
+#   never calls it.
+gnatprove = "^16.1.0"
 gnatformat_bin = "^26.0.0"
