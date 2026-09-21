@@ -452,7 +452,12 @@ def main() -> None:
 
     logger.info("libadalang available: %s", HAS_LIBADALANG)
 
-    input_dirs = args.input_dir or [Path("../adacovex")]
+    if args.input_dir:
+        input_dirs = args.input_dir
+    else:
+        import source_paths
+
+        input_dirs = source_paths.default_code_dirs() or [Path("../adacovex")]
     tasks: list[tuple[str, str]] = []
     for root in input_dirs:
         if not root.exists():

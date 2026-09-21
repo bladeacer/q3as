@@ -2,6 +2,7 @@ __pycache__/
 *.pyc
 models
 data/processed
+data/raw_repos
 outputs
 unsloth_compiled_cache/
 _unsloth_temporary_saved_buffers/

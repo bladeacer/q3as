@@ -159,7 +159,14 @@ def find_expanded_datasets(
     dataset_name: str | None,
 ) -> list[tuple[str, Path]]:
     """Find expanded dataset directories from ada-eval."""
-    expanded_dir = Path("../ada-eval/data/base/expanded")
+    import source_paths
+
+    ada_eval_root = source_paths.resolve("ada-eval")
+    expanded_dir = (
+        (ada_eval_root / "data" / "base" / "expanded")
+        if ada_eval_root
+        else Path("data/raw_repos/_missing/ada-eval/data/base/expanded")
+    )
     if not expanded_dir.exists():
         logger.error("Expanded datasets not found at %s", expanded_dir)
         sys.exit(1)

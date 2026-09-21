@@ -24,7 +24,7 @@ dependencies = [
 ]
 
 [tool.uv.sources]
-ada-eval = { path = "../ada-eval" }
+ada-eval = { path = "data/raw_repos/AdaCore/ada-eval", editable = false }
 
 [tool.uv]
 package = false

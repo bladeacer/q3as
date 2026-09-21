@@ -339,6 +339,36 @@ def main() -> None:
         trainer.train()
         logger.info("Training complete!")
 
+        # Training-loss history: the trainer logs train loss every
+        # logging_steps. The eval-report trend analysis reads this.
+        train_loss_history: list[dict[str, float]] = []
+        state = trainer.state
+        if state is not None and getattr(state, "log_history", None):
+            for entry in state.log_history:
+                if isinstance(entry, dict) and "loss" in entry and "step" in entry:
+                    train_loss_history.append(
+                        {"step": int(entry["step"]), "loss": float(entry["loss"])}
+                    )
+
+        # Final train loss: last logged value (the summary entry, when
+        # present, carries the run-level mean; prefer the mean).
+        train_loss_final: float | None = None
+        if state is not None and getattr(state, "log_history", None):
+            for entry in reversed(state.log_history):
+                if isinstance(entry, dict) and "train_loss" in entry:
+                    train_loss_final = float(entry["train_loss"])
+                    break
+
+        # Full eval-loss curve: every evaluation the early-stopping logic
+        # saw. The report's per-step val trend table is built from this.
+        eval_loss_history: list[dict[str, float]] = []
+        if state is not None and getattr(state, "log_history", None):
+            for entry in state.log_history:
+                if isinstance(entry, dict) and "eval_loss" in entry and "step" in entry:
+                    eval_loss_history.append(
+                        {"step": int(entry["step"]), "eval_loss": float(entry["eval_loss"])}
+                    )
+
         # Traditional held-out metrics: the test split is never seen by
         # early stopping, so its loss and perplexity back the run up.
         test_metrics: dict[str, float] | None = None
@@ -402,6 +432,9 @@ def main() -> None:
             "base_model": model_name,
             "dataset": str(args.dataset),
             "dataset_examples": len(dataset),
+            "train_loss_final": train_loss_final,
+            "train_loss_history": train_loss_history,
+            "eval_loss_history": eval_loss_history,
             "splits": {
                 "train": len(dataset),
                 "val": len(val_data),

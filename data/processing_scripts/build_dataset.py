@@ -40,7 +40,7 @@ and metric definitions.
 
 Usage:
     python build_dataset.py --input-dir data/raw/
-    python build_dataset.py --input-dir data/raw/ --extra-input-dir ../adacovex --extra-input-dir ../Ada_CRDT
+    python build_dataset.py --input-dir data/raw/  # extra sources come from the cache
     python build_dataset.py --input-dir /path/to/submodule --output-dir data/processed/
 """
 
@@ -69,13 +69,8 @@ PROJECT_EXTENSIONS = {".gpr"}
 DEFAULT_INPUT_DIR = Path("data/raw")
 DEFAULT_OUTPUT_DIR = Path("data/processed")
 DEFAULT_OUTPUT_FILE = DEFAULT_OUTPUT_DIR / "dataset.jsonl"
-# Default extra input directories for additional training data sources
-DEFAULT_EXTRA_INPUT_DIRS = [
-    Path("../adacovex"),
-    Path("../Ada_CRDT"),
-    Path("../Ada-83-TLALOC"),
-    Path("../ada-eval"),
-]
+# Default extra input directories come from the source cache at runtime
+# (source_paths.default_code_dirs()); nothing is hard-coded here anymore.
 # Directories treated as documentation sources: Ada code blocks are extracted
 # from their RST/Markdown content instead of pairing .ads/.adb files.
 DOC_SOURCE_DIRS = ["learn"]
@@ -83,11 +78,23 @@ DOC_SOURCE_DIRS = ["learn"]
 # Each entry maps a sibling directory name to the repo-relative paths of its
 # skill documents so the loader works across the three repo layouts we use.
 AGENT_SKILL_SOURCE_DIRS = ["ada-spark", "SimpleEnglish", "skills"]
-ADA_SPARK_DIR = Path("../ada-spark")
-SIMPLE_ENGLISH_DIR = Path("../SimpleEnglish")
-ADACORE_SKILLS_DIR = Path("../skills")
+
+
+def _resolved_source(name: str) -> Path:
+    """Cache directory for a source repo (or its legacy sibling location)."""
+    import source_paths
+
+    resolved = source_paths.resolve(name)
+    if resolved is None:
+        return Path("data/raw_repos/_missing") / name
+    return resolved
+
+
+ADA_SPARK_DIR = _resolved_source("ada-spark")
+SIMPLE_ENGLISH_DIR = _resolved_source("SimpleEnglish")
+ADACORE_SKILLS_DIR = _resolved_source("skills")
 # Default path to ada-eval methodology directory
-ADA_EVAL_DIR = Path("../ada-eval")
+ADA_EVAL_DIR = _resolved_source("ada-eval")
 
 # Deterministic pseudo-randomness for defect selection and guidance sampling
 _RNG_SEED = 42
@@ -103,81 +110,102 @@ _SECRET_PATTERNS = re.compile(
 )
 _BINARY_MAGIC = {b"\x00", b"\xff\xfe", b"\xfe\xff", b"\x7fELF"}
 
-# ---- Ada standard detection (robust, scoring-based, newest-first) ----
-# Newer Ada standards are supersets of older ones. We score each file
-# against features from Ada 2022 down to Ada 83. The first standard
-# whose matched feature count meets the minimum threshold wins.
-# This avoids brittle per-keyword regex matching and handles the
-# superset relationship between Ada standards correctly.
+# ---- Ada standard detection (feature-based, newest-first) ----
+# Newer Ada standards are supersets of older ones, so a feature that
+# standard X introduced is conclusive evidence for an X floor. Detection
+# strips -- comments first (prose such as "since Ada 95" must not vote),
+# then counts weighted features newest-first; the first standard whose
+# weighted score clears its threshold wins. SPARK is tested before Ada
+# 2012 because SPARK-specific annotations (SPARK_Mode, Loop_Invariant,
+# Contract_Cases) are what the model must imitate; a plain Ada 2012 file
+# without them falls through to the Ada 2012 tier.
 
-_STANDARD_FEATURES: list[tuple[str, list[tuple[str, re.Pattern[str]]], int]] = [
+_COMMENT_LINE_RE = re.compile(r"--[^\n]*")
+
+
+def _strip_ada_comments(code: str) -> str:
+    """Remove -- comments so prose cannot vote in standard detection."""
+    return _COMMENT_LINE_RE.sub(" ", code)
+
+
+# Each feature is (label, pattern, weight). Weight 2 marks features that
+# are conclusive for their standard, weight 1 strong hints. Thresholds
+# require more than one hint, so a single false positive cannot decide.
+_STANDARD_FEATURES: list[tuple[str, list[tuple[str, re.Pattern[str]], int], int]] = [
     ("Ada 2022", [
-        ("Static_Pure", re.compile(r"\bStatic_Pure\b", re.IGNORECASE)),
-        ("Pure_Global", re.compile(r"\bPure_Global\b", re.IGNORECASE)),
-        ("Contract_Cases", re.compile(r"\bContract_Cases\b", re.IGNORECASE)),
-        ("Loop_Invariant", re.compile(r"\bLoop_Invariant\b", re.IGNORECASE)),
-        ("Dynamic_Pure", re.compile(r"\bDynamic_Pure\b", re.IGNORECASE)),
-        ("Wide_Wide_String", re.compile(r"\bWide_Wide_String\b", re.IGNORECASE)),
-        ("String_Literals", re.compile(r"\bString_Literal\b", re.IGNORECASE)),
-        ("Aspect_Specs", re.compile(r"\bwith\s+\w+\s+=>", re.IGNORECASE)),
-    ], 3),
+        ("reduce", re.compile(r"\bReduce\s*\(", re.IGNORECASE), 2),
+        ("put_image", re.compile(r"\bPut_Image\b", re.IGNORECASE), 1),
+        ("parallel", re.compile(r"\bparallel\s+(do|block|and|loop)\b", re.IGNORECASE), 2),
+        ("delta_aggregate", re.compile(r"\bwith\s+delta\b", re.IGNORECASE), 2),
+        ("update_aspect", re.compile(r"\b'Update\s*=>", re.IGNORECASE), 2),
+        ("static_predicate", re.compile(r"\bStatic_Predicate\b", re.IGNORECASE), 2),
+        ("then_abort", re.compile(r"\bselect\s+[^;]+\s+then\s+abort\b", re.IGNORECASE), 2),
+    ], 2),
     ("Ada 2012", [
-        ("Pre_aspect", re.compile(r"\bPre\s*=>", re.IGNORECASE)),
-        ("Post_aspect", re.compile(r"\bPost\s*=>", re.IGNORECASE)),
-        ("Type_Invariant", re.compile(r"\bType_Invariant\b", re.IGNORECASE)),
-        ("Global_aspect", re.compile(r"\bGlobal\s*=>", re.IGNORECASE)),
-        ("Depends_aspect", re.compile(r"\bDepends\s*=>", re.IGNORECASE)),
-        ("Subtype_Contract", re.compile(r"\bSubtype_Contract\b", re.IGNORECASE)),
-        ("Iterate_aspect", re.compile(r"\bIterate\s*=>", re.IGNORECASE)),
-        ("Concurrent", re.compile(r"\bSynchronous_Queue\b|\bProtected_Type\b", re.IGNORECASE)),
-    ], 3),
+        ("pre_aspect", re.compile(r"\bPre\s*=>", re.IGNORECASE), 2),
+        ("post_aspect", re.compile(r"\bPost\s*=>", re.IGNORECASE), 2),
+        ("type_invariant", re.compile(r"\bType_Invariant('Class)?\s*=>", re.IGNORECASE), 2),
+        ("global_aspect", re.compile(r"\bGlobal\s*=>", re.IGNORECASE), 2),
+        ("depends_aspect", re.compile(r"\bDepends\s*=>", re.IGNORECASE), 2),
+        ("predicate_aspect", re.compile(r"\b(Dynamic_)?Predicate('Class)?\s*=>", re.IGNORECASE), 2),
+        ("quantified", re.compile(r"\(\s*for\s+(all|some)\b", re.IGNORECASE), 2),
+        ("if_expression", re.compile(r"\(\s*if\s[^()]*\bthen\s[^()]*\belse\b", re.IGNORECASE), 2),
+        ("case_expression", re.compile(r"\(\s*case\s[^()]+\bis\s[^()]+\bwhen\b", re.IGNORECASE), 2),
+        ("declare_expression", re.compile(r"\(\s*declare\b", re.IGNORECASE), 2),
+        ("expression_function", re.compile(r"\bfunction\s+[\w.]+\s*(\([^)]*\))?\s*(return\s+[\w.]+\s*)?is\s*\(", re.IGNORECASE), 2),
+        ("in_iterator", re.compile(r"\bfor\s+\w+\s+of\b", re.IGNORECASE), 2),
+        ("wide_wide", re.compile(r"\bWide_Wide_\w", re.IGNORECASE), 1),
+    ], 2),
     ("SPARK 2014", [
-        ("SPARK_Mode", re.compile(r"\bSPARK_Mode\b", re.IGNORECASE)),
-        ("Ghost", re.compile(r"\bGhost\b", re.IGNORECASE)),
-        ("GNATprove", re.compile(r"\bGNATprove\b", re.IGNORECASE)),
-        ("Praxis", re.compile(r"\bPraxis\b", re.IGNORECASE)),
-        ("SPARK_Keyword", re.compile(r"\bSPARK\b", re.IGNORECASE)),
-        ("Pre_Post", re.compile(r"\bPre\s*=>|Post\s*=>", re.IGNORECASE)),
-        ("Ghost_Var", re.compile(r"\bGhost\s+\w+", re.IGNORECASE)),
+        ("spark_mode", re.compile(r"\bSPARK_Mode\b", re.IGNORECASE), 2),
+        ("loop_invariant", re.compile(r"\bLoop_Invariant\b", re.IGNORECASE), 2),
+        ("loop_variant", re.compile(r"\bLoop_Variant\b", re.IGNORECASE), 2),
+        ("contract_cases", re.compile(r"\bContract_Cases\b", re.IGNORECASE), 2),
+        ("loop_entry", re.compile(r"\bLoop_Entry\b", re.IGNORECASE), 2),
+        ("relaxed_init", re.compile(r"\bRelaxed_Initialization\b", re.IGNORECASE), 2),
+        ("ghost", re.compile(r"\bGhost\b", re.IGNORECASE), 1),
+        ("assume_cut", re.compile(r"\bpragma\s+(Assume|Assert_And_Cut|Guard)\b", re.IGNORECASE), 1),
+        ("gnatprove", re.compile(r"\bgnatprove\b"), 1),
     ], 2),
     ("Ada 2005", [
-        ("interfaces", re.compile(r"\binterfaces\b", re.IGNORECASE)),
-        ("aliased", re.compile(r"\baliased\b", re.IGNORECASE)),
-        ("protected_type", re.compile(r"\bprotected\s+type\b", re.IGNORECASE)),
-        ("abstract_interface", re.compile(r"\babstract\s+interface\b", re.IGNORECASE)),
-        ("assertion", re.compile(r"\bassert\b|\bassertion_policy\b", re.IGNORECASE)),
-        ("container_types", re.compile(r"\bAda\.Containers\b", re.IGNORECASE)),
+        ("interface_type", re.compile(r"\btype\s+\w+\s+is\s+interface\b", re.IGNORECASE), 2),
+        ("overriding", re.compile(r"\boverriding\b", re.IGNORECASE), 1),
+        ("containers", re.compile(r"\bAda\.Containers\b"), 2),
+        ("use_type", re.compile(r"\buse\s+type\b", re.IGNORECASE), 1),
+        ("null_procedure", re.compile(r"\bis\s+null\s*;", re.IGNORECASE), 1),
+        ("not_null_access", re.compile(r"\bnot\s+null\s+access\b", re.IGNORECASE), 2),
+        ("assert_pragma", re.compile(r"\bpragma\s+Assert\b", re.IGNORECASE), 1),
     ], 2),
     ("Ada 95", [
-        ("tagged", re.compile(r"\btagged\b", re.IGNORECASE)),
-        ("abstract_tagged", re.compile(r"\babstract\s+tagged\b", re.IGNORECASE)),
-        ("override", re.compile(r"\boverride\b", re.IGNORECASE)),
-        ("interface", re.compile(r"\binterface\b\b", re.IGNORECASE)),
-        ("protected", re.compile(r"\bprotected\b", re.IGNORECASE)),
-        ("task_type", re.compile(r"\btask\s+type\b", re.IGNORECASE)),
-        ("generic_formal", re.compile(r"\bgeneric\s+formal\b", re.IGNORECASE)),
+        ("tagged", re.compile(r"\btagged\b", re.IGNORECASE), 2),
+        ("abstract", re.compile(r"\babstract\s+(tagged|type)\b", re.IGNORECASE), 1),
+        ("child_unit", re.compile(r"\bpackage\s+(body\s+)?\w+\.\w+\s+is\b", re.IGNORECASE), 2),
+        ("controlled", re.compile(r"\bAda\.Finalization\.(Root_)?(Limited_)?Controlled\b"), 2),
+        ("protected", re.compile(r"\bprotected\s+(type|body)\b", re.IGNORECASE), 2),
+        ("aliased", re.compile(r"\baliased\b", re.IGNORECASE), 1),
+        ("wide_char", re.compile(r"\bWide_(String|Character|Text)\b"), 1),
     ], 2),
     ("Ada 83", [
-        ("procedure", re.compile(r"\bprocedure\b", re.IGNORECASE)),
-        ("function", re.compile(r"\bfunction\b", re.IGNORECASE)),
-        ("package_body", re.compile(r"\bpackage\s+body\b", re.IGNORECASE)),
-        ("package_spec", re.compile(r"\bpackage\s+\w+\s+is\b", re.IGNORECASE)),
-        ("pragma", re.compile(r"\bpragma\b", re.IGNORECASE)),
+        ("package_spec", re.compile(r"\bpackage\s+\w+\s+is\b", re.IGNORECASE), 1),
+        ("package_body", re.compile(r"\bpackage\s+body\b", re.IGNORECASE), 1),
+        ("subprogram", re.compile(r"\b(procedure|function)\s+\w+", re.IGNORECASE), 1),
+        ("pragma", re.compile(r"\bpragma\s+\w+", re.IGNORECASE), 1),
+        ("task", re.compile(r"\btask\s+(body\s+)?\w+", re.IGNORECASE), 1),
     ], 2),
 ]
 
 
 def detect_ada_standard(content: str) -> str:
-    """Detect the Ada language standard using a scoring-based approach.
+    """Detect the Ada standard (or SPARK sublanguage) of *content*.
 
-    Newer standards are supersets of older ones. We score the content
-    against features from Ada 2022 down to Ada 83. The first standard
-    whose matched feature count meets or exceeds its minimum threshold
-    wins. Returns the matched standard label or 'Unknown'.
+    Comment-stripped, weighted feature matching, newest standard first.
+    The first standard whose weighted feature score reaches its threshold
+    wins. Returns the standard label, or 'Unknown' when nothing matches.
     """
-    for standard_name, features, min_match in _STANDARD_FEATURES:
-        match_count = sum(1 for _, pattern in features if pattern.search(content))
-        if match_count >= min_match:
+    code = _strip_ada_comments(content)
+    for standard_name, features, threshold in _STANDARD_FEATURES:
+        score = sum(weight for _, pattern, weight in features if pattern.search(code))
+        if score >= threshold:
             return standard_name
     return "Unknown"
 
@@ -2752,7 +2780,7 @@ def main() -> None:
     parser.add_argument(
         "--extra-input-dir", type=Path, action="append", default=[],
         help="Additional input directories for training data "
-             "(e.g., ../adacovex, ../Ada_CRDT, ../Ada-83-TLALOC). "
+             "(e.g., cache dirs of adacovex, Ada_CRDT, Ada-83-TLALOC). "
              "Can be specified multiple times.",
     )
     parser.add_argument(
@@ -2766,12 +2794,14 @@ def main() -> None:
     parser.add_argument(
         "--doc-dir", type=Path, action="append", default=[],
         help="Documentation source to extract Ada code blocks from "
-             "(e.g., ../learn). Can be specified multiple times.",
+             "(e.g., cache dirs of learn, training_material). "
+             "Can be specified multiple times.",
     )
     parser.add_argument(
         "--guidance-dir", type=Path, action="append", default=[],
         help="Agent-skill source whose markdown guidance is embedded into "
-             "system prompts (e.g., ../ada-spark, ../SimpleEnglish, ../skills). "
+             "system prompts (e.g., cache dirs of ada-spark, SimpleEnglish, "
+             "skills). "
              "Repeatable.",
     )
     parser.add_argument(

@@ -1,4 +1,4 @@
-.PHONY: help setup sync download build-dataset parse-data gen-contracts check-integrity check-links train generate eval eval-pipeline eval-report bump-version prove ada-env test lint validate-defects agents-tree clean all check-model
+.PHONY: help setup sync download build-dataset parse-data gen-contracts check-integrity check-links train generate eval eval-pipeline eval-report bump-version prove ada-env test lint validate-defects agents-tree fetch-sources clean all check-model
 
 # bash so `set -o pipefail` works for tee'd targets (training.log capture).
 SHELL := /bin/bash
@@ -15,13 +15,13 @@ help: ## Show this help message
 	@echo "q3as - Qwen 3 Ada SPARK - Available targets:"
 	@echo ""
 	@echo "  make all           - Run full pipeline: model download (if needed), dataset, train (logs to training.log), generate, evaluate"
-	@echo "  make setup         - One-shot bootstrap: shallow-clone sibling repos (data + skills), .env, uv sync"
+	@echo "  make setup         - One-shot bootstrap: fetch source repos into the archive cache, .env, uv sync"
 	@echo "  make sync          - Install/update all dependencies via uv sync"
 	@echo "  make download      - Download and sanity-check the Qwen3-8B model (Qwen/Qwen3-8B -> models/qwen3-8b)"
 	@echo "  make build-dataset - Build the training dataset from Ada source trees"
-	@echo "                      (includes ../adacovex, ../Ada_CRDT, ../Ada-83-TLALOC, ../ada-eval by default)"
+	@echo "                      (cache: adacovex, Ada_CRDT, Ada-83-TLALOC, ada-eval + the Sternenfisch hub repos)"
 	@echo "                      plus parser outputs (docs chunks, Ada AST units) when present"
-	@echo "  make parse-data    - Run the parser modules: heading-aware doc chunking and"
+	@echo "  make fetch-sources - Fetch source repos into the archive cache (data/raw_repos)"
 	@echo "                       libadalang/structural Ada AST extraction into JSONL"
 	@echo "  make train         - Run QLoRA fine-tuning with Unsloth on the local base model"
 	@echo "  make generate      - Generate Ada code with the fine-tuned and base models"
@@ -43,8 +43,11 @@ help: ## Show this help message
 sync: ## Install/update all dependencies
 	UV_LINK_MODE=copy uv sync
 
-setup: ## One-shot bootstrap: shallow-clone sibling repos, .env, uv sync, Python headers
+setup: ## One-shot bootstrap: fetch source repos into the cache, .env, uv sync, Python headers
 	./setup.sh
+
+fetch-sources: ## Fetch source repos into the archive cache (data/raw_repos); no-op when cached
+	uv run python scripts/fetch_repos.py
 
 download: ## Download and sanity-check the Qwen3-8B model
 	HF_HUB_DISABLE_XET=1 uv run python training/download_model.py --model-name Qwen/Qwen3-8B --cache-dir models/qwen3-8b
@@ -57,21 +60,24 @@ check-model: ## Check if model exists; download if missing
 		$(MAKE) download; \
 	fi
 
-build-dataset: ## Build the training dataset from Ada source trees
-	## Includes ../adacovex, ../Ada_CRDT, ../Ada-83-TLALOC, and ../ada-eval as Ada code sources,
-	## ../learn (AdaCore courses, CC-BY-4.0) for doc-QA turns, and agent-skill guidance in
-	## system prompts: ../ada-spark (MIT), ../SimpleEnglish (MIT, STE rules), ../skills (Apache-2.0,
-	## AdaCore toolchain skills). Also emits correct-vs-wrong defect pairs.
+build-dataset: ## Build the training dataset from cached Ada source trees
+	## Ada code sources (cache): adacovex, Ada_CRDT, Ada-83-TLALOC, ada-eval (guarded)
+	## plus the Sternenfisch algorithm-hub repositories (~260, MIT).
+	## Doc sources (cache): learn, training_material (CC-BY-4.0). Guidance in system
+	## prompts: ada-spark (MIT), SimpleEnglish (MIT, STE rules), skills (Apache-2.0).
+	## Also emits correct-vs-wrong defect pairs.
 	uv run python data/processing_scripts/build_dataset.py \
 		--input-dir data/raw/ \
-		--extra-input-dir ../adacovex \
-		--extra-input-dir ../Ada_CRDT \
-		--extra-input-dir ../Ada-83-TLALOC \
-		--extra-input-dir ../ada-eval \
-		--doc-dir ../learn \
-		--guidance-dir ../ada-spark \
-		--guidance-dir ../SimpleEnglish \
-		--guidance-dir ../skills
+		--extra-input-dir data/raw_repos/bladeacer/adacovex \
+		--extra-input-dir data/raw_repos/bladeacer/Ada_CRDT \
+		--extra-input-dir data/raw_repos/ViMoBr/Ada-83-TLALOC \
+		--extra-input-dir data/raw_repos/AdaCore/ada-eval \
+		--doc-dir data/raw_repos/AdaCore/learn \
+		--doc-dir data/raw_repos/AdaCore/training_material \
+		--guidance-dir data/raw_repos/agent-sh/ada-spark \
+		--guidance-dir data/raw_repos/AminBlg/SimpleEnglish \
+		--guidance-dir data/raw_repos/AdaCore/skills \
+		--extra-turns data/processed/hub_ast_units.jsonl
 
 train: ## Run QLoRA fine-tuning with Unsloth on the local base model (models/qwen3-8b); full stdout captured to training.log
 	@set -o pipefail; \
@@ -117,11 +123,12 @@ lint: ## Run ruff and mypy over the project sources, then check markdown links
 	uv run python tools/check-links.py
 
 validate-defects: ## Compile-check dataset defect pairs with the Alire GNAT
-	uv run python scripts/validate_defects.py
+	uv run python scripts/validate_defects.py --source data/raw_repos/bladeacer/adacovex --source data/raw_repos/bladeacer/Ada_CRDT --source data/raw_repos/AdaCore/ada-eval
 
 parse-data: ## Run the parser modules into data/processed/ extra JSONL
-	uv run python data/processing_scripts/parse_docs.py --input-dir ../learn --output data/processed/docs_chunks.jsonl
-	uv run python data/processing_scripts/parse_ada_ast.py --input-dir ../adacovex --input-dir ../Ada_CRDT --input-dir ../ada-eval --output data/processed/ada_ast_units.jsonl
+	uv run python data/processing_scripts/parse_docs.py --output data/processed/docs_chunks.jsonl
+	uv run python data/processing_scripts/parse_ada_ast.py --output data/processed/ada_ast_units.jsonl
+	uv run python data/processing_scripts/parse_ada_ast.py --input-dir data/raw_repos/RobertBoettcherSF --output data/processed/hub_ast_units.jsonl
 
 gen-contracts: ## Generate gnatprove-verified synthetic contract turns (cached; FORCE=1 to regenerate)
 	uv run python scripts/gen_contract_mutations.py $(if $(FORCE),--force,)

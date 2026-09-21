@@ -40,7 +40,11 @@ from alire_env import has_tool
 
 logger = logging.getLogger("q3as_eval")
 
-ADA_EVAL_DIR = Path("../ada-eval")
+# ada-eval lives in the source cache (fetch_repos.py); fall back to the
+# legacy sibling layout for checkouts that have not re-run setup yet.
+import source_paths  # noqa: E402  (scripts/ is already on sys.path above)
+
+ADA_EVAL_DIR = source_paths.resolve("ada-eval") or Path("data/raw_repos/_missing/ada-eval")
 EVAL_RESULTS_DIR = Path("outputs/eval_results")
 GENERATED_DIR = Path("outputs/generated_solutions")
 DEFAULT_BASE_MODEL = Path("models/qwen3-8b")

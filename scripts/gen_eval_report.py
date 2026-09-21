@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import math
 import re
 import sys
 from collections import Counter
@@ -42,6 +43,7 @@ RESULTS_DIR = ROOT / "docs" / "results"
 EVAL_RESULTS_DIR = ROOT / "outputs" / "eval_results"
 BASELINE_JSON = ROOT / "outputs" / "eval_results.json"
 PIPELINE_REPORT = ROOT / "outputs" / "comparison_report.txt"
+TRAINING_SUMMARY = ROOT / "outputs" / "q3as" / "training_summary.json"
 
 MODELS = {"base_qwen3-8b": "base", "fine_tuned": "fine-tuned"}
 

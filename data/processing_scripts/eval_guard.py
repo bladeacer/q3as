@@ -50,10 +50,13 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import parse_ada_ast
+import source_paths
 
 logger = logging.getLogger(__name__)
 
-ADA_EVAL_DIR = Path(__file__).resolve().parents[2].parent / "ada-eval"
+# ada-eval lives in the source cache; fall back to the legacy sibling.
+_ADA_EVAL_RESOLVED = source_paths.resolve("ada-eval")
+ADA_EVAL_DIR = _ADA_EVAL_RESOLVED or Path("data/raw_repos/_missing/ada-eval")
 ADA_EVAL_DATA = ADA_EVAL_DIR / "data"
 
 # Structural signatures shorter than this are too generic to block on.

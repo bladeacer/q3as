@@ -318,7 +318,12 @@ def main() -> None:
     if args.verbose:
         logging.getLogger().setLevel(logging.DEBUG)
 
-    input_dirs = args.input_dir or [Path("../learn")]
+    if args.input_dir:
+        input_dirs = args.input_dir
+    else:
+        import source_paths
+
+        input_dirs = source_paths.default_doc_dirs() or [Path("../learn")]
     tasks = collect_doc_files(input_dirs)
     if not tasks:
         logger.error("No .md/.rst files found under %s", input_dirs)

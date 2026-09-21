@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # setup.sh - One-shot environment bootstrap for q3as.
 #
-# 1. Shallow-clones the sibling data/guidance repositories into the parent
-#    directory (the model only reads their code/docs as training data, so
-#    they stay outside this repo to keep licensing provenance clean).
+# 1. Fetches the data/guidance repositories into the local archive cache
+#    (data/raw_repos/, gitignored) via scripts/fetch_repos.py: HTTP
+#    tarballs, no git, cached across runs. Sources stay outside this repo
+#    to keep licensing provenance clean.
 # 2. Copies .env.dev to .env for the Hugging Face token (never overwrites).
 # 3. Registers the vendored Alire index when the installed `alr` is older
 #    than the current release, so modern binary crates (gnatprove 16.x,
@@ -20,7 +21,6 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PARENT_DIR="$(dirname "$ROOT_DIR")"
 ONLY="${1:-all}"
-
 # Vendored Alire index: mirrors the crates q3as needs from the current
 # community index (branch stable-1.4.0) so an older `alr` (which can only
 # read older index branches, e.g. stable-1.2.1 on Debian) still resolves
@@ -36,38 +36,15 @@ INDEX_BRANCH="stable-1.4.0"
 # Fallback when the GitHub API is unreachable: latest alire release tag.
 FALLBACK_LATEST_ALR="2.0.1"
 
-# Sibling repositories: URL|directory. Data sources first, then guidance.
-REPOS=(
-  "https://github.com/bladeacer/adacovex.git|adacovex"
-  "https://github.com/bladeacer/Ada_CRDT.git|Ada_CRDT"
-  "https://github.com/ViMoBr/Ada-83-TLALOC.git|Ada-83-TLALOC"
-  "https://github.com/AdaCore/ada-eval.git|ada-eval"
-  "https://github.com/AdaCore/learn.git|learn"
-  "https://github.com/agent-sh/ada-spark.git|ada-spark"
-  "https://github.com/AminBlg/SimpleEnglish.git|SimpleEnglish"
-  "https://github.com/AdaCore/skills.git|skills"
-)
+# Sibling repositories are fetched by scripts/fetch_repos.py (archive
+# cache); see the CORE_REPOS list there and the Sternenfisch hub.
 
-clone_repos() {
-  echo "==> Shallow-cloning sibling repositories into $PARENT_DIR"
-  local missing=0
-  for entry in "${REPOS[@]}"; do
-    local url="${entry%%|*}"
-    local dir="${entry##*|}"
-    local target="$PARENT_DIR/$dir"
-    if [ -d "$target/.git" ]; then
-      echo "    ok        $dir (already present)"
-      continue
-    fi
-    if git clone --depth 1 "$url" "$target"; then
-      echo "    cloned    $dir"
-    else
-      echo "    FAILED    $dir ($url)" >&2
-      missing=1
-    fi
-  done
-  if [ "$missing" -ne 0 ]; then
-    echo "Some repositories failed to clone. The dataset build skips missing" >&2
+fetch_repos() {
+  echo "==> Fetching source repositories into data/raw_repos (archive cache)"
+  if python3 "$ROOT_DIR/scripts/fetch_repos.py"; then
+    echo "    cache ready: $ROOT_DIR/data/raw_repos"
+  else
+    echo "Some repositories failed to fetch. The dataset build skips missing" >&2
     echo "sources with a warning, but the full pipeline expects all of them." >&2
     exit 1
   fi
@@ -210,17 +187,16 @@ setup_python_headers() {
 }
 
 case "$ONLY" in
-  --repos) clone_repos ;;
+  --repos) fetch_repos ;;
   --deps)  setup_env; setup_alire_index; sync_deps; setup_python_headers ;;
-  all)     clone_repos; setup_env; setup_alire_index; sync_deps; setup_python_headers ;;
+  all)     fetch_repos; setup_env; setup_alire_index; sync_deps; setup_python_headers ;;
   *)
     echo "Usage: $0 [--repos|--deps]" >&2
     exit 2
     ;;
 esac
 
-echo ""
 echo "Setup complete. Next steps:"
 echo "  1. make check-model    (download the base model, needs HF token)"
-echo "  2. make build-dataset  (uses the sibling repos cloned above)"
+echo "  2. make build-dataset  (uses the cached sources from data/raw_repos)"
 echo "  3. make train"

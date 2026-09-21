@@ -42,9 +42,15 @@ if str(_SCRIPTS_DIR) not in sys.path:
 sys.path.insert(0, str(_SCRIPTS_DIR.parent / "data" / "processing_scripts"))
 
 import build_dataset as bd
+import source_paths
 from alire_env import ToolNotAvailable, alire_env_path, find_tool
 
 _DEFECT_FAMILIES: tuple[str, ...] = bd._DEFECT_FAMILIES
+
+
+def _default_sources() -> list[Path]:
+    """Defect sources from the cache (adacovex, Ada_CRDT, ada-eval)."""
+    return source_paths.default_eval_sources()
 
 
 _UNIT_END = re.compile(r"\bend\s+\w[\w.]*\s*;")
@@ -385,7 +391,7 @@ def main() -> None:
     parser.add_argument(
         "--source", type=Path, action="append", default=[],
         help="Ada source tree to draw pairs from (repeatable). "
-             "Default: ../adacovex ../Ada_CRDT ../ada-eval",
+             "Default: cache dirs of adacovex, Ada_CRDT, ada-eval",
     )
     parser.add_argument(
         "--limit", type=int, default=30,
@@ -393,7 +399,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    sources = args.source or [Path("../adacovex"), Path("../Ada_CRDT"), Path("../ada-eval")]
+    sources = args.source or _default_sources()
     # Resolve gnat up front (exits with install instructions when missing).
     _gnat()
 
