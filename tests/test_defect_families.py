@@ -13,6 +13,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "data" / "processing_scripts"))
 
 import build_dataset as bd
+import code_variants
 
 # --------------------------------------------------------------------------- #
 # Fixtures: snippets shaped so exactly one family applies
@@ -253,19 +254,131 @@ class TestDedupGrouped:
         # Regression: identical records generated from two different groups
         # (same spec via different source paths) landed in different splits.
         grouped = [("pair:a:0", self._turn("spec")), ("pair:b:3", self._turn("spec"))]
-        deduped, dropped = bd.dedup_grouped(grouped)
+        deduped, dropped, detail = bd.dedup_grouped(grouped)
         assert dropped == 1
+        assert detail["exact"] == 1
+        assert detail["ast_structural_capped"] == 0
         assert len(deduped) == 1
         assert deduped[0][0] == "pair:a:0"  # first occurrence wins
 
     def test_distinct_content_is_kept(self):
         grouped = [("pair:a:0", self._turn("one")), ("pair:b:0", self._turn("two"))]
-        deduped, dropped = bd.dedup_grouped(grouped)
+        deduped, dropped, _detail = bd.dedup_grouped(grouped)
+        assert dropped == 0
+        assert len(deduped) == 2
+
+    def test_structural_ast_clones_are_capped(self):
+        # Four alpha-renamed copies of the same algorithm: same structural
+        # signature (long enough to clear MIN_STRUCTURAL_LEN), distinct
+        # verbatim text. Beyond the cap, extras are cut.
+        body = (
+            "-- pad\n"
+            "   Tmp : Integer := 0;\n"
+            "   Tmp := Tmp + 1;\n"
+            "   Tmp := Tmp + 2;\n"
+            "   Tmp := Tmp + 3;\n"
+            "   if Tmp > 0 then\n      X := Tmp + Y;\n   end if;\n"
+        )
+        code_a = f"procedure Op (X : in out Integer; Y : Integer) is\n{body}end Op;"
+        code_b = code_a.replace("Tmp", "Counter").replace("Op", "Operate")
+        code_c = code_a.replace("Y", "Limit")
+        code_d = code_a.replace("Tmp", "Count").replace("Y", "Bound")
+        assert len({code_a, code_b, code_c, code_d}) == 4  # distinct verbatim
+        sigs = {bd._ast_structural_signature([
+            {"role": "user", "content": "u"},
+            {"role": "assistant", "content": f"```ada\n{c}\n```"},
+        ]) for c in (code_a, code_b, code_c, code_d)}
+        assert len(sigs) == 1 and None not in sigs  # same, real signature
+
+        def turn(code: str) -> dict:
+            return {"messages": [
+                {"role": "user", "content": "Please provide the Ada body."},
+                {"role": "assistant", "content": f"```ada\n{code}\n```"},
+            ]}
+
+        grouped = [
+            ("ast:a", turn(code_a)),
+            ("ast:b", turn(code_b)),
+            ("ast:c", turn(code_c)),
+            ("ast:d", turn(code_d)),
+        ]
+        deduped, dropped, detail = bd.dedup_grouped(grouped, ast_structural_cap=3)
+        assert detail["exact"] == 0
+        assert detail["ast_structural_capped"] == 1
+        assert dropped == 1
+        assert len(deduped) == 3
+
+    def test_default_cap_is_two(self):
+        # The shipped default: the cap-tuning experiment picked 2 (see
+        # docs/datasets-and-training.md). A third clone of one shape is cut.
+        body = (
+            "-- pad\n"
+            "   Tmp : Integer := 0;\n"
+            "   Tmp := Tmp + 1;\n"
+            "   Tmp := Tmp + 2;\n"
+            "   if Tmp > 0 then\n      X := Tmp + Y;\n   end if;\n"
+        )
+        code_a = f"procedure Op (X : in out Integer; Y : Integer) is\n{body}end Op;"
+        code_b = code_a.replace("Tmp", "Counter").replace("Op", "Operate")
+        code_c = code_a.replace("Y", "Limit")
+
+        def turn(code: str) -> dict:
+            return {"messages": [
+                {"role": "user", "content": "Please provide the Ada body."},
+                {"role": "assistant", "content": f"```ada\n{code}\n```"},
+            ]}
+
+        grouped = [("ast:a", turn(code_a)), ("ast:b", turn(code_b)), ("ast:c", turn(code_c))]
+        deduped, dropped, detail = bd.dedup_grouped(grouped)
+        assert bd.AST_STRUCTURAL_CAP == 2
+        assert detail["ast_structural_capped"] == 1
+        assert dropped == 1 and len(deduped) == 2
+
+    def test_variant_renamed_turns_survive_dedup(self):
+        # The intentional variety: variant_turns renames ONE snippet's
+        # identifiers, so each variant has its own structural signature and
+        # must survive even when several records exist in the same group.
+        body = (
+            "-- pad\n"
+            "   Tmp : Integer := 0;\n"
+            "   Tmp := Tmp + 1;\n"
+            "   Tmp := Tmp + 2;\n"
+            "   if Tmp > 0 then\n      X := Tmp + Y;\n   end if;\n"
+        )
+        code = f"procedure Op (X : in out Integer; Y : Integer) is\n{body}end Op;"
+        record = {
+            "messages": [
+                {"role": "user", "content": "Provide the body.\n\n```ada\nprocedure Op;\n```"},
+                {"role": "assistant", "content": f"```ada\n{code}\n```"},
+            ],
+            "meta": {"kind": "ast_impl", "group": "ast:1"},
+        }
+        turns = [record] + [t for _g, t in code_variants.variant_turns(record)]
+        assert len(turns) >= 2  # the original plus at least one variant
+        grouped = [("ast:1", t) for t in turns]
+        deduped, dropped, _detail = bd.dedup_grouped(grouped)
+        assert dropped == 0
+        assert len(deduped) == len(turns)
+
+    def test_prose_turns_without_code_never_capped(self):
+        # Doc-style prose turns have no structural signature; even exact
+        # user prompts with different answers are kept (NL variety).
+        grouped = [
+            ("doc:1", {"messages": [
+                {"role": "user", "content": "Explain this section."},
+                {"role": "assistant", "content": "First explanation, quite detailed and long enough."},
+            ]}),
+            ("doc:2", {"messages": [
+                {"role": "user", "content": "Explain this section."},
+                {"role": "assistant", "content": "Second explanation, worded differently throughout."},
+            ]}),
+        ]
+        deduped, dropped, _detail = bd.dedup_grouped(grouped)
         assert dropped == 0
         assert len(deduped) == 2
 
     def test_empty_input(self):
-        assert bd.dedup_grouped([]) == ([], 0)
+        assert bd.dedup_grouped([]) == ([], 0, {"exact": 0, "ast_structural_capped": 0})
 
 
 # --------------------------------------------------------------------------- #
@@ -363,6 +476,74 @@ class TestExtraTurnsIntegration:
         assert by_user["u-impl"] == by_user["u-contract"]
         assert by_user["u-doc"] in {"train", "val", "test"}
 
+    def test_empty_assistant_extra_record_is_dropped(self, tmp_path, monkeypatch):
+        import json
+
+        # Keep the AdaCore skill QA loader out of this fixture: it reads a
+        # module-level cache path and would add 11 unrelated turns.
+        monkeypatch.setattr(bd, "ADACORE_SKILLS_DIR", tmp_path / "no-skills")
+
+        (tmp_path / "empty.jsonl").write_text(
+            json.dumps({
+                "messages": [
+                    {"role": "user", "content": "Provide the body."},
+                    {"role": "assistant", "content": ""},
+                ],
+                "meta": {"kind": "ast_impl"},
+            }) + "\n",
+            encoding="utf-8",
+        )
+        out = tmp_path / "dataset.jsonl"
+        count = bd.build_dataset(
+            input_dirs=[tmp_path],
+            extra_input_dirs=[],
+            output_file=out,
+            doc_dirs=[],
+            guidance_dirs=[],
+            workers=1,
+            extra_turns=[tmp_path / "empty.jsonl"],
+        )
+        meta = json.loads((tmp_path / "dataset_metadata.json").read_text())
+        # The empty-assistant record never enters the corpus (an input dir
+        # with no pairs contributes nothing else).
+        assert count == 0
+        assert meta["extra_turns_files"][0]["empty_assistant"] == 1
+        assert meta["extra_turns_files"][0]["ingested"] == 0
+
+    def test_empty_assistant_pair_turn_is_dropped(self, tmp_path, monkeypatch):
+        import json
+
+        monkeypatch.setattr(bd, "ADACORE_SKILLS_DIR", tmp_path / "no-skills")
+
+        # A spec with no body: format_training_turn emits an empty
+        # assistant message, which the builder must drop.
+        (tmp_path / "orphan.ads").write_text(
+            "package Orphan is\n   procedure Do_It (X : Integer);\nend Orphan;\n",
+            encoding="utf-8",
+        )
+        out = tmp_path / "dataset.jsonl"
+        count = bd.build_dataset(
+            input_dirs=[tmp_path],
+            extra_input_dirs=[],
+            output_file=out,
+            doc_dirs=[],
+            guidance_dirs=[],
+            workers=1,
+            extra_turns=[],
+        )
+        meta = json.loads((tmp_path / "dataset_metadata.json").read_text())
+        assert meta["empty_assistant_dropped"] == 1
+        # The spec-only completion turn is gone; only derived defect turns
+        # (which carry real diagnoses) may remain.
+        assert meta["turn_counts_by_kind"].get("code_pair", 0) == 0
+        assert count == meta["total_turns"]
+        records = [json.loads(line) for line in out.read_text().splitlines() if line.strip()]
+        assert not any(
+            rec["messages"][-1]["role"] == "assistant"
+            and not rec["messages"][-1]["content"].strip()
+            for rec in records
+        )
+
     def test_missing_extra_file_is_skipped(self, tmp_path):
         import json
 
@@ -385,4 +566,5 @@ class TestExtraTurnsIntegration:
         assert meta["extra_turns_files"] == [{
             "path": str(tmp_path / "nope.jsonl"),
             "records": 0, "ingested": 0, "defects": 0, "variants": 0,
+            "empty_assistant": 0,
         }]

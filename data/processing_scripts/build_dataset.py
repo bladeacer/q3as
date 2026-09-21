@@ -59,6 +59,7 @@ from pathlib import Path
 from typing import Any
 
 import code_variants
+import eval_guard
 
 # --------------------------------------------------------------------------- #
 # Constants
@@ -2327,26 +2328,94 @@ def _process_pair_task(
     return task["group"], turns, counts
 
 
+# Cap on how many AST-derived records with the same structural (alpha-renamed)
+# code signature are kept. The hub corpus is highly templated: hundreds of
+# records are the same algorithm with different identifier spellings, and the
+# variant-renaming pass makes them exactly equal. Cap, not drop: a few copies
+# of an idiom are useful signal, hundreds are duplication. Records with no
+# structural signature (plain prose turns, short code) are never capped.
+#
+# Value chosen by experiment (scripts/run_cap_experiment.sh, 40-step QLoRA
+# probes on the cap-variant datasets): cap 2 reached the best val loss
+# (1.050 vs 1.117 for cap 3) and tied cap 5 on test (1.065 vs 1.070 ppl 2.90
+# vs 2.92) with a smaller, more diverse dataset. See
+# docs/datasets-and-training.md.
+AST_STRUCTURAL_CAP = 2
+AST_STRUCTURAL_CAP_UNLIMITED = -1
+AST_STRUCTURAL_CAP_UNLIMITED = -1
+
+
 def dedup_grouped(
     all_grouped: list[tuple[str, dict[str, list[dict[str, str]]]]],
-) -> tuple[list[tuple[str, dict[str, list[dict[str, str]]]]], int]:
-    """Drop exact-duplicate turns, keeping the first occurrence.
+    ast_structural_cap: int = AST_STRUCTURAL_CAP,
+) -> tuple[list[tuple[str, dict[str, list[dict[str, str]]]]], int, dict[str, int]]:
+    """Drop duplicate turns, keeping the first occurrence.
 
-    The same content can be generated in two different groups: a package
-    spec extracted through different source paths, identical doc sections
-    in sibling repos. Group-aware splitting cannot catch that, and copies
-    that straddle splits would leak eval answers into training. Returns
-    the deduplicated list and the number of dropped records.
+    Two duplicate families are removed:
+
+    1. **Exact duplicates** - identical message lists generated in two
+       different groups (a package spec extracted through different source
+       paths, a variant turn that renames structurally identical hub code
+       to the same fresh names). Group-aware splitting cannot catch these,
+       and copies that straddle splits would leak eval answers into
+       training.
+    2. **Structural duplicates of AST-derived records** - records whose
+       assistant Ada code has the same alpha-renamed token shape
+       (``eval_guard.structural_text``). The hub corpus contains large
+       families of the same algorithm under different spellings; more than
+       ``AST_STRUCTURAL_CAP`` copies of one shape add duplication, not
+       signal, so extras are dropped.
+
+    What is deliberately preserved: the dataset's intentional
+    natural-language and code variety. Correct-variant turns
+    (``code_variants.variant_turns``) rename or reorder a *specific*
+    snippet and keep the surrounding prose, so each variant has a distinct
+    structural signature and distinct wording - it survives dedup. The
+    paraphrase turns (plain vs STE doc answers, prose vs diagnosis) differ
+    in their assistant text and never collide. Only verbatim repeats and
+    beyond-cap structural clones of AST code are removed.
+
+    Returns (deduplicated list, dropped count, breakdown by family with
+    the keys ``exact`` and ``ast_structural_capped``).
     """
     seen: set[str] = set()
+    ast_seen: dict[str, int] = {}
     deduped: list[tuple[str, dict[str, list[dict[str, str]]]]] = []
+    breakdown = {"exact": 0, "ast_structural_capped": 0}
     for group, turn in all_grouped:
         signature = json.dumps(turn["messages"], sort_keys=True)
         if signature in seen:
+            breakdown["exact"] += 1
             continue
+        structural = _ast_structural_signature(turn["messages"])
+        if structural is not None and ast_structural_cap != AST_STRUCTURAL_CAP_UNLIMITED:
+            count = ast_seen.get(structural, 0)
+            if count >= ast_structural_cap:
+                breakdown["ast_structural_capped"] += 1
+                continue
+            ast_seen[structural] = count + 1
         seen.add(signature)
         deduped.append((group, turn))
-    return deduped, len(all_grouped) - len(deduped)
+    dropped = breakdown["exact"] + breakdown["ast_structural_capped"]
+    return deduped, dropped, breakdown
+
+
+def _ast_structural_signature(messages: list[dict[str, str]]) -> str | None:
+    """Alpha-renamed signature of a record's assistant Ada code, or None.
+
+    Only assistant fences count: the answer is what must not repeat.
+    The user prompt (question phrasing, spec shown) may legitimately repeat
+    across records. Code shorter than ``eval_guard.MIN_STRUCTURAL_LEN``
+    tokens carries too little shape to cluster on and is never capped.
+    """
+    for message in messages:
+        if message.get("role") != "assistant":
+            continue
+        for block in _FENCE_BLOCK_RE.findall(str(message.get("content", ""))):
+            structural = eval_guard.structural_text(block)
+            if len(structural) >= eval_guard.MIN_STRUCTURAL_LEN:
+                return structural
+    return None
 
 
 def assign_splits(
@@ -2402,6 +2471,17 @@ def _extra_turn_kind(meta: dict[str, Any]) -> str:
 _FENCE_BLOCK_RE = re.compile(r"```(?:ada)?\n(.*?)```", re.DOTALL)
 
 
+def _empty_assistant(turn: dict[str, list[dict[str, str]]]) -> bool:
+    """True when the turn's last assistant message is empty.
+
+    The pair pipeline emits spec-only/impl-only records whose assistant
+    reply is the empty string ("provide the body" with no body). Training
+    on them teaches immediate-EOS behavior, so they are dropped.
+    """
+    messages = turn.get("messages") or []
+    return bool(messages) and messages[-1].get("role") == "assistant" and not str(messages[-1].get("content", "")).strip()
+
+
 def _detect_standard_for_block(code: str) -> str:
     """Standard for ingested code: content-derived, defaults to SPARK 2014."""
     std = detect_ada_standard(code)
@@ -2439,15 +2519,19 @@ def _ingest_extra_turns(
     the extracted code itself, so AST-derived training data gets the same
     broken-example coverage as the pair pipeline.
 
+    Empty-assistant records ("provide the body" with no body) are counted
+    per file under ``empty_assistant`` and dropped instead of ingested.
+
     Returns one stats dict per input file, in the same order, with the keys
     ``records``, ``ingested`` (2+ message records), ``defects`` (derived
-    defect turns) and ``variants`` (derived correct-variant turns). Missing
-    and unreadable files still produce their stats entry so the metadata
-    exposes every requested source, not only the ones that worked.
+    defect turns), ``variants`` (derived correct-variant turns) and
+    ``empty_assistant`` (records dropped for an empty assistant reply).
+    Missing and unreadable files still produce their stats entry so the
+    metadata exposes every requested source, not only the ones that worked.
     """
     per_file_stats: list[dict[str, int]] = []
     for extra_path in extra_paths:
-        stats = {"records": 0, "ingested": 0, "defects": 0, "variants": 0}
+        stats = {"records": 0, "ingested": 0, "defects": 0, "variants": 0, "empty_assistant": 0}
         per_file_stats.append(stats)
         if not extra_path.exists():
             logger.warning("Extra turns file not found, skipping: %s", extra_path)
@@ -2455,6 +2539,7 @@ def _ingest_extra_turns(
         ingested = 0
         defect_turns = 0
         variant_turns_count = 0
+        skipped_empty_assistant = 0
         try:
             with open(extra_path, "r", encoding="utf-8") as f:
                 for index, line in enumerate(f):
@@ -2472,6 +2557,9 @@ def _ingest_extra_turns(
                         continue
                     meta = record.get("meta") or {}
                     group = _extra_turn_group(record, index)
+                    if _empty_assistant({"messages": messages}):
+                        skipped_empty_assistant += 1
+                        continue
                     all_grouped.append((group, {"messages": messages}))
                     kind = _extra_turn_kind(meta)
                     turn_counts[kind] = turn_counts.get(kind, 0) + 1
@@ -2511,6 +2599,7 @@ def _ingest_extra_turns(
             stats["ingested"] += ingested
             stats["defects"] += defect_turns
             stats["variants"] += variant_turns_count
+            stats["empty_assistant"] += skipped_empty_assistant
             if defect_turns:
                 turn_counts["ast_defect"] = turn_counts.get("ast_defect", 0) + defect_turns
             if variant_turns_count:
@@ -2540,6 +2629,7 @@ def build_dataset(
     enable_defect_pairs: bool = True,
     workers: int = 0,
     extra_turns: list[Path] | None = None,
+    ast_structural_cap: int = AST_STRUCTURAL_CAP,
 ) -> int:
     """Run the full ingestion -> pairing -> sanitization -> JSONL pipeline.
 
@@ -2568,6 +2658,7 @@ def build_dataset(
     all_grouped: list[tuple[str, dict[str, list[dict[str, str]]]]] = []
     turn_counts: dict[str, int] = {}
     eval_info = eval_methodology or {}
+    empty_assistant_dropped = 0
 
     # Load writing rules, terminology glossary, and agent-skill guidance.
     ste_rules = load_simple_english_rules()
@@ -2657,9 +2748,21 @@ def build_dataset(
 
     for group, turns, counts in results:
         for turn in turns:
+            if _empty_assistant(turn):
+                # Spec-only/impl-only pairs ask for a completion but carry
+                # no answer; training on them teaches empty replies.
+                empty_assistant_dropped += 1
+                if counts.get("code_pair"):
+                    counts["code_pair"] -= 1
+                continue
             all_grouped.append((group, turn))
         for key, value in counts.items():
             turn_counts[key] = turn_counts.get(key, 0) + value
+    if empty_assistant_dropped:
+        logger.info(
+            "Dropped %d pair turns with empty assistant replies",
+            empty_assistant_dropped,
+        )
 
     # Documentation-QA turns from code blocks embedded in course material
     doc_files: list[Path] = []
@@ -2696,8 +2799,6 @@ def build_dataset(
     # evaluation suite (verbatim, reformatted, or identifier-renamed). One
     # bad turn poisons its whole group. Runs before dedup and split so no
     # eval-derived record can reach any split file.
-    import eval_guard
-
     all_grouped, guard_dropped, guard_reasons = eval_guard.contaminated_groups(all_grouped)
     guard_sigs = eval_guard.load_eval_signatures()
     if guard_dropped:
@@ -2708,10 +2809,21 @@ def build_dataset(
             ", ".join(sorted(set(guard_reasons))[:10]),
         )
 
-    # Remove cross-group exact duplicates before splitting (see docstring).
-    all_grouped, deduped_count = dedup_grouped(all_grouped)
+    # Remove exact duplicates and beyond-cap structural duplicates before
+    # splitting (see dedup_grouped docstring for what is kept on purpose).
+    # eval_guard is imported at module top; the build_dataset ->
+    # eval_guard -> parse_ada_ast -> build_dataset import cycle is benign
+    # because all cross-uses are call-time attribute lookups.
+    all_grouped, deduped_count, dedup_detail = dedup_grouped(
+        all_grouped, ast_structural_cap=ast_structural_cap,
+    )
     if deduped_count:
-        logger.info("Removed %d exact duplicate turns before splitting", deduped_count)
+        logger.info(
+            "Removed %d duplicate turns before splitting (%d verbatim, %d AST structural over cap)",
+            deduped_count,
+            dedup_detail["exact"],
+            dedup_detail["ast_structural_capped"],
+        )
 
     all_turns = [turn for _group, turn in all_grouped]
 
@@ -2769,6 +2881,7 @@ def build_dataset(
             "seed": split_seed,
             "strategy": "group-aware: every turn from one source pair or doc block stays in one split",
             "deduped_duplicates": deduped_count,
+            "dedup_detail": {**dedup_detail, "ast_structural_cap": ast_structural_cap},
             "eval_guard": {
                 "degraded": guard_sigs.degraded,
                 "blocked_signatures": len(guard_sigs),
@@ -2779,6 +2892,7 @@ def build_dataset(
             "files": {name: str(path) for name, path in split_paths.items()},
         },
         "workers": workers,
+        "empty_assistant_dropped": empty_assistant_dropped,
         "extra_turns_files": [
             {"path": str(path), **stats}
             for path, stats in zip(extra_turns or [], extra_turns_stats)
@@ -2860,6 +2974,12 @@ def main() -> None:
              "parser outputs when they exist.",
     )
     parser.add_argument(
+        "--ast-structural-cap", type=int, default=AST_STRUCTURAL_CAP,
+        help="Max AST records sharing one alpha-renamed code signature "
+             f"({AST_STRUCTURAL_CAP_UNLIMITED} = unlimited). Cap 0 keeps only "
+             "the first record of each structural family.",
+    )
+    parser.add_argument(
         "--verbose", "-v", action="store_true",
         help="Enable debug-level logging.",
     )
@@ -2925,6 +3045,7 @@ def main() -> None:
         enable_defect_pairs=not args.no_defect_pairs,
         workers=args.workers,
         extra_turns=extra_turns,
+        ast_structural_cap=args.ast_structural_cap,
     )
     print(f"Dataset built: {count} training turns -> {output_file}")
 

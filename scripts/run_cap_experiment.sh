@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# Cap-tuning experiment: identical short QLoRA runs over the cap-variant
+# datasets. Only the dataset changes; seed, LR, budget, and probe
+# val/test are shared so eval-loss curves are comparable.
+#
+#   cap:        1 2 3 5 10 inf    (positional subset, default all)
+#   steps:      80  (override with STEPS=)
+#   acc:        2   (override with ACC=)
+#   eval steps: 15  (override with EVAL_STEPS=)
+#
+# Usage: STEPS=80 ACC=2 scripts/run_cap_experiment.sh [cap ...]
+set -uo pipefail
+cd "$(dirname "$0")/.."
+
+STEPS="${STEPS:-80}"
+ACC="${ACC:-2}"
+EVAL_STEPS="${EVAL_STEPS:-15}"
+CAPS=("$@")
+[ ${#CAPS[@]} -eq 0 ] && CAPS=(1 2 3 5 10 inf)
+
+PY_HDR_ROOT="${HOME}/.cache/q3as-python-headers/usr/include"
+if [ -f "${PY_HDR_ROOT}/python3.13/Python.h" ]; then
+  export CPATH="${PY_HDR_ROOT}/python3.13:${PY_HDR_ROOT}/x86_64-linux-gnu:${PY_HDR_ROOT}"
+fi
+export HF_HUB_DISABLE_XET=1 HF_DEACTIVATE_ASYNC_LOAD=1 \
+       PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+OUT=outputs/capexp
+mkdir -p "$OUT"
+RESULTS="$OUT/results.csv"
+echo "cap,steps,final_train_loss,best_eval_loss,best_step,test_loss,test_ppl,early_stopped,seconds" > "$RESULTS"
+
+for cap in "${CAPS[@]}"; do
+  echo "=== cap=$cap: ${STEPS} steps, acc=${ACC} ==="
+  start=$(date +%s)
+  uv run python -u training/train_unsloth.py \
+    --dataset "outputs/capexp/datasets/cap${cap}/dataset_train.jsonl" \
+    --val-dataset "$OUT/probe_val.jsonl" \
+    --test-dataset "$OUT/probe_test.jsonl" \
+    --output-dir "$OUT/run_cap${cap}" \
+    --max-steps "$STEPS" \
+    --eval-steps "$EVAL_STEPS" \
+    --save-steps "$EVAL_STEPS" \
+    --gradient-accumulation "$ACC" \
+    --seed 42 \
+    --skip-merged-save 2>&1 | tee "$OUT/log_cap${cap}.txt"
+  rc=$?
+  end=$(date +%s)
+  echo "cap=$cap finished rc=$rc in $((end-start))s"
+done
+
+python3 scripts/collect_cap_results.py
+echo "Per-run summary appended to $OUT/results.csv"

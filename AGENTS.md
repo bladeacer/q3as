@@ -57,7 +57,10 @@ records from ada-eval.
 - `data/processing_scripts/build_dataset.py` - the dataset builder. Discovers
   and pairs Ada sources, sanitizes prose into Simplified Technical English
   (STE), injects correct-vs-wrong defect pairs (five families), distills
-  agent-skill guidance into system prompts, and writes JSONL plus metadata.
+  agent-skill guidance into system prompts, dedups (verbatim plus a cap of
+  `AST_STRUCTURAL_CAP = 2` on alpha-renamed AST-record shapes, tuned by
+  experiment), drops empty-assistant records, and writes JSONL plus metadata
+  with per-source provenance.
 - `data/processing_scripts/source_paths.py` - resolves every source repo to
   its cache directory (`data/raw_repos/<owner>/<repo>`, with the legacy
   sibling location as fallback); no pipeline file hard-codes paths.
@@ -187,11 +190,14 @@ q3as/
    scripts/
        ada_env.sh
        alire_env.py
+       build_cap_variants.sh
        bump_version.py
+       collect_cap_results.py
        fetch_repos.py
        gen_agents_tree.py
        gen_contract_mutations.py
        gen_eval_report.py
+       run_cap_experiment.sh
        validate_defects.py
    tests/
        test_build_dataset.py

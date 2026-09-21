@@ -44,6 +44,10 @@ merges all of them via `--extra-turns`. The build metadata
 per-input-dir pair counts under `records_by_input_dir`, so a missing or
 empty parser output is visible instead of vanishing silently. Records
 dropped by the eval guard or by dedup do not appear in any count.
+Empty-assistant records ("provide the body" questions with no answer,
+from spec-only or impl-only sources) are dropped at build time and at
+training-load time; their count is recorded under
+`empty_assistant_dropped` and per file under `empty_assistant`.
 
 | Family | Example defect |
 |---|---|
@@ -71,9 +75,34 @@ splits honest:
 1. **Group-aware split** - every turn derived from one source unit (a code
    pair and its defect pairs, the doc sections of one file) stays in one
    split.
-2. **Dedup before split** - identical records generated from different
-   groups (the same spec reached through two source paths) are dropped, so
-   duplicates cannot straddle splits.
+2. **Dedup before split** - two duplicate families are removed:
+   verbatim copies generated from different groups, and AST-derived
+   records whose assistant code has the same alpha-renamed shape beyond
+   a small cap (`AST_STRUCTURAL_CAP`, currently 2): the algorithm-hub
+   corpus is templated, and hundreds of its records are the same
+   algorithm under different identifier spellings. Deliberately kept:
+   the dataset's intended variety - variant turns (renamed/reordered
+   code with their own wording), the plain vs STE paraphrase pairs, and
+   identical user prompts with different answers. Dedup reports its
+   breakdown (`exact`, `ast_structural_capped`) in the build metadata;
+   duplicates cannot straddle splits because the first occurrence wins.
+
+   The cap value is evidence-based, not a guess. A controlled experiment
+   (`scripts/build_cap_variants.sh` + `scripts/run_cap_experiment.sh`)
+   trained identical 40-step QLoRA probes (same seed, LR, batch, and a
+   fixed 40-example val/test) on datasets that differ only in the cap:
+
+   | cap | val loss (step 40) | test loss | test ppl |
+   |----:|-------------------:|----------:|---------:|
+   | 1   | 1.310              | 1.333     | 3.79     |
+   | **2** | **1.050**        | 1.070     | 2.92     |
+   | 3   | 1.117              | 1.128     | 3.09     |
+   | 5   | 1.052              | 1.065     | 2.90     |
+
+   Caps 1 and 3 lose to both; caps 2 and 5 are statistically tied on the
+   40-example test set, so the smaller, more diverse cap-2 dataset was
+   adopted as the default. Results CSV: `outputs/capexp/results.csv`
+   (gitignored), per-cap summaries in `outputs/capexp/run_cap*/`.
 3. **Eval guard** - ada-eval benchmark content is dropped before splitting
    (see [Data provenance](data-provenance.md)).
 
