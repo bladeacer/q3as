@@ -28,7 +28,7 @@ _SCRIPTS_DIR = Path(__file__).resolve().parents[2] / "scripts"
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
-from fetch_repos import CACHE_DIR, CORE_REPOS, GITHUB_REPO_RE  # noqa: E402
+from fetch_repos import CACHE_DIR, CORE_REPOS, GITHUB_REPO_RE
 
 # repo URL -> directory name used by every pipeline stage. Mostly the repo
 # name; kept explicit so a rename upstream does not silently split sources.

@@ -9,20 +9,25 @@ which commands to use. Regenerate the tree below with `make agents-tree`.
 
 1. `make download` fetches the official `Qwen/Qwen3-8B` to `models/qwen3-8b/`
    (Unsloth is the training framework only, never the weight source).
-2. `make parse-data` runs the parser modules (doc chunking, AST extraction)
+2. `make fetch-sources` fills the archive cache `data/raw_repos/<owner>/<repo>`
+   (HTTP tarballs, no git, cached; core sources plus every RobertBoettcherSF
+   hub repo parsed from the hub README).
+3. `make parse-data` runs the parser modules (doc chunking, AST extraction)
    into `data/processed/*.jsonl`.
-3. `make build-dataset` walks Ada source trees of the sibling repos, ingests
+4. `make build-dataset` walks the cached Ada source trees, ingests
    the parser outputs, and emits `data/processed/dataset.jsonl` plus the
    train/val/test split files (chat-format turns: code, doc-QA, defect
    pairs, contract-writing, toolchain QA).
-4. `make train` runs QLoRA fine-tuning (Unsloth) with seeded early stopping
-   and writes checkpoints to `outputs/q3as/`.
-5. `make generate` produces Ada solutions with both models into
+5. `make train` runs QLoRA fine-tuning (Unsloth) with seeded early stopping
+   and writes checkpoints plus a training summary (train/val/test loss
+   histories) to `outputs/q3as/`.
+6. `make generate` produces Ada solutions with both models into
    `outputs/generated_solutions/<label>/`.
-6. `make eval` and `make eval-pipeline` score them (BLEU, compilation, unit
+7. `make eval` and `make eval-pipeline` score them (BLEU, compilation, unit
    tests, SPARK proofs) and write reports to `outputs/`; `make eval-report`
    writes the versioned summary to `docs/results/result-vX.Y.Z.md` (version
-   from `alire.toml`, bumped with `make bump-version`).
+   from `alire.toml`, bumped with `make bump-version`), including the
+   train/val/test loss table and a training-trend verdict.
 
 End-user and developer documentation lives in `docs/` (architecture,
 datasets and training, data provenance, toolchain setup, evaluation);
@@ -31,13 +36,14 @@ README links to it. Keep those pages current when behavior changes.
 ## Data provenance and eval integrity
 
 **Full documentation: `docs/data-provenance.md` - keep it in sync.** When a
-new data source is added (new `--input-dir`/`--extra-input-dir`, new parser
-source, new sibling repo), update that page's source table and license
-notes, then run `make check-integrity` before building. The same applies
-when the guard, the defect families, or the split logic change: update
-`docs/datasets-and-training.md`.
+new data source is added (new URL in `CORE_REPOS` of
+`scripts/fetch_repos.py`, new hub, new parser source), update that page's
+source table and license notes, then run `make check-integrity` before
+building. The same applies when the guard, the defect families, or the
+split logic change: update `docs/datasets-and-training.md`.
 
-The contract in short: everything under `../ada-eval/data` is eval-proper
+The contract in short: everything under the cached ada-eval's `data/`
+directory (formerly the `../ada-eval` sibling) is eval-proper
 (the 19 benchmark samples and their canonical solutions); the guard
 (`data/processing_scripts/eval_guard.py`) hashes every eval subprogram and
 prompt in normalized and alpha-renamed structural forms and
@@ -52,8 +58,11 @@ records from ada-eval.
   and pairs Ada sources, sanitizes prose into Simplified Technical English
   (STE), injects correct-vs-wrong defect pairs (five families), distills
   agent-skill guidance into system prompts, and writes JSONL plus metadata.
+- `data/processing_scripts/source_paths.py` - resolves every source repo to
+  its cache directory (`data/raw_repos/<owner>/<repo>`, with the legacy
+  sibling location as fallback); no pipeline file hard-codes paths.
 - `data/processing_scripts/eval_guard.py` - eval-integrity guard. Hashes every
-  Ada subprogram and prompt in `../ada-eval/data` (normalized and
+  Ada subprogram and prompt in the cached ada-eval `data/` tree (normalized and
   alpha-renamed structural forms) and drops any training record matching
   them; `make check-integrity` fails if a split file contains eval content.
 - `data/processing_scripts/` - dataset helpers live beside the builder.
@@ -70,6 +79,9 @@ records from ada-eval.
 - `scripts/validate_defects.py` - compiles the dataset's defect pairs with
   the real GNAT and checks the claimed compiler messages. Exit code is the
   contract: any "compiles clean" defect is a failure.
+- `scripts/fetch_repos.py` - archive-cache fetcher (HTTP tarballs, parallel,
+  cached; parses the Sternenfisch hub README for the repo list). `make
+  fetch-sources` runs it.
 - `scripts/ada_env.sh` - runs any command inside the Alire toolchain
   environment (`alr exec`); all Ada tool invocations go through it.
 - `scripts/alire_env.py` - Python side of the same: `find_tool("gnatprove")`
@@ -115,10 +127,12 @@ community index lacks.
   Change them only with `make validate-defects` evidence.
 - Python: `uv` for env/deps, ruff + mypy clean for all touched files,
   pytest for the dataset logic.
-- The sibling repos (`../adacovex`, `../Ada_CRDT`, `../Ada-83-TLALOC`,
-  `../ada-eval`, `../learn`, `../ada-spark`, `../SimpleEnglish`,
-  `../skills`) are inputs only; `./setup.sh` clones them. Their licenses are
-  credited in `README.md`.
+- The source repositories (see the table in `docs/data-provenance.md`:
+  adacovex, Ada_CRDT, Ada-83-TLALOC, ada-eval, learn, training_material,
+  ada-spark, SimpleEnglish, skills, plus the ~900 RobertBoettcherSF hub
+  repos) are inputs only; `scripts/fetch_repos.py` fetches them into the
+  gitignored `data/raw_repos/` cache. Their licenses are credited in
+  `README.md`.
 
 ## Project tree
 
@@ -135,12 +149,14 @@ q3as/
            dataset_train.jsonl
            dataset_val.jsonl
            docs_chunks.jsonl
+           hub_ast_units.jsonl
        processing_scripts/
            build_dataset.py
            code_variants.py
            eval_guard.py
            parse_ada_ast.py
            parse_docs.py
+           source_paths.py
        raw/
    deploy/
        Modelfile
@@ -172,6 +188,7 @@ q3as/
        ada_env.sh
        alire_env.py
        bump_version.py
+       fetch_repos.py
        gen_agents_tree.py
        gen_contract_mutations.py
        gen_eval_report.py
@@ -181,6 +198,7 @@ q3as/
        test_code_variants.py
        test_defect_families.py
        test_eval_guard.py
+       test_eval_report_training.py
        test_generate.py
        test_parsers.py
        test_reporting.py

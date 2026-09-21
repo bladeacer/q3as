@@ -356,6 +356,59 @@ class TestDetectStandard:
         assert bd.detect_ada_standard(code) in ("Unknown", "Ada 83")
         assert bd._standard_label(bd.detect_ada_standard(code)) in ("Ada", "Ada 83")
 
+    def test_comments_do_not_vote(self):
+        # Prose in comments must not decide the standard (regression:
+        # "since Ada 95" in a comment used to match the Ada 95 tier).
+        code = (
+            "package body P is\n"
+            "   -- Ported from an Ada 95 example with tagged types.\n"
+            "   procedure Q is begin null; end Q;\n"
+            "end P;\n"
+        )
+        assert bd.detect_ada_standard(code) == "Ada 83"
+
+    def test_strings_do_not_vote(self):
+        code = 'procedure P is begin Put_Line("SPARK_Mode Loop_Invariant"); end P;'
+        assert bd.detect_ada_standard(code) in ("Ada 83", "Unknown")
+
+    def test_ada95_tagged(self):
+        code = "package P is\n   type T is tagged record C: Integer; end record;\nend P;\n"
+        assert bd.detect_ada_standard(code) == "Ada 95"
+
+    def test_ada2005_interface(self):
+        code = "package P is\n   type I is interface;\n   procedure Q is null;\nend P;\n"
+        assert bd.detect_ada_standard(code) == "Ada 2005"
+
+    def test_ada2012_contracts(self):
+        code = "package P is\n   procedure Q with Pre => True;\nend P;\n"
+        assert bd.detect_ada_standard(code) == "Ada 2012"
+
+    def test_ada2012_expression_function(self):
+        code = "package P is\n   function F return Integer is (42);\nend P;\n"
+        assert bd.detect_ada_standard(code) == "Ada 2012"
+
+    def test_ada2022_reduce(self):
+        code = "package P is\n   function F return Integer is (F'Reduce (\"+\"));\nend P;\n"
+        assert bd.detect_ada_standard(code) == "Ada 2022"
+
+    def test_superset_floor(self):
+        # A file whose newest feature is a contract is Ada 2012, even when
+        # SPARK-friendly constructs appear in prose-free strings only.
+        code = (
+            "package P with Global => (Input => X) is\n"
+            "   X: Integer;\nend P;\n"
+        )
+        assert bd.detect_ada_standard(code) == "Ada 2012"
+
+    def test_spark_tier_uses_annotations(self):
+        # SPARK-specific annotations beat the plain Ada 2012 tier.
+        code = (
+            "package P with SPARK_Mode is\n"
+            "   procedure Q (X: in out Integer) with Pre => X > 0, Post => X'Old < X;\n"
+            "end P;\n"
+        )
+        assert bd.detect_ada_standard(code) in ("SPARK 2014", "Ada 2012")
+
 
 # --------------------------------------------------------------------------- #
 # Markdown STE cleaning (toolchain QA answers)

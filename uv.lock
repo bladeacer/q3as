@@ -34,7 +34,7 @@ wheels = [
 [[package]]
 name = "ada-eval"
 version = "0.1.0"
-source = { directory = "../ada-eval" }
+source = { directory = "data/raw_repos/AdaCore/ada-eval" }
 dependencies = [
     { name = "claude-agent-sdk" },
     { name = "pydantic" },
@@ -2507,7 +2507,7 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "ada-eval", directory = "../ada-eval" },
+    { name = "ada-eval", directory = "data/raw_repos/AdaCore/ada-eval" },
     { name = "mypy", specifier = ">=1.11.0" },
     { name = "pytest", specifier = ">=8.0.0" },
     { name = "pytest-asyncio", specifier = ">=0.24.0" },

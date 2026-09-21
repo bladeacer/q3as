@@ -21,14 +21,19 @@ Every generated explanation follows **ASD-STE100 Simplified Technical English**:
 
 This project builds on and draws data from the following upstream projects. Licensing and provenance details are in [docs/data-provenance.md](docs/data-provenance.md).
 
-- **[adacovex](https://github.com/bladeacer/adacovex)** (`../adacovex`) - Ada/SPARK coverage/proof/CLI tool; source with contract specifications. *(Apache-2.0)*
-- **[Ada_CRDT](https://github.com/bladeacer/Ada_CRDT)** (`../Ada_CRDT`) - Conflict-free replicated data types for Ada/SPARK. *(MIT)*
-- **[Ada-83-TLALOC](https://github.com/ViMoBr/Ada-83-TLALOC)** (`../Ada-83-TLALOC`) - Ada 83 compiler and test suite; [the author has given explicit permission to use this code for model training.](https://forum.ada-lang.io/t/fine-tuning-8b-ai-model-on-ada-spark/4746/3 ) *(GPL-3.0-or-later with GCC runtime exception; tests CC-BY-SA-4.0)*
-- **[ada-eval](https://github.com/AdaCore/ada-eval)** (`../ada-eval`) - LLM evaluation framework for Ada/SPARK; provides our benchmark (and is treated as eval-proper, never as training data). *(Apache-2.0)*
-- **[AdaCore/learn](https://github.com/AdaCore/learn)** (`../learn`) - AdaCore course material; Ada code blocks and sections become documentation-QA turns. *(CC-BY-4.0)*
-- **[agent-sh/ada-spark](https://github.com/agent-sh/ada-spark)** (`../ada-spark`) - Agent skill for idiomatic, current Ada/SPARK; embedded into system prompts. *(MIT)*
-- **[AminBlg/SimpleEnglish](https://github.com/AminBlg/SimpleEnglish)** (`../SimpleEnglish`) - ASD-STE100-style writing skill; governs all generated explanations. *(MIT)*
-- **[AdaCore/skills](https://github.com/AdaCore/skills)** (`../skills`) - Official AdaCore toolchain skills (gnatprove, alire, gnatdoc, gnattest, gnatfuzz); become toolchain QA turns. *(Apache-2.0)*
+Core sources (fetched into the local archive cache `data/raw_repos/<owner>/<repo>` by `make fetch-sources`):
+
+- **[adacovex](https://github.com/bladeacer/adacovex)** - Ada/SPARK coverage/proof/CLI tool; source with contract specifications. *(Apache-2.0)*
+- **[Ada_CRDT](https://github.com/bladeacer/Ada_CRDT)** - Conflict-free replicated data types for Ada/SPARK. *(MIT)*
+- **[Ada-83-TLALOC](https://github.com/ViMoBr/Ada-83-TLALOC)** - Ada 83 compiler and test suite; [the author has given explicit permission to use this code for model training.](https://forum.ada-lang.io/t/fine-tuning-8b-ai-model-on-ada-spark/4746/3 ) *(GPL-3.0-or-later with GCC runtime exception; tests CC-BY-SA-4.0)*
+- **[ada-eval](https://github.com/AdaCore/ada-eval)** - LLM evaluation framework for Ada/SPARK; provides our benchmark (and is treated as eval-proper, never as training data). *(Apache-2.0)*
+- **[AdaCore/learn](https://github.com/AdaCore/learn)** - AdaCore course material; Ada code blocks and sections become documentation-QA turns. *(CC-BY-4.0)*
+- **[AdaCore/training_material](https://github.com/AdaCore/training_material)** - AdaCore training courses (RST); Ada code blocks become documentation-QA turns. *(CC-BY-4.0)*
+- **[agent-sh/ada-spark](https://github.com/agent-sh/ada-spark)** - Agent skill for idiomatic, current Ada/SPARK; embedded into system prompts. *(MIT)*
+- **[AminBlg/SimpleEnglish](https://github.com/AminBlg/SimpleEnglish)** - ASD-STE100-style writing skill; governs all generated explanations. *(MIT)*
+- **[AdaCore/skills](https://github.com/AdaCore/skills)** - Official AdaCore toolchain skills (gnatprove, alire, gnatdoc, gnattest, gnatfuzz); become toolchain QA turns. *(Apache-2.0)*
+
+Hub source (fetched the same way, ~900 repositories): **[RobertBoettcherSF/RobertBoettcherSF.github.io](https://github.com/RobertBoettcherSF/RobertBoettcherSF.github.io)** - the author's hub README links their Ada/SPARK algorithm implementations (distributed systems, graph algorithms, SPARK-verified sheets, parsers, and more). The fetcher parses the hub README and caches every linked repository of that owner; all are MIT and the author has approved training use. Source descriptions follow each repository's own README.
 
 ## Quick Start
 
@@ -36,19 +41,23 @@ This project builds on and draws data from the following upstream projects. Lice
 
 ```bash
 ./setup.sh          # everything
-./setup.sh --repos  # only the sibling repositories
+./setup.sh --repos  # only the source repositories (archive cache)
 ./setup.sh --deps   # only .env, uv sync, python headers
 ```
 
 Or via Make: `make setup`.
 
-The bootstrap shallow-clones the sibling repositories into the parent
-directory, creates `.env` from `.env.dev`, installs dependencies with
-`uv sync`, and (on distributions with an outdated `alr`) registers the
-vendored Alire index so `gnatprove` 16.x and `gnatformat_bin` 26.x resolve
-(see [docs/toolchain-setup.md](docs/toolchain-setup.md)).
+The bootstrap fetches the source repositories into the local archive cache
+(`data/raw_repos/`, gitignored), creates `.env` from `.env.dev`, installs
+dependencies with `uv sync`, and (on distributions with an outdated `alr`)
+registers the vendored Alire index so `gnatprove` 16.x and `gnatformat_bin`
+26.x resolve (see [docs/toolchain-setup.md](docs/toolchain-setup.md)).
 
-The sibling repos stay outside this repository on purpose: the pipeline only reads their code and docs as training data, so vendoring copies inside the project would bloat the repo and blur licensing provenance.
+Source repos are cached outside version control on purpose: the pipeline
+only reads their code and docs as training data, so committing copies would
+bloat the repo and blur licensing provenance. Downloads are plain HTTP
+tarballs (no git), cached by repository identity: a re-run re-fetches
+nothing already on disk (`make fetch-sources`, `--refresh` to force).
 
 ### 2. Install and run
 
@@ -62,8 +71,8 @@ cp .env.dev .env
 # Download and sanity-check the base model
 uv run python training/download_model.py
 
-# Build the dataset (siblings listed above; see make build-dataset for the exact source list)
-uv run python data/processing_scripts/build_dataset.py --input-dir data/raw/ --extra-input-dir ../adacovex --extra-input-dir ../Ada_CRDT --extra-input-dir ../Ada-83-TLALOC --extra-input-dir ../ada-eval
+# Build the dataset (cached sources listed above; see make build-dataset for the exact source list)
+uv run python data/processing_scripts/build_dataset.py --input-dir data/raw/
 
 # Build the dataset with custom extra directories
 uv run python data/processing_scripts/build_dataset.py --input-dir data/raw/ --extra-input-dir /path/to/project1 --extra-input-dir /path/to/project2

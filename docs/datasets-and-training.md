@@ -80,9 +80,39 @@ splits honest:
   the best checkpoint is restored.
 - **Test metrics**: after training, test-split loss and perplexity are
   computed and written to `training_summary.json`.
+- **Loss histories**: `training_summary.json` carries the full train-loss
+  log (`train_loss_history`), every eval point (`eval_loss_history`), the
+  final train loss, and the test metrics, so the report can judge the run
+  without re-parsing trainer state.
 
 Reproducibility caveat: GPU kernels (FlashAttention, cuBLAS) are not
 bit-deterministic; seed 42 gives functional, not bitwise, reproducibility.
+
+## Result reporting: training metrics and trend analysis
+
+`make eval-report` (`scripts/gen_eval_report.py`) extends each
+`docs/results/result-vX.Y.Z.md` with a **Training metrics** section built
+from `outputs/q3as/training_summary.json`:
+
+- the traditional loss table: train / validation (best) / test loss and
+  perplexity,
+- a **trend verdict** computed from the curves, with the numbers it rests
+  on:
+  - `healthy` - validation loss improves overall and its best value sits
+    in the second half of the eval steps,
+  - `plateau` - the best value came early, or improvement stopped while
+    train loss had also stopped falling (early stopping did its job),
+  - `overfit` - validation loss rises more than 5 percent past its best
+    while train loss keeps falling,
+  - `unstable` - a validation-loss step jumps upward by more than 25
+    percent,
+  - `sparse` - fewer than two evaluation points, no trend to judge,
+- the per-step validation-loss table, so a reader can audit the verdict.
+
+The versioned JSON (`result-data-vX.Y.Z.json`) carries the same data
+(`training.train_loss`, `training.val_loss`, `training.test_loss`,
+`training.trend`, plus the raw histories); the results-index comparison
+table adds the fine-tuned test loss and trend verdict per version.
 
 ## Validation loop
 

@@ -231,10 +231,13 @@ def _extract_tarball(archive_bytes: bytes, destination: Path) -> None:
     """Extract a GitHub tarball into *destination*, stripping the top dir.
 
     GitHub archives wrap everything in ``<repo>-<ref>/``. Extraction goes
-    to a temporary directory first, then is moved into place, so a failed
-    download never leaves a half-written cache entry behind.
+    to a temporary directory on the same filesystem as the cache first
+    (/tmp may be a different device, which breaks os.rename), then is
+    moved into place, so a failed download never leaves a half-written
+    cache entry behind.
     """
-    with tempfile.TemporaryDirectory(prefix="q3as-fetch-") as tmp:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=".q3as-fetch-", dir=destination.parent) as tmp:
         archive_path = Path(tmp) / "repo.tar.gz"
         archive_path.write_bytes(archive_bytes)
         extract_dir = Path(tmp) / "out"
@@ -328,8 +331,17 @@ def build_requests(
             if line and not line.startswith("#"):
                 add(line, "manifest")
     for hub in hubs:
-        hub_origin = "hub:" + hub.rstrip("/").rsplit("/", 2)[-2] + "/" + hub.rstrip("/").rsplit("/", 1)[-1]
-        for url in hub_repo_urls(hub):
+        hub = (hub or "").strip()
+        if not hub:
+            continue
+        parts = hub.rstrip("/").rsplit("/", 2)
+        hub_origin = "hub:" + ("/".join(parts[-2:]) if len(parts) >= 2 else hub)
+        try:
+            hub_urls = hub_repo_urls(hub)
+        except (RuntimeError, OSError, urllib.error.URLError) as exc:
+            logger.warning("Hub %s failed: %s - skipping its repositories", hub, exc)
+            continue
+        for url in hub_urls:
             add(url, hub_origin)
 
     if refresh == "core":
@@ -401,10 +413,17 @@ def main(argv: list[str] | None = None) -> int:
     results = fetch_all(requests, jobs=args.jobs)
 
     failures = [r for r in results if r.status == "failed"]
-    if failures:
-        print(f"{len(failures)} of {len(results)} repositories failed to fetch.", file=sys.stderr)
+    core_failures = [r for r in failures if r.request.origin == "core"]
+    if core_failures:
+        print(f"{len(core_failures)} of {len(results)} repositories failed to fetch.", file=sys.stderr)
         return 1
-    print(f"All {len(results)} repositories are in the cache at {CACHE_DIR}.")
+    if failures:
+        print(
+            f"{len(failures)} non-core repositories failed to fetch; "
+            "the dataset build skips them with a warning.",
+            file=sys.stderr,
+        )
+    print(f"Core sources fetched; {len(results) - len(failures)}/{len(results)} repositories are in the cache at {CACHE_DIR}.")
     return 0
 
 

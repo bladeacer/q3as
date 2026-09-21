@@ -143,6 +143,184 @@ def collect_pipeline_note(path: Path) -> str | None:
 
 
 # --------------------------------------------------------------------------- #
+# Training metrics: losses, perplexity, and trend health
+# --------------------------------------------------------------------------- #
+
+def _perplexity(loss: float) -> float:
+    """exp(loss), the standard LM reporting unit."""
+    return round(math.exp(loss), 3)
+
+
+def _trend_diagnosis(
+    eval_history: list[dict[str, float]],
+    train_history: list[dict[str, float]],
+) -> tuple[str, list[str]]:
+    """Judge whether training was smooth and had a healthy trend.
+
+    Verdicts are plain factual statements built from measurable signals:
+
+    - healthy:  val loss reaches its minimum in the second half of the
+                eval steps and the final value is well below the first,
+    - plateau:  val loss stops improving (the early-stopping callback did
+                its job),
+    - overfit:  val loss rises late while train loss keeps falling,
+    - unstable: any val-loss step jumps upward by more than 25 percent,
+    - sparse:   too few evaluation points to judge.
+
+    Returns (verdict, list of findings). Findings name the numbers they
+    come from, so the markdown stays auditable.
+    """
+    findings: list[str] = []
+    steps = [p["step"] for p in eval_history]
+    losses = [p["eval_loss"] for p in eval_history]
+    if len(losses) < 2:
+        return ("sparse", ["Fewer than two evaluation points recorded; no trend to judge."])
+
+    first, last, best = losses[0], losses[-1], min(losses)
+    best_idx = losses.index(best)
+    findings.append(
+        f"validation loss {first:.4f} at step {steps[0]} to {last:.4f} at step {steps[-1]}; "
+        f"best {best:.4f} at step {steps[best_idx]}"
+    )
+
+    verdict = "healthy"
+    # Unstable: a single-step jump upward of more than 25 percent.
+    for prev, cur, step in zip(losses, losses[1:], steps[1:]):
+        if prev > 0 and (cur - prev) / prev > 0.25:
+            verdict = "unstable"
+            findings.append(f"validation loss jumped {100 * (cur - prev) / prev:.0f}% at step {step}")
+
+    # Overfit: best occurs strictly before the last step and val rose from
+    # the best by more than 5 percent while train loss still fell.
+    rose_from_best = (last - best) / best if best > 0 else 0.0
+    if best_idx < len(losses) - 1 and rose_from_best > 0.05:
+        train_last = train_history[-1]["loss"] if train_history else None
+        train_at_best = next(
+            (p["loss"] for p in reversed(train_history) if p["step"] <= steps[best_idx]),
+            None,
+        )
+        if train_last is not None and train_at_best is not None and train_last < train_at_best:
+            verdict = "overfit"
+            findings.append(
+                f"validation loss rose {100 * rose_from_best:.0f}% after step {steps[best_idx]} "
+                f"while train loss kept falling ({train_at_best:.4f} to {train_last:.4f})"
+            )
+        elif verdict == "healthy":
+            verdict = "plateau"
+            findings.append(f"validation loss stopped improving after step {steps[best_idx]}")
+
+    if verdict == "healthy":
+        improvement = (first - last) / first if first > 0 else 0.0
+        findings.append(f"total validation-loss improvement {100 * improvement:.0f}%")
+        if best_idx <= len(steps) // 2 and best_idx < len(steps) - 1:
+            verdict = "plateau"
+            findings.append(
+                f"best loss arrived early (step {steps[best_idx]} of {steps[-1]}); "
+                "later evaluations did not improve it"
+            )
+    return (verdict, findings)
+
+
+def collect_training_metrics(path: Path) -> dict[str, Any]:
+    """Read training_summary.json into the report's loss-metrics block.
+
+    Missing file or fields degrade to None entries; the report renders an
+    explicit gap instead of inventing numbers.
+    """
+    if not path.exists():
+        return {}
+    try:
+        summary = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        logger.warning("Cannot read %s: %s", path, exc)
+        return {}
+    if not isinstance(summary, dict):
+        return {}
+
+    train_history: list[dict[str, float]] = summary.get("train_loss_history") or []
+    eval_history: list[dict[str, float]] = summary.get("eval_loss_history") or []
+    test_metrics = summary.get("test_metrics") or {}
+
+    train_first = train_history[0]["loss"] if train_history else None
+    train_last = summary.get("train_loss_final")
+    if train_last is None and train_history:
+        train_last = train_history[-1]["loss"]
+    eval_first = eval_history[0]["eval_loss"] if eval_history else None
+    eval_last = eval_history[-1]["eval_loss"] if eval_history else None
+    eval_best = min((p["eval_loss"] for p in eval_history), default=None)
+
+    verdict, findings = _trend_diagnosis(eval_history, train_history)
+
+    return {
+        "base_model": summary.get("base_model"),
+        "steps": (train_history[-1]["step"] if train_history else None),
+        "train_loss": {"first": train_first, "last": train_last},
+        "val_loss": {"first": eval_first, "last": eval_last, "best": eval_best},
+        "test_loss": test_metrics.get("test_eval_loss"),
+        "perplexity": {
+            "train_last": _perplexity(train_last) if train_last is not None else None,
+            "val_best": _perplexity(eval_best) if eval_best is not None else None,
+            "test": _perplexity(test_metrics["test_eval_loss"]) if test_metrics.get("test_eval_loss") else None,
+        },
+        "train_loss_history": train_history,
+        "eval_loss_history": eval_history,
+        "trend": {"verdict": verdict, "findings": findings},
+    }
+
+
+def render_training_markdown(training: dict[str, Any]) -> list[str]:
+    """Render the loss table, trend verdict, and per-step val curve."""
+    if not training:
+        return [
+            "## Training metrics",
+            "",
+            (
+                "_No training metrics found; `outputs/q3as/training_summary.json` is missing. "
+                "Run `make train` first._"
+            ),
+            "",
+        ]
+
+    def fmt(value: float | None) -> str:
+        return f"{value:.4f}" if isinstance(value, (int, float)) else "n/a"
+
+    lines: list[str] = ["## Training metrics", ""]
+    tl, vl = training["train_loss"], training["val_loss"]
+    ppl = training["perplexity"]
+    lines.append("| Metric | Train | Validation (best) | Test (held out) |")
+    lines.append("|---|---|---|---|")
+    lines.append(
+        f"| Loss | {fmt(tl.get('last'))} | {fmt(vl.get('best'))} | {fmt(training.get('test_loss'))} |"
+    )
+    lines.append(
+        f"| Perplexity | {fmt(ppl.get('train_last'))} | {fmt(ppl.get('val_best'))} | {fmt(ppl.get('test'))} |"
+    )
+    steps = training.get("steps")
+    if steps:
+        lines.append("")
+        lines.append(f"Loss history over {steps} training steps.")
+    lines.append("")
+
+    trend = training.get("trend") or {}
+    lines.append(f"**Trend: {trend.get('verdict', 'n/a')}**")
+    lines.append("")
+    for finding in trend.get("findings") or []:
+        lines.append(f"- {finding}")
+    lines.append("")
+
+    eval_history = training.get("eval_loss_history") or []
+    if eval_history:
+        lines.append("Validation loss per evaluation:")
+        lines.append("")
+        lines.append("| Step | Val loss |")
+        lines.append("|---|---|")
+        for point in eval_history:
+            lines.append(f"| {point['step']} | {point['eval_loss']:.4f} |")
+        lines.append("")
+    return lines
+
+
+# --------------------------------------------------------------------------- #
 # Markdown rendering
 # --------------------------------------------------------------------------- #
 
@@ -231,16 +409,24 @@ def render_markdown(version: str, data: dict[str, Any]) -> str:
         lines.append("```")
         lines.append("")
 
+    lines.extend(render_training_markdown(data.get("training") or {}))
+
     lines.append("## Artifacts")
     lines.append("")
     lines.append("- `outputs/eval_results/<model>/<dataset>/*.jsonl` (per-sample results)")
     lines.append("- `outputs/generated_solutions/<label>/` (model generations)")
+    lines.append("- `outputs/q3as/training_summary.json` (loss history; rendered above)")
     lines.append("")
     lines.append("See the [results index](README.md) for the version comparison table.")
     lines.append("")
     lines.append("[\u2190 Back to results index](README.md)")
     lines.append("")
     return "\n".join(lines)
+
+
+def fmt_loss(value: Any) -> str:
+    """Format an optional loss value for the index table."""
+    return f"{value:.4f}" if isinstance(value, (int, float)) else "n/a"
 
 
 def render_index(versions: list[dict[str, Any]]) -> str:
@@ -286,6 +472,8 @@ def render_index(versions: list[dict[str, Any]]) -> str:
             ("Fine-tuned test %", lambda e: _fmt_pct(((e.get("ada_eval") or {}).get("fine_tuned") or {}).get("test_pct"))),
             ("Base build %", lambda e: _fmt_pct(((e.get("ada_eval") or {}).get("base_qwen3-8b") or {}).get("build_pct"))),
             ("Proved samples (FT)", lambda e: str(((e.get("ada_eval") or {}).get("fine_tuned") or {}).get("proved", 0))),
+            ("Test loss (FT)", lambda e: fmt_loss((e.get("training") or {}).get("test_loss"))),
+            ("Training trend", lambda e: str(((e.get("training") or {}).get("trend") or {}).get("verdict", "n/a"))),
         ]
         for label, getter in metrics:
             rows.append((label, [getter(e) for e in recent]))
@@ -326,6 +514,11 @@ def gather(version: str) -> dict[str, Any]:
     note = collect_pipeline_note(PIPELINE_REPORT)
     if note:
         data["pipeline_report_note"] = note
+    training = collect_training_metrics(TRAINING_SUMMARY)
+    if training:
+        data["training"] = training
+    else:
+        data["training"] = {}
     return data
 
 

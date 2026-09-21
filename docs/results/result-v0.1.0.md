@@ -1,6 +1,6 @@
 # Results v0.1.0
 
-Eval run captured 2026-09-20 15:38 UTC. Data: [`result-data-v0.1.0.json`](result-data-v0.1.0.json).
+Eval run captured 2026-09-21 12:52 UTC. Data: [`result-data-v0.1.0.json`](result-data-v0.1.0.json).
 
 ## Headline (ada-eval)
 
@@ -39,10 +39,22 @@ Q3AS EVALUATION REPORT: BASE vs FINE-TUNED MODEL
   Unit Tests:  4/19 passed (21.1%)
 ```
 
+## Training metrics
+
+| Metric | Train | Validation (best) | Test (held out) |
+|---|---|---|---|
+| Loss | n/a | n/a | n/a |
+| Perplexity | n/a | n/a | n/a |
+
+**Trend: sparse**
+
+- Fewer than two evaluation points recorded; no trend to judge.
+
 ## Artifacts
 
 - `outputs/eval_results/<model>/<dataset>/*.jsonl` (per-sample results)
 - `outputs/generated_solutions/<label>/` (model generations)
+- `outputs/q3as/training_summary.json` (loss history; rendered above)
 
 See the [results index](README.md) for the version comparison table.
 

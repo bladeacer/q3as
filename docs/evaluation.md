@@ -6,7 +6,7 @@ pipeline.
 ## Benchmark
 
 Metrics and dataset categories come from the [ada-eval](https://github.com/AdaCore/ada-eval)
-framework (`../ada-eval`). Three sample sets are used:
+framework (cached at `data/raw_repos/AdaCore/ada-eval`). Three sample sets are used:
 
 | Dataset | Contents |
 |---|---|
@@ -14,7 +14,8 @@ framework (`../ada-eval`). Three sample sets are used:
 | `spark_custom` | Custom SPARK verification challenges (2 samples) |
 | `spark_human_eval_silver` | HumanEval-style silver-standard tasks (4 samples) |
 
-Samples live in `../ada-eval/data/base/expanded/<dataset>/<sample>/` with a
+Samples live in the cached ada-eval's
+`data/base/expanded/<dataset>/<sample>/` with a
 `base/` project (what the model may edit), a `solution/` project (the
 reference answer, used only for `canonical_evaluation` sanity checks - it
 must never appear in training data; see

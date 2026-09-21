@@ -30,12 +30,14 @@ SKIP_DIRS = {
     "__pycache__", ".alire-dev", "alire", "node_modules",
     ".unsloth", "unsloth_compiled_cache", "_unsloth_temporary_saved_buffers",
     ".agents", ".kilo", ".idea", ".vscode",
+    "raw_repos",
 }
 # Shown as a collapsed one-liner instead of walked, with a per-dir note.
 COLLAPSE_DIRS = {
     "models": "model weights, not shown",
     "outputs": "generated data, not shown",
     "config": "alr-generated project config, not shown",
+    "raw_repos": "fetched source repositories (archive cache), not shown",
 }
 # File patterns never shown.
 SKIP_FILES = {"*.pyc", "*.log", ".env"}

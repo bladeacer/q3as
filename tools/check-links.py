@@ -29,7 +29,7 @@ from pathlib import Path
 ROOT: Path = Path(__file__).resolve().parent.parent
 
 # Directories whose contents are never scanned (build output, model
-# downloads, Alire state, vendored index copies).
+# downloads, Alire state, vendored index copies, fetched source cache).
 SKIP_DIRS: tuple[str, ...] = (
     ".git",
     ".venv",
@@ -39,6 +39,7 @@ SKIP_DIRS: tuple[str, ...] = (
     "config",
     "node_modules",
     ".pytest_cache",
+    "raw_repos",
     "models",
     "outputs",
     "q3as-local-index",

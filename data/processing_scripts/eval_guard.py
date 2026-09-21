@@ -1,6 +1,7 @@
 """Eval-integrity guard: keeps ada-eval evaluation content out of training data.
 
-Everything under ``../ada-eval/data`` is eval-proper: the compacted and
+Everything under the cached ada-eval's ``data`` directory is eval-proper:
+the compacted and
 expanded datasets are the same 19 samples q3as is scored on, and
 ``data/generated`` / ``data/evaluated`` hold completions for those very
 prompts. Training on any of it - base project, canonical solution, tests,

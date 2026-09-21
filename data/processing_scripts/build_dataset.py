@@ -80,6 +80,13 @@ DOC_SOURCE_DIRS = ["learn"]
 AGENT_SKILL_SOURCE_DIRS = ["ada-spark", "SimpleEnglish", "skills"]
 
 
+def _hub_cache_dirs() -> list[Path]:
+    """Cached Sternenfisch-hub repositories (owner RobertBoettcherSF)."""
+    import source_paths
+
+    return sorted(d for d in (source_paths.cache_root() / "RobertBoettcherSF").glob("*") if d.is_dir())
+
+
 def _resolved_source(name: str) -> Path:
     """Cache directory for a source repo (or its legacy sibling location)."""
     import source_paths
@@ -121,17 +128,22 @@ _BINARY_MAGIC = {b"\x00", b"\xff\xfe", b"\xfe\xff", b"\x7fELF"}
 # without them falls through to the Ada 2012 tier.
 
 _COMMENT_LINE_RE = re.compile(r"--[^\n]*")
+# Ada string literal: doubled quotes are the escape ("say ""hi""").
+_ADA_STRING_RE = re.compile(r'"(?:[^"]|"")*"')
 
 
 def _strip_ada_comments(code: str) -> str:
-    """Remove -- comments so prose cannot vote in standard detection."""
-    return _COMMENT_LINE_RE.sub(" ", code)
+    """Remove -- comments and string contents so prose cannot vote in
+    standard detection (a comment or message naming SPARK_Mode is not
+    evidence the file is SPARK)."""
+    code = _COMMENT_LINE_RE.sub(" ", code)
+    return _ADA_STRING_RE.sub('""', code)
 
 
 # Each feature is (label, pattern, weight). Weight 2 marks features that
 # are conclusive for their standard, weight 1 strong hints. Thresholds
 # require more than one hint, so a single false positive cannot decide.
-_STANDARD_FEATURES: list[tuple[str, list[tuple[str, re.Pattern[str]], int], int]] = [
+_STANDARD_FEATURES: list[tuple[str, list[tuple[str, re.Pattern[str], int]], int]] = [
     ("Ada 2022", [
         ("reduce", re.compile(r"\bReduce\s*\(", re.IGNORECASE), 2),
         ("put_image", re.compile(r"\bPut_Image\b", re.IGNORECASE), 1),
@@ -2828,12 +2840,27 @@ def main() -> None:
     if args.verbose:
         logging.getLogger().setLevel(logging.DEBUG)
 
-    # Set default extra input directories if none provided
-    extra_dirs = args.extra_input_dir if args.extra_input_dir else DEFAULT_EXTRA_INPUT_DIRS
-    doc_dirs = args.doc_dir if args.doc_dir else [Path("..") / d for d in DOC_SOURCE_DIRS]
+    # Set default extra input directories if none provided. Defaults come
+    # from the source cache (source_paths); legacy siblings are the last
+    # resort handled inside resolve().
+    import source_paths
+
+    if args.extra_input_dir:
+        extra_dirs = args.extra_input_dir
+    else:
+        extra_dirs = source_paths.default_code_dirs() + [
+            d for d in _hub_cache_dirs() if True
+        ]
+    doc_dirs = (
+        args.doc_dir
+        if args.doc_dir
+        else source_paths.default_doc_dirs()
+        or [Path("..") / d for d in DOC_SOURCE_DIRS]
+    )
     guidance_dirs = (
         args.guidance_dir if args.guidance_dir
-        else [Path("..") / d for d in AGENT_SKILL_SOURCE_DIRS]
+        else source_paths.default_guidance_dirs()
+        or [Path("..") / d for d in AGENT_SKILL_SOURCE_DIRS]
     )
 
     # Load evaluation methodology from ada-eval

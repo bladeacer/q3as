@@ -1,6 +1,6 @@
 {
   "version": "0.1.0",
-  "generated_at": "2026-09-20 15:38 UTC",
+  "generated_at": "2026-09-21 12:52 UTC",
   "ada_eval": {
     "base_qwen3-8b": {
       "samples": 19,
@@ -93,5 +93,32 @@
       }
     }
   },
-  "pipeline_report_note": "======================================================================\nQ3AS EVALUATION REPORT: BASE vs FINE-TUNED MODEL\n======================================================================\n--- base_qwen3-8b ---\n  Compilation: 7/19 passed (36.8%)\n  Unit Tests:  4/19 passed (21.1%)"
+  "pipeline_report_note": "======================================================================\nQ3AS EVALUATION REPORT: BASE vs FINE-TUNED MODEL\n======================================================================\n--- base_qwen3-8b ---\n  Compilation: 7/19 passed (36.8%)\n  Unit Tests:  4/19 passed (21.1%)",
+  "training": {
+    "base_model": "models/qwen3-8b",
+    "steps": null,
+    "train_loss": {
+      "first": null,
+      "last": null
+    },
+    "val_loss": {
+      "first": null,
+      "last": null,
+      "best": null
+    },
+    "test_loss": null,
+    "perplexity": {
+      "train_last": null,
+      "val_best": null,
+      "test": null
+    },
+    "train_loss_history": [],
+    "eval_loss_history": [],
+    "trend": {
+      "verdict": "sparse",
+      "findings": [
+        "Fewer than two evaluation points recorded; no trend to judge."
+      ]
+    }
+  }
 }
