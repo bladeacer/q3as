@@ -1,5 +1,20 @@
 .PHONY: help setup sync download build-dataset parse-data gen-contracts check-integrity check-links train generate eval eval-pipeline eval-report bump-version prove ada-env test lint validate-defects agents-tree fetch-sources clean all check-model
 
+# Prerequisite chain for the dataset: parser outputs (docs chunks, AST units,
+# contract turns) must exist before the builder runs. gen-contracts silently
+# keeps a cached file when gnatprove is unavailable, so it cannot break a
+# build; parse-data re-runs cheaply and regenerates any missing parser output.
+DATASET_EXTRA_TURNS := \
+	data/processed/docs_chunks.jsonl \
+	data/processed/ada_ast_units.jsonl \
+	data/processed/hub_ast_units.jsonl \
+	data/processed/contract_mutations.jsonl
+
+.PHONY: $(DATASET_EXTRA_TURNS)
+
+$(DATASET_EXTRA_TURNS):
+	$(MAKE) parse-data gen-contracts
+
 # bash so `set -o pipefail` works for tee'd targets (training.log capture).
 SHELL := /bin/bash
 
@@ -60,12 +75,13 @@ check-model: ## Check if model exists; download if missing
 		$(MAKE) download; \
 	fi
 
-build-dataset: ## Build the training dataset from cached Ada source trees
+build-dataset: parse-data gen-contracts ## Build the training dataset from cached Ada source trees
 	## Ada code sources (cache): adacovex, Ada_CRDT, Ada-83-TLALOC, ada-eval (guarded)
 	## plus the Sternenfisch algorithm-hub repositories (~260, MIT).
 	## Doc sources (cache): learn, training_material (CC-BY-4.0). Guidance in system
 	## prompts: ada-spark (MIT), SimpleEnglish (MIT, STE rules), skills (Apache-2.0).
-	## Also emits correct-vs-wrong defect pairs.
+	## Parser outputs (data/processed/*.jsonl from parse-data + gen-contracts) are
+	## merged via --extra-turns. Also emits correct-vs-wrong defect pairs.
 	uv run python data/processing_scripts/build_dataset.py \
 		--input-dir data/raw/ \
 		--extra-input-dir data/raw_repos/bladeacer/adacovex \
@@ -77,7 +93,7 @@ build-dataset: ## Build the training dataset from cached Ada source trees
 		--guidance-dir data/raw_repos/agent-sh/ada-spark \
 		--guidance-dir data/raw_repos/AminBlg/SimpleEnglish \
 		--guidance-dir data/raw_repos/AdaCore/skills \
-		--extra-turns data/processed/hub_ast_units.jsonl
+		$(foreach f,$(DATASET_EXTRA_TURNS),--extra-turns $(f))
 
 train: ## Run QLoRA fine-tuning with Unsloth on the local base model (models/qwen3-8b); full stdout captured to training.log
 	@set -o pipefail; \
@@ -125,7 +141,7 @@ lint: ## Run ruff and mypy over the project sources, then check markdown links
 validate-defects: ## Compile-check dataset defect pairs with the Alire GNAT
 	uv run python scripts/validate_defects.py --source data/raw_repos/bladeacer/adacovex --source data/raw_repos/bladeacer/Ada_CRDT --source data/raw_repos/AdaCore/ada-eval
 
-parse-data: ## Run the parser modules into data/processed/ extra JSONL
+parse-data: fetch-sources ## Run the parser modules into data/processed/ extra JSONL
 	uv run python data/processing_scripts/parse_docs.py --output data/processed/docs_chunks.jsonl
 	uv run python data/processing_scripts/parse_ada_ast.py --output data/processed/ada_ast_units.jsonl
 	uv run python data/processing_scripts/parse_ada_ast.py --input-dir data/raw_repos/RobertBoettcherSF --output data/processed/hub_ast_units.jsonl

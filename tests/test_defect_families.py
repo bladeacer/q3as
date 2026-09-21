@@ -290,6 +290,9 @@ class TestExtraTurnGrouping:
         assert bd._extra_turn_kind({"kind": "ast_impl"}) == "ast_qa"
         assert bd._extra_turn_kind({"kind": "ast_contract"}) == "ast_qa"
         assert bd._extra_turn_kind({"kind": "ast_type"}) == "ast_qa"
+        assert bd._extra_turn_kind({"kind": "contract_synth_write"}) == "contract_synth"
+        assert bd._extra_turn_kind({"kind": "contract_synth_why"}) == "contract_synth"
+        assert bd._extra_turn_kind({"kind": "contract_synth_fix"}) == "contract_synth"
         assert bd._extra_turn_kind({}) == "extra"
 
 
@@ -340,6 +343,20 @@ class TestExtraTurnsIntegration:
         splits = meta["splits"]["counts"]
         assert splits["train"] + splits["val"] + splits["test"] == count
 
+        # Provenance: one stats entry per requested file, in request order,
+        # with per-file record/ingested/defect/variant counts. A missing
+        # file must still appear here (records=0) instead of vanishing.
+        ingested_files = meta["extra_turns_files"]
+        assert [entry["path"] for entry in ingested_files] == [str(extra)]
+        assert ingested_files[0]["records"] == 4  # 3 valid + 1 malformed
+        assert ingested_files[0]["ingested"] == 3
+        assert ingested_files[0]["defects"] >= 0  # pair above produced some
+        assert ingested_files[0]["ingested"] + ingested_files[0]["defects"] + ingested_files[0]["variants"] <= count
+
+        # Pair-count provenance: the one spec/body pair above lands under
+        # its resolved input directory.
+        assert meta["records_by_input_dir"].get(str(tmp_path.resolve())) == 1
+
         # The two AST turns of one subprogram share a split (same group).
         records = [json.loads(line) for line in out.read_text().splitlines()]
         by_user = {r["messages"][-2]["content"]: r["split"] for r in records}
@@ -363,3 +380,9 @@ class TestExtraTurnsIntegration:
         meta = json.loads((tmp_path / "dataset_metadata.json").read_text())
         assert "doc_section" not in meta["turn_counts_by_kind"]
         assert count == meta["total_turns"]
+
+        # The missing file is still reported, with zero records.
+        assert meta["extra_turns_files"] == [{
+            "path": str(tmp_path / "nope.jsonl"),
+            "records": 0, "ingested": 0, "defects": 0, "variants": 0,
+        }]

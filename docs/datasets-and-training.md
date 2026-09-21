@@ -13,6 +13,8 @@ configured for reproducibility and early stopping.
 | `doc_section` | Heading-chunked sections of course material (`parse_docs.py`) |
 | `ast_impl` / `ast_contract` / `ast_contract_write` / `ast_type` | AST-derived turns (`parse_ada_ast.py`): body-from-spec completion, contract reading, **contract writing** (bare spec in, `Pre`/`Post`/`Global`/`Depends` declaration out), and constrained types |
 | `toolchain_qa` | Question/answer turns from the AdaCore agent skills |
+| `contract_synth` | gnatprove-verified synthetic contract turns (`scripts/gen_contract_mutations.py`): contract writing, why-weakened-contracts-fail, and fix turns |
+| `ast_defect` / `variant` | Defect and renamed-variant turns derived from ingested parser records (same split group as their source record) |
 
 ## Natural-language variety, code exactness
 
@@ -30,6 +32,18 @@ purpose.
 family's claimed compiler message is GNAT-verified by
 `scripts/validate_defects.py` (`make validate-defects`); any family that
 "compiles clean" fails the check.
+
+## Parser outputs and provenance
+
+The parser modules write standalone JSONL files under `data/processed/`
+(`docs_chunks`, `ada_ast_units`, `hub_ast_units` from `make parse-data`,
+`contract_mutations` from `make gen-contracts`). `make build-dataset`
+merges all of them via `--extra-turns`. The build metadata
+(`dataset_metadata.json`) records per-file ingestion counts under
+`extra_turns_files` (`records` / `ingested` / `defects` / `variants`) and
+per-input-dir pair counts under `records_by_input_dir`, so a missing or
+empty parser output is visible instead of vanishing silently. Records
+dropped by the eval guard or by dedup do not appear in any count.
 
 | Family | Example defect |
 |---|---|

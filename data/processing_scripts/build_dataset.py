@@ -2431,15 +2431,24 @@ def _ingest_extra_turns(
     extra_paths: list[Path],
     all_grouped: list[tuple[str, dict[str, list[dict[str, str]]]]],
     turn_counts: dict[str, int],
-) -> None:
+) -> list[dict[str, int]]:
     """Load parser-produced JSONL turn files into the grouped turn pool.
 
     Records whose assistant reply carries an Ada code block (impl, contract
     write, type turns) also get defect turns: the injected families run on
     the extracted code itself, so AST-derived training data gets the same
     broken-example coverage as the pair pipeline.
+
+    Returns one stats dict per input file, in the same order, with the keys
+    ``records``, ``ingested`` (2+ message records), ``defects`` (derived
+    defect turns) and ``variants`` (derived correct-variant turns). Missing
+    and unreadable files still produce their stats entry so the metadata
+    exposes every requested source, not only the ones that worked.
     """
+    per_file_stats: list[dict[str, int]] = []
     for extra_path in extra_paths:
+        stats = {"records": 0, "ingested": 0, "defects": 0, "variants": 0}
+        per_file_stats.append(stats)
         if not extra_path.exists():
             logger.warning("Extra turns file not found, skipping: %s", extra_path)
             continue
@@ -2452,6 +2461,7 @@ def _ingest_extra_turns(
                     line = line.strip()
                     if not line:
                         continue
+                    stats["records"] += 1
                     try:
                         record = json.loads(line)
                     except json.JSONDecodeError:
@@ -2495,18 +2505,24 @@ def _ingest_extra_turns(
                                 variant_turns_count += 1
         except OSError as exc:
             logger.warning("Cannot read extra turns file %s: %s", extra_path, exc)
-            continue
-        if defect_turns:
-            turn_counts["ast_defect"] = turn_counts.get("ast_defect", 0) + defect_turns
-        if variant_turns_count:
-            turn_counts["variant"] = turn_counts.get("variant", 0) + variant_turns_count
-        if ingested:
-            logger.info(
-                "Ingested %d extra turns from %s (+%d defect, +%d variant turns)",
-                ingested, extra_path, defect_turns, variant_turns_count,
-            )
-        else:
-            logger.warning("No usable turns in extra turns file: %s", extra_path)
+        finally:
+            # Attribute every derived turn of this file, even when the read
+            # failed midway: partial ingestion still lands in the dataset.
+            stats["ingested"] += ingested
+            stats["defects"] += defect_turns
+            stats["variants"] += variant_turns_count
+            if defect_turns:
+                turn_counts["ast_defect"] = turn_counts.get("ast_defect", 0) + defect_turns
+            if variant_turns_count:
+                turn_counts["variant"] = turn_counts.get("variant", 0) + variant_turns_count
+            if ingested:
+                logger.info(
+                    "Ingested %d extra turns from %s (+%d defect, +%d variant turns)",
+                    ingested, extra_path, defect_turns, variant_turns_count,
+                )
+            else:
+                logger.warning("No usable turns in extra turns file: %s", extra_path)
+    return per_file_stats
 
 
 # --------------------------------------------------------------------------- #
@@ -2581,6 +2597,7 @@ def build_dataset(
         "context": context,
     })
     tasks: list[dict[str, Any]] = []
+    records_by_input_dir: dict[str, int] = {}
     for input_dir in input_dirs + extra_input_dirs:
         resolved_input = input_dir.resolve()
         logger.info("Processing input directory: %s -> %s", input_dir, resolved_input)
@@ -2608,6 +2625,7 @@ def build_dataset(
                     break
 
         source = str(resolved_input)
+        dir_pair_count = 0
         for idx, pair in enumerate(pairs):
             spec_path = pair["spec"]
             impl_path = pair["impl"]
@@ -2622,6 +2640,8 @@ def build_dataset(
                 "gpr_name": gpr_name,
                 "enable_defect_pairs": enable_defect_pairs,
             })
+            dir_pair_count += 1
+        records_by_input_dir[source] = records_by_input_dir.get(source, 0) + dir_pair_count
 
     if workers <= 0:
         workers = os.cpu_count() or 1
@@ -2666,8 +2686,11 @@ def build_dataset(
         all_grouped.extend(qa_grouped)
         turn_counts["toolchain_qa"] = turn_counts.get("toolchain_qa", 0) + len(qa_grouped)
 
-    # Pre-built turns from the parser modules (doc chunks, Ada AST units).
-    _ingest_extra_turns(extra_turns or [], all_grouped, turn_counts)
+    # Pre-built turns from the parser modules (doc chunks, Ada AST units,
+    # synthetic contract turns). The per-file stats double as provenance:
+    # a parser output that is missing or empty shows up in the metadata
+    # with ingested=0 instead of vanishing silently.
+    extra_turns_stats = _ingest_extra_turns(extra_turns or [], all_grouped, turn_counts)
 
     # Eval-integrity guard: drop any group whose content matches the ada-eval
     # evaluation suite (verbatim, reformatted, or identifier-renamed). One
@@ -2756,6 +2779,11 @@ def build_dataset(
             "files": {name: str(path) for name, path in split_paths.items()},
         },
         "workers": workers,
+        "extra_turns_files": [
+            {"path": str(path), **stats}
+            for path, stats in zip(extra_turns or [], extra_turns_stats)
+        ],
+        "records_by_input_dir": records_by_input_dir,
         "writing_style": {
             "standard": "ASD-STE100 (distilled from the SimpleEnglish agent skill)",
             "em_dashes": "banned",
@@ -2848,9 +2876,7 @@ def main() -> None:
     if args.extra_input_dir:
         extra_dirs = args.extra_input_dir
     else:
-        extra_dirs = source_paths.default_code_dirs() + [
-            d for d in _hub_cache_dirs() if True
-        ]
+        extra_dirs = source_paths.default_code_dirs() + _hub_cache_dirs()
     doc_dirs = (
         args.doc_dir
         if args.doc_dir
@@ -2876,11 +2902,14 @@ def main() -> None:
     extra_turns = args.extra_turns
     if extra_turns is None:
         # Auto-integrate the standard parser outputs when they exist, so
-        # `make build-dataset` picks up new data without extra flags.
+        # a bare `build_dataset.py` run picks up new data without extra
+        # flags. The Makefile passes the same list explicitly (and makes
+        # the files first), so both entry points stay in sync.
         extra_turns = [
             path for path in (
                 DEFAULT_OUTPUT_DIR / "docs_chunks.jsonl",
                 DEFAULT_OUTPUT_DIR / "ada_ast_units.jsonl",
+                DEFAULT_OUTPUT_DIR / "hub_ast_units.jsonl",
                 DEFAULT_OUTPUT_DIR / "contract_mutations.jsonl",
             )
             if path.exists()
