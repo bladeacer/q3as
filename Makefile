@@ -77,7 +77,7 @@ check-model: ## Check if model exists; download if missing
 
 build-dataset: parse-data gen-contracts ## Build the training dataset from cached Ada source trees
 	## Ada code sources (cache): adacovex, Ada_CRDT, Ada-83-TLALOC, ada-eval (guarded)
-	## plus the Sternenfisch algorithm-hub repositories (~260, MIT).
+	## plus the Sternenfisch algorithm-hub repositories (~1400, MIT).
 	## Doc sources (cache): learn, training_material (CC-BY-4.0). Guidance in system
 	## prompts: ada-spark (MIT), SimpleEnglish (MIT, STE rules), skills (Apache-2.0).
 	## Parser outputs (data/processed/*.jsonl from parse-data + gen-contracts) are

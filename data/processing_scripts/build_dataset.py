@@ -2342,7 +2342,6 @@ def _process_pair_task(
 # docs/datasets-and-training.md.
 AST_STRUCTURAL_CAP = 2
 AST_STRUCTURAL_CAP_UNLIMITED = -1
-AST_STRUCTURAL_CAP_UNLIMITED = -1
 
 
 def dedup_grouped(

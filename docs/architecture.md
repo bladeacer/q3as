@@ -14,7 +14,7 @@ What each part of q3as does and how the pieces connect.
 4. `make build-dataset` walks the cached Ada source trees, ingests the
    parser outputs, and emits `data/processed/dataset.jsonl` plus
    `dataset_{train,val,test}.jsonl` (chat-format turns).
-5. `make train` runs QLoRA fine-tuning (Unsloth, 2048-token packing, LoRA
+5. `make train` runs QLoRA fine-tuning (Unsloth, 2048-token window, LoRA
    adapters on Qwen3-8B) with seeded, val-monitored training and early
    stopping; checkpoints and a training summary (train/val/test loss
    histories) land in `outputs/q3as/`.
@@ -27,7 +27,7 @@ What each part of q3as does and how the pieces connect.
 
 | Path | Responsibility |
 |---|---|
-| `data/processing_scripts/build_dataset.py` | Dataset builder: discovery, spec/body pairing, standard detection, STE sanitization, defect injection (11 GNAT-verified families), system-prompt composition, dedup, guard, splits |
+| `data/processing_scripts/build_dataset.py` | Dataset builder: discovery, spec/body pairing, standard detection, STE sanitization, defect injection (17 GNAT-verified families), system-prompt composition, dedup, guard, splits |
 | `data/processing_scripts/parse_docs.py` | Heading-aware Markdown/RST chunking into STE-cleaned doc-section turns |
 | `data/processing_scripts/parse_ada_ast.py` | Ada semantic-unit extraction (libadalang when available, structural fallback): specs, bodies, aspects, constrained types; builds contract-writing turns |
 | `data/processing_scripts/eval_guard.py` | Eval-integrity guard (see [Data provenance](data-provenance.md)) |

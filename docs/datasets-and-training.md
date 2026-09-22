@@ -62,6 +62,12 @@ training-load time; their count is recorded under
 | `scoping` | Inner block shadows / leaves scope |
 | `type` | Numeric value assigned to a Boolean |
 | `lang_confusion` | `=` used where `:=` is required |
+| `wrong_ref` | Component name corrupted in a predefined-unit reference (`Ada.Text_IO.Foo_Line`) |
+| `nonexistent_call` | Locally declared procedure renamed at its call site |
+| `bad_typing` | String literal assigned to a numeric object |
+| `arity` | Extra argument added to a call |
+| `stray_aspect` | `with Pre => True;` inside a package declarative part |
+| `old_misuse` | `'Old` read inside a precondition |
 
 The families also apply to AST-extracted units, so contract turns, impl
 turns, and doc-QA code all have broken counterparts where applicable.
@@ -89,8 +95,13 @@ splits honest:
 
    The cap value is evidence-based, not a guess. A controlled experiment
    (`scripts/build_cap_variants.sh` + `scripts/run_cap_experiment.sh`)
-   trained identical 40-step QLoRA probes (same seed, LR, batch, and a
-   fixed 40-example val/test) on datasets that differ only in the cap:
+   trained identical 40-step QLoRA probes (same seed, LR, batch
+   (1x8, acc 8), and a fixed 40-example val/test) on datasets that differ
+   only in the cap. Exact repro: `STEPS=40 ACC=8 EVAL_STEPS=10`.
+   The recorded results cover caps 1, 2, 3, and 5; the cap-10 arm was
+   interrupted early and never produced a summary, and cap-inf was never
+   trained. Re-running the arms is deliberately cheap (a 40-step probe
+   took 15 to 17 minutes each): run `scripts/run_cap_experiment.sh 10 inf`.
 
    | cap | val loss (step 40) | test loss | test ppl |
    |----:|-------------------:|----------:|---------:|
@@ -102,7 +113,8 @@ splits honest:
    Caps 1 and 3 lose to both; caps 2 and 5 are statistically tied on the
    40-example test set, so the smaller, more diverse cap-2 dataset was
    adopted as the default. Results CSV: `outputs/capexp/results.csv`
-   (gitignored), per-cap summaries in `outputs/capexp/run_cap*/`.
+   (regenerable, not committed; see `scripts/collect_cap_results.py`),
+   per-cap summaries in `outputs/capexp/run_cap*/`.
 3. **Eval guard** - ada-eval benchmark content is dropped before splitting
    (see [Data provenance](data-provenance.md)).
 
@@ -116,11 +128,14 @@ splits honest:
   dataset shuffling. Content-derived randomness in the builder is
   deterministic too, so dataset bytes are identical for any worker count.
 - **Splits**: trains on `dataset_train.jsonl` by default; val loss is
-  computed every 50 steps; a fallback seeded carve-out protects custom
-  single-file datasets.
+  computed every 50 steps (`--eval-steps`); a fallback seeded carve-out
+  protects custom single-file datasets.
 - **Early stopping**: patience 10 evals with threshold 0.001 - training
-  stops when val loss shows no meaningful gain for 10 consecutive evals;
-  the best checkpoint is restored.
+  stops when val loss shows no meaningful gain for 10 consecutive evals.
+  Validation and test losses are computed by a chunked callback that
+  avoids materializing logits on GPU (8 GB VRAM constraint), so
+  Trainer-managed evaluation stays off. The exported adapter is the
+  final state at stop time, not a reloaded best checkpoint.
 - **Test metrics**: after training, test-split loss and perplexity are
   computed and written to `training_summary.json`.
 - **Loss histories**: `training_summary.json` carries the full train-loss

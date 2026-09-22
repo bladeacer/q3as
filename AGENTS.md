@@ -56,11 +56,12 @@ records from ada-eval.
 
 - `data/processing_scripts/build_dataset.py` - the dataset builder. Discovers
   and pairs Ada sources, sanitizes prose into Simplified Technical English
-  (STE), injects correct-vs-wrong defect pairs (five families), distills
+  (STE), injects correct-vs-wrong defect pairs (seventeen families), distills
   agent-skill guidance into system prompts, dedups (verbatim plus a cap of
-  `AST_STRUCTURAL_CAP = 2` on alpha-renamed AST-record shapes, tuned by
-  experiment), drops empty-assistant records, and writes JSONL plus metadata
-  with per-source provenance.
+  `AST_STRUCTURAL_CAP = 2` on alpha-renamed AST-record shapes, chosen by a
+  controlled cap-tuning experiment, see docs/datasets-and-training.md), drops
+  empty-assistant records, and writes JSONL plus metadata with per-source
+  provenance.
 - `data/processing_scripts/source_paths.py` - resolves every source repo to
   its cache directory (`data/raw_repos/<owner>/<repo>`, with the legacy
   sibling location as fallback); no pipeline file hard-codes paths.
@@ -73,7 +74,7 @@ records from ada-eval.
   checks (light by default; deep GPU check runs in a child process with a
   timeout so the pipeline can never hang).
 - `training/train_unsloth.py` - QLoRA training script (Unsloth, 2048-token
-  packing, LoRA adapters on Qwen3-8B).
+  window, LoRA adapters on Qwen3-8B).
 - `eval/generate.py` - batch generation for the fine-tuned and base models.
 - `eval/baseline_eval.py` - BLEU/compliance metrics and result aggregation
   (`outputs/eval_results.json`).
@@ -132,7 +133,7 @@ community index lacks.
   pytest for the dataset logic.
 - The source repositories (see the table in `docs/data-provenance.md`:
   adacovex, Ada_CRDT, Ada-83-TLALOC, ada-eval, learn, training_material,
-  ada-spark, SimpleEnglish, skills, plus the ~900 RobertBoettcherSF hub
+  ada-spark, SimpleEnglish, skills, plus the ~1400 RobertBoettcherSF hub
   repos) are inputs only; `scripts/fetch_repos.py` fetches them into the
   gitignored `data/raw_repos/` cache. Their licenses are credited in
   `README.md`.
