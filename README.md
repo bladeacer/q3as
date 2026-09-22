@@ -93,6 +93,31 @@ uv run python eval/eval_pipeline.py --evals build test prove
 
 Alternatively, you can use the Makefile directly.
 
+## Approximate runtimes
+
+Measured end to end on the reference machine (RTX 5050 Laptop, 8 GB VRAM;
+warm caches: base model downloaded, source cache and parser outputs
+present):
+
+| Step | Duration |
+|---|---|
+| `make build-dataset` (parse-data + contracts cached) | 2 to 5 min |
+| `make train` (500 steps, batch 1 x grad-accum 8) | ~4.5 h, ~30 s/step; the dominant cost |
+| `make generate` (19 + 19 samples, both models) | ~28 min |
+| `make eval-pipeline` (build/test/prove, 19 + 19) | ~4 min |
+| `make eval` (BLEU + compliance) | ~1 min |
+| `make eval-report` | seconds |
+
+`make all` takes roughly 5 hours. Notes:
+
+- Early stopping cannot fire before step 550 at the default cadence
+  (patience 10, eval every 50 steps, 500 max steps), so plan for the
+  full training budget.
+- A cold start adds the Qwen3-8B download (~16 GB) and the first
+  `make fetch-sources` (~1400 repository tarballs); both depend on
+  bandwidth. One-time extras: `uv sync` and `make prove` (Alire
+  toolchain).
+
 ## Hugging Face Token Setup
 
 q3as downloads the **official [`Qwen/Qwen3-8B`](https://huggingface.co/Qwen/Qwen3-8B)** checkpoint. Unsloth is the training framework only (patched kernels and QLoRA); the weights are Qwen's original release, never an unsloth-provisioned copy. If the repo requires accepting a license, you need a Hugging Face access token.

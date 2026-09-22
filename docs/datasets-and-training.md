@@ -97,11 +97,8 @@ splits honest:
    (`scripts/build_cap_variants.sh` + `scripts/run_cap_experiment.sh`)
    trained identical 40-step QLoRA probes (same seed, LR, batch
    (1x8, acc 8), and a fixed 40-example val/test) on datasets that differ
-   only in the cap. Exact repro: `STEPS=40 ACC=8 EVAL_STEPS=10`.
-   The recorded results cover caps 1, 2, 3, and 5; the cap-10 arm was
-   interrupted early and never produced a summary, and cap-inf was never
-   trained. Re-running the arms is deliberately cheap (a 40-step probe
-   took 15 to 17 minutes each): run `scripts/run_cap_experiment.sh 10 inf`.
+   only in the cap. Exact repro: `STEPS=40 ACC=8 EVAL_STEPS=10`; a probe
+   takes 14 to 18 minutes per cap on the reference GPU.
 
    | cap | val loss (step 40) | test loss | test ppl |
    |----:|-------------------:|----------:|---------:|
@@ -109,12 +106,20 @@ splits honest:
    | **2** | **1.050**        | 1.070     | 2.92     |
    | 3   | 1.117              | 1.128     | 3.09     |
    | 5   | 1.052              | 1.065     | 2.90     |
+   | 10  | 1.038              | 1.041     | 2.83     |
+   | inf | 1.169              | 1.187     | 3.28     |
 
-   Caps 1 and 3 lose to both; caps 2 and 5 are statistically tied on the
-   40-example test set, so the smaller, more diverse cap-2 dataset was
-   adopted as the default. Results CSV: `outputs/capexp/results.csv`
-   (regenerable, not committed; see `scripts/collect_cap_results.py`),
-   per-cap summaries in `outputs/capexp/run_cap*/`.
+   Caps 1, 3, and inf lose clearly: too little variety at cap 1, unbounded
+   duplication at inf. Caps 2, 5, and 10 finish within a few percent of
+   each other on the 40-example probe; cap 10 edges out cap 2 (test loss
+   1.041 vs 1.070, ~18% more records), so cap 2 stays the default for
+   now: the probe cannot separate them with confidence, and the smaller
+   dataset carries less templated repetition. Switching to cap 10 is the
+   standing candidate for the next iteration; it changes the dataset, so
+   it needs a rebuild plus `make check-integrity` and a retrain. Results
+   CSV: `outputs/capexp/results.csv` (regenerable, not committed; see
+   `scripts/collect_cap_results.py`), per-cap summaries in
+   `outputs/capexp/run_cap*/`.
 3. **Eval guard** - ada-eval benchmark content is dropped before splitting
    (see [Data provenance](data-provenance.md)).
 
