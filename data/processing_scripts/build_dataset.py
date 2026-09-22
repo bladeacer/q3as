@@ -2340,7 +2340,7 @@ def _process_pair_task(
 # (1.050 vs 1.117 for cap 3) and tied cap 5 on test (1.065 vs 1.070 ppl 2.90
 # vs 2.92) with a smaller, more diverse dataset. See
 # docs/datasets-and-training.md.
-AST_STRUCTURAL_CAP = 2
+AST_STRUCTURAL_CAP = 10
 AST_STRUCTURAL_CAP_UNLIMITED = -1
 
 

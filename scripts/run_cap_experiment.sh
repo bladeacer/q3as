@@ -7,6 +7,12 @@
 #   steps:      80  (override with STEPS=)
 #   acc:        2   (override with ACC=)
 #   eval steps: 15  (override with EVAL_STEPS=)
+#   out:        outputs/capexp  (override with OUT=; keep recorded rounds
+#               intact by pointing a new round at its own directory)
+#   data root:  $OUT/datasets  (override with DATA_ROOT=)
+#   probe sets: $OUT/probe_{val,test}.jsonl  (override with PROBE_VAL= /
+#               PROBE_TEST=; build leak-free probes with
+#               scripts/make_probe_splits.py)
 #
 # The recorded results in docs/datasets-and-training.md used
 #   STEPS=40 ACC=8 EVAL_STEPS=10
@@ -35,7 +41,14 @@ fi
 export HF_HUB_DISABLE_XET=1 HF_DEACTIVATE_ASYNC_LOAD=1 \
        PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
-OUT=outputs/capexp
+OUT="${OUT:-outputs/capexp}"
+# Dataset root and probe paths are overridable so a new round (e.g. a
+# bigger probe set) can write to a fresh OUT without touching recorded
+# runs or reusing the 40-example probes. Defaults reproduce the recorded
+# experiment layout exactly.
+DATA_ROOT="${DATA_ROOT:-$OUT/datasets}"
+PROBE_VAL="${PROBE_VAL:-$OUT/probe_val.jsonl}"
+PROBE_TEST="${PROBE_TEST:-$OUT/probe_test.jsonl}"
 mkdir -p "$OUT"
 RESULTS="$OUT/results.csv"
 echo "cap,steps,final_train_loss,best_eval_loss,best_step,test_loss,test_ppl,early_stopped,seconds" > "$RESULTS"
@@ -44,9 +57,9 @@ for cap in "${CAPS[@]}"; do
   echo "=== cap=$cap: ${STEPS} steps, acc=${ACC} ==="
   start=$(date +%s)
   uv run python -u training/train_unsloth.py \
-    --dataset "outputs/capexp/datasets/cap${cap}/dataset_train.jsonl" \
-    --val-dataset "$OUT/probe_val.jsonl" \
-    --test-dataset "$OUT/probe_test.jsonl" \
+    --dataset "$DATA_ROOT/cap${cap}/dataset_train.jsonl" \
+    --val-dataset "$PROBE_VAL" \
+    --test-dataset "$PROBE_TEST" \
     --output-dir "$OUT/run_cap${cap}" \
     --max-steps "$STEPS" \
     --eval-steps "$EVAL_STEPS" \
@@ -59,5 +72,5 @@ for cap in "${CAPS[@]}"; do
   echo "cap=$cap finished rc=$rc in $((end-start))s"
 done
 
-uv run python scripts/collect_cap_results.py
+CAP_OUT="$OUT" uv run python scripts/collect_cap_results.py
 echo "Per-run summary written to $OUT/results.csv (rewritten from the per-run training summaries)"

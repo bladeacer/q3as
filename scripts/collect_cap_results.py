@@ -1,21 +1,26 @@
 #!/usr/bin/env python3
 """collect_cap_results.py - summarize the cap-tuning experiment.
 
-Reads outputs/capexp/run_cap*/training_summary.json and writes one row per
-run to outputs/capexp/results.csv: final train loss, best eval loss and its
-step, test loss/perplexity, and wall seconds. trends.csv carries the same
-data in long form for quick plotting.
+Reads <out>/run_cap*/training_summary.json and writes one row per run to
+<out>/results.csv: final train loss, best eval loss and its step, test
+loss/perplexity, and wall seconds. trends.csv carries the same data in
+long form for quick plotting.
+
+The output directory defaults to outputs/capexp and can be overridden with
+the CAP_OUT environment variable (run_cap_experiment.sh sets it when a
+round writes to its own directory).
 """
 from __future__ import annotations
 
 import csv
 import json
 import logging
+import os
 from pathlib import Path
 
 logger = logging.getLogger("q3as_collect_cap_results")
 
-OUT = Path("outputs/capexp")
+OUT = Path(os.environ.get("CAP_OUT", "outputs/capexp"))
 
 
 def best_of(history: list[tuple[int, float]]) -> tuple[int | None, float | None]:

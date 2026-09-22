@@ -135,7 +135,7 @@ test: ## Run the Python unit tests
 
 lint: ## Run ruff and mypy over the project sources, then check markdown links
 	uv run ruff check data/processing_scripts/ scripts/ eval/ tests/ tools/
-	uv run mypy data/processing_scripts/build_dataset.py data/processing_scripts/parse_docs.py data/processing_scripts/parse_ada_ast.py data/processing_scripts/eval_guard.py data/processing_scripts/code_variants.py scripts/alire_env.py scripts/bump_version.py scripts/gen_eval_report.py scripts/gen_agents_tree.py
+	uv run mypy data/processing_scripts/build_dataset.py data/processing_scripts/parse_docs.py data/processing_scripts/parse_ada_ast.py data/processing_scripts/eval_guard.py data/processing_scripts/code_variants.py scripts/alire_env.py scripts/bump_version.py scripts/gen_eval_report.py scripts/gen_agents_tree.py scripts/collect_cap_results.py scripts/make_probe_splits.py
 	uv run python tools/check-links.py
 
 validate-defects: ## Compile-check dataset defect pairs with the Alire GNAT

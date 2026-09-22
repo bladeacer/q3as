@@ -58,7 +58,7 @@ records from ada-eval.
   and pairs Ada sources, sanitizes prose into Simplified Technical English
   (STE), injects correct-vs-wrong defect pairs (seventeen families), distills
   agent-skill guidance into system prompts, dedups (verbatim plus a cap of
-  `AST_STRUCTURAL_CAP = 2` on alpha-renamed AST-record shapes, chosen by a
+  `AST_STRUCTURAL_CAP = 10` on alpha-renamed AST-record shapes, chosen by a
   controlled cap-tuning experiment, see docs/datasets-and-training.md), drops
   empty-assistant records, and writes JSONL plus metadata with per-source
   provenance.
@@ -198,6 +198,7 @@ q3as/
        gen_agents_tree.py
        gen_contract_mutations.py
        gen_eval_report.py
+       make_probe_splits.py
        run_cap_experiment.sh
        validate_defects.py
    tests/

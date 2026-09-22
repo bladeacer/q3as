@@ -55,6 +55,31 @@ class TestBumpVersion:
         with pytest.raises(FileNotFoundError):
             bv.read_version(tmp_path / "nope.toml")
 
+    def test_extra_version_file_synced(self, manifest_dir: Path, monkeypatch):
+        # pyproject-style extra file: carries the version, synced best-effort.
+        (manifest_dir / "pyproject.toml").write_text(
+            'name = "q3as"\nversion = "0.1.0"\n', encoding="utf-8"
+        )
+        monkeypatch.setattr(
+            bv, "MANIFESTS", (manifest_dir / "alire.toml", manifest_dir / "alire-dev.toml")
+        )
+        monkeypatch.setattr(bv, "EXTRA_VERSION_FILES", (manifest_dir / "pyproject.toml",))
+        _old, results = bv.set_version("0.3.0")
+        assert (manifest_dir / "pyproject.toml").read_text(encoding="utf-8").count(
+            'version = "0.3.0"'
+        ) == 1
+        assert any(path.name == "pyproject.toml" and changed for path, changed in results)
+
+    def test_extra_version_file_absent_is_skipped(self, manifest_dir: Path, monkeypatch):
+        # No pyproject.toml in the fixture dir: the bump must still succeed.
+        monkeypatch.setattr(
+            bv, "MANIFESTS", (manifest_dir / "alire.toml", manifest_dir / "alire-dev.toml")
+        )
+        monkeypatch.setattr(bv, "EXTRA_VERSION_FILES", (manifest_dir / "pyproject.toml",))
+        _old, new = bv.bump_version("patch")
+        assert new == "0.1.1"
+        assert bv.read_version(manifest_dir / "alire.toml") == "0.1.1"
+
 
 def _sample_result_line(compiled: bool, passed: bool, prove: str) -> str:
     return json.dumps({

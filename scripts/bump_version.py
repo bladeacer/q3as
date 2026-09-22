@@ -3,9 +3,11 @@
 
 The version lives in ``alire.toml`` and is mirrored into ``alire-dev.toml``
 (both manifests must carry the same version: the publishing manifest and
-the dev manifest describe the same crate). This module reads the current
-version for other tooling (eval reports use it to name result files) and
-bumps both manifests together.
+the dev manifest describe the same crate). ``pyproject.toml`` carries the
+same version for the Python tooling and is synced best-effort when it
+exists and has a version line. This module reads the current version for
+other tooling (eval reports use it to name result files) and bumps the
+files together.
 
 Usage:
     python scripts/bump_version.py get
@@ -24,6 +26,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 MANIFESTS = (ROOT / "alire.toml", ROOT / "alire-dev.toml")
+# Other files carrying the crate version, synced best-effort: a missing
+# file or a missing version line is skipped, never an error.
+EXTRA_VERSION_FILES = (ROOT / "pyproject.toml",)
 
 _VERSION_RE = re.compile(r'^(version\s*=\s*")([^"]+)(")', re.MULTILINE)
 
@@ -53,11 +58,17 @@ def _set_version_in(manifest: Path, version: str) -> bool:
 
 
 def set_version(version: str) -> tuple[str, list[tuple[Path, bool]]]:
-    """Set *version* in both manifests. Returns (old, [(path, changed)])."""
+    """Set *version* in both manifests plus any extra version files.
+
+    Returns (old, [(path, changed)]) covering every touched file.
+    """
     if not re.fullmatch(r"\d+\.\d+\.\d+", version):
         raise ValueError(f"version must be x.y.z (got: {version})")
     old = read_version()
     results = [(manifest, _set_version_in(manifest, version)) for manifest in MANIFESTS]
+    for extra in EXTRA_VERSION_FILES:
+        if extra.exists() and _VERSION_RE.search(extra.read_text(encoding="utf-8")):
+            results.append((extra, _set_version_in(extra, version)))
     return old, results
 
 
@@ -100,6 +111,9 @@ def main() -> int:
         old, new = bump_version(args.value or "patch")
         for manifest in MANIFESTS:
             print(f"  {manifest.name}: -> {new}")
+        for extra in EXTRA_VERSION_FILES:
+            if extra.exists() and _VERSION_RE.search(extra.read_text(encoding="utf-8")):
+                print(f"  {extra.name}: -> {new}")
         print(f"version: {old} -> {new}")
         return 0
     except (ValueError, FileNotFoundError) as exc:

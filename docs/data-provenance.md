@@ -75,9 +75,25 @@ This catches more than copy-paste: it has caught sibling-repo code that is
 structurally identical to an eval sample after renaming, and `learn` doc
 examples that are verbatim eval subprograms (eval samples were authored
 from the same corpus we mine). Detection is content-based, so it works no
-matter which repo a turn claims as its source. It also fires on the new
-hub sources: the first rebuild after adding them dropped 261 records in 53
-groups whose code matched eval content structurally.
+matter which repo a turn claims as its source. It fires on the hub
+sources too: the first rebuild after adding them dropped 261 records in
+53 groups whose code matched eval content structurally, and the current
+build (see below) still drops a similar volume.
+
+Current shipped dataset (AST_STRUCTURAL_CAP = 10), as recorded in
+`data/processed/dataset_metadata.json` at build time:
+
+- 15,034 turns; group-aware splits 13,547 train / 731 val / 756 test,
+- eval guard: 479 blocked signatures (255 exact, 176 structural, plus
+  prompts), 376 records dropped in 75 groups,
+- dedup before split: 6,999 duplicates removed (2,191 verbatim, 4,808
+  AST-structural over the cap),
+- 500 empty-assistant records dropped.
+
+The guard counts shift slightly between builds because dedup and the cap
+change which duplicate of a guarded group is seen first; `make
+check-integrity` re-verifies the whole pipeline from content, so it stays
+the source of truth, not these numbers.
 
 Known limit: hash-based blocking identifies content up to renaming and
 reformatting. A semantically equivalent but restructured algorithm is not

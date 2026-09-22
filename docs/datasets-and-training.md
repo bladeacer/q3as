@@ -83,8 +83,7 @@ splits honest:
    split.
 2. **Dedup before split** - two duplicate families are removed:
    verbatim copies generated from different groups, and AST-derived
-   records whose assistant code has the same alpha-renamed shape beyond
-   a small cap (`AST_STRUCTURAL_CAP`, currently 2): the algorithm-hub
+   records whose assistant code has the same alpha-renamed shape beyond    a small cap (`AST_STRUCTURAL_CAP`, currently 10): the algorithm-hub
    corpus is templated, and hundreds of its records are the same
    algorithm under different identifier spellings. Deliberately kept:
    the dataset's intended variety - variant turns (renamed/reordered
@@ -93,33 +92,54 @@ splits honest:
    breakdown (`exact`, `ast_structural_capped`) in the build metadata;
    duplicates cannot straddle splits because the first occurrence wins.
 
-   The cap value is evidence-based, not a guess. A controlled experiment
-   (`scripts/build_cap_variants.sh` + `scripts/run_cap_experiment.sh`)
-   trained identical 40-step QLoRA probes (same seed, LR, batch
-   (1x8, acc 8), and a fixed 40-example val/test) on datasets that differ
-   only in the cap. Exact repro: `STEPS=40 ACC=8 EVAL_STEPS=10`; a probe
-   takes 14 to 18 minutes per cap on the reference GPU.
+   The cap value is evidence-based, not a guess. Two rounds of a
+   controlled experiment (`scripts/build_cap_variants.sh` +
+   `scripts/run_cap_experiment.sh`) trained identical 40-step QLoRA
+   probes (same seed, LR, batch 1x8, 10-step eval schedule) on datasets
+   that differ only in the cap; a probe takes 14 to 18 minutes per cap on
+   the reference GPU. Exact repro of both rounds: `STEPS=40 ACC=8
+   EVAL_STEPS=10`.
+
+   Round 1 screened all caps on a 40-example probe carved from the
+   then-current cap-2 build's val/test splits:
 
    | cap | val loss (step 40) | test loss | test ppl |
    |----:|-------------------:|----------:|---------:|
    | 1   | 1.310              | 1.333     | 3.79     |
-   | **2** | **1.050**        | 1.070     | 2.92     |
+   | 2   | 1.050              | 1.070     | 2.92     |
    | 3   | 1.117              | 1.128     | 3.09     |
    | 5   | 1.052              | 1.065     | 2.90     |
    | 10  | 1.038              | 1.041     | 2.83     |
    | inf | 1.169              | 1.187     | 3.28     |
 
-   Caps 1, 3, and inf lose clearly: too little variety at cap 1, unbounded
-   duplication at inf. Caps 2, 5, and 10 finish within a few percent of
-   each other on the 40-example probe; cap 10 edges out cap 2 (test loss
-   1.041 vs 1.070, ~18% more records), so cap 2 stays the default for
-   now: the probe cannot separate them with confidence, and the smaller
-   dataset carries less templated repetition. Switching to cap 10 is the
-   standing candidate for the next iteration; it changes the dataset, so
-   it needs a rebuild plus `make check-integrity` and a retrain. Results
-   CSV: `outputs/capexp/results.csv` (regenerable, not committed; see
-   `scripts/collect_cap_results.py`), per-cap summaries in
-   `outputs/capexp/run_cap*/`.
+   Caps 1, 3, and inf lost clearly (too little variety at cap 1,
+   unbounded duplication at inf), and caps 2, 5, and 10 finished within a
+   few percent of each other. The round-1 probe was later found flawed:
+   split slices depend on the post-dedup group list, so the same source
+   content moves between train and val across builds with different caps,
+   and 20 to 36 of the 40 probe records sat inside the arms' training
+   data (verified afterwards by content hash). That flatters whichever
+   arm memorizes more of the probe, so the near-tie was not trustworthy.
+
+   Round 2 re-scored caps 2, 5, and 10 on a leak-free 121-record probe
+   (55 val + 66 test, every record content-checked absent from all three
+   arm train sets; built with `scripts/make_probe_splits.py`, run with
+   `OUT=outputs/capexp_big DATA_ROOT=outputs/capexp/datasets` plus the
+   probe overrides):
+
+   | cap | val loss (step 40) | test loss | test ppl |
+   |----:|-------------------:|----------:|---------:|
+   | 2   | 1.057              | 0.945     | 2.57     |
+   | 5   | 1.052              | 0.935     | 2.55     |
+   | **10** | **0.972**       | **0.846** | **2.33** |
+
+   Cap 10 wins by 8 to 10 percent on both splits, an order larger than
+   the round-1 spread, with the same ranking (5 above 2, 10 on top). The
+   default `AST_STRUCTURAL_CAP` is 10. Results CSVs:
+   `outputs/capexp/results.csv` (round 1) and `outputs/capexp_big/
+   results.csv` (round 2), regenerable and not committed; see
+   `scripts/collect_cap_results.py`. Per-cap summaries live in
+   `outputs/capexp{,_big}/run_cap*/`.
 3. **Eval guard** - ada-eval benchmark content is dropped before splitting
    (see [Data provenance](data-provenance.md)).
 

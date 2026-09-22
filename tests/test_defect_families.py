@@ -308,9 +308,9 @@ class TestDedupGrouped:
         assert dropped == 1
         assert len(deduped) == 3
 
-    def test_default_cap_is_two(self):
-        # The shipped default: the cap-tuning experiment picked 2 (see
-        # docs/datasets-and-training.md). A third clone of one shape is cut.
+    def test_default_cap_is_ten(self):
+        # The shipped default: the cap-tuning experiment picked 10 (see
+        # docs/datasets-and-training.md). An 11th clone of one shape is cut.
         body = (
             "-- pad\n"
             "   Tmp : Integer := 0;\n"
@@ -319,8 +319,6 @@ class TestDedupGrouped:
             "   if Tmp > 0 then\n      X := Tmp + Y;\n   end if;\n"
         )
         code_a = f"procedure Op (X : in out Integer; Y : Integer) is\n{body}end Op;"
-        code_b = code_a.replace("Tmp", "Counter").replace("Op", "Operate")
-        code_c = code_a.replace("Y", "Limit")
 
         def turn(code: str) -> dict:
             return {"messages": [
@@ -328,11 +326,18 @@ class TestDedupGrouped:
                 {"role": "assistant", "content": f"```ada\n{code}\n```"},
             ]}
 
-        grouped = [("ast:a", turn(code_a)), ("ast:b", turn(code_b)), ("ast:c", turn(code_c))]
+        # 11 alpha-renamed clones of one shape: the cap keeps 10, cuts 1.
+        codes = [code_a]
+        for i in range(10):
+            code = code_a
+            for old, new in (("Tmp", "Counter"), ("Op", "Operate"), ("Y", "Limit")):
+                code = code.replace(old, f"{new}{i}")
+            codes.append(code)
+        grouped = [(f"ast:{chr(ord('a') + i)}", turn(c)) for i, c in enumerate(codes)]
         deduped, dropped, detail = bd.dedup_grouped(grouped)
-        assert bd.AST_STRUCTURAL_CAP == 2
+        assert bd.AST_STRUCTURAL_CAP == 10
         assert detail["ast_structural_capped"] == 1
-        assert dropped == 1 and len(deduped) == 2
+        assert dropped == 1 and len(deduped) == 10
 
     def test_variant_renamed_turns_survive_dedup(self):
         # The intentional variety: variant_turns renames ONE snippet's

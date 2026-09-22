@@ -28,9 +28,9 @@ builder uses (parse_ada_ast), so the guard sees exactly the units a
 generated turn can contain. Short structural signatures are ignored:
 generic two-line subprograms would match half the corpus and over-block.
 
-If ``../ada-eval`` is missing the guard degrades to a no-op with a loud
-warning; builds on a machine without the sibling repo are never blocked,
-but ``make check-integrity`` reports the degraded state.
+If the cached ada-eval is missing the guard degrades to a no-op with a
+loud warning; builds without it are never blocked, but ``make
+check-integrity`` reports the degraded state.
 
 CLI contract (mirrors scripts/validate_defects.py): exit 0 when the given
 JSONL files contain no eval content, exit 1 when any is found.
