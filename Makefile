@@ -7,7 +7,6 @@
 DATASET_EXTRA_TURNS := \
 	data/processed/docs_chunks.jsonl \
 	data/processed/ada_ast_units.jsonl \
-	data/processed/hub_ast_units.jsonl \
 	data/processed/contract_mutations.jsonl
 
 .PHONY: $(DATASET_EXTRA_TURNS)
@@ -34,7 +33,7 @@ help: ## Show this help message
 	@echo "  make sync          - Install/update all dependencies via uv sync"
 	@echo "  make download      - Download and sanity-check the Qwen3-8B model (Qwen/Qwen3-8B -> models/qwen3-8b)"
 	@echo "  make build-dataset - Build the training dataset from Ada source trees"
-	@echo "                      (cache: adacovex, Ada_CRDT, Ada-83-TLALOC, ada-eval + the Sternenfisch hub repos)"
+	@echo "                      (cache: adacovex, Ada_CRDT, Ada-83-TLALOC, ada-eval + the RobertBoettcherSF Ada-Algorithms monorepo)"
 	@echo "                      plus parser outputs (docs chunks, Ada AST units) when present"
 	@echo "  make fetch-sources - Fetch source repos into the archive cache (data/raw_repos)"
 	@echo "                       libadalang/structural Ada AST extraction into JSONL"
@@ -76,8 +75,8 @@ check-model: ## Check if model exists; download if missing
 	fi
 
 build-dataset: parse-data gen-contracts ## Build the training dataset from cached Ada source trees
-	## Ada code sources (cache): adacovex, Ada_CRDT, Ada-83-TLALOC, ada-eval (guarded)
-	## plus the Sternenfisch algorithm-hub repositories (~1400, MIT).
+	## Ada code sources (cache): adacovex, Ada_CRDT, Ada-83-TLALOC, ada-eval,
+	## plus the RobertBoettcherSF Ada-Algorithms monorepo (MIT).
 	## Doc sources (cache): learn, training_material (CC-BY-4.0). Guidance in system
 	## prompts: ada-spark (MIT), SimpleEnglish (MIT, STE rules), skills (Apache-2.0).
 	## Parser outputs (data/processed/*.jsonl from parse-data + gen-contracts) are
@@ -88,6 +87,7 @@ build-dataset: parse-data gen-contracts ## Build the training dataset from cache
 		--extra-input-dir data/raw_repos/bladeacer/Ada_CRDT \
 		--extra-input-dir data/raw_repos/ViMoBr/Ada-83-TLALOC \
 		--extra-input-dir data/raw_repos/AdaCore/ada-eval \
+		--extra-input-dir data/raw_repos/RobertBoettcherSF/Ada-Algorithms \
 		--doc-dir data/raw_repos/AdaCore/learn \
 		--doc-dir data/raw_repos/AdaCore/training_material \
 		--guidance-dir data/raw_repos/agent-sh/ada-spark \
@@ -139,12 +139,11 @@ lint: ## Run ruff and mypy over the project sources, then check markdown links
 	uv run python tools/check-links.py
 
 validate-defects: ## Compile-check dataset defect pairs with the Alire GNAT
-	uv run python scripts/validate_defects.py --source data/raw_repos/bladeacer/adacovex --source data/raw_repos/bladeacer/Ada_CRDT --source data/raw_repos/AdaCore/ada-eval
+	uv run python scripts/validate_defects.py --source data/raw_repos/bladeacer/adacovex --source data/raw_repos/bladeacer/Ada_CRDT --source data/raw_repos/AdaCore/ada-eval --source data/raw_repos/RobertBoettcherSF/Ada-Algorithms
 
 parse-data: fetch-sources ## Run the parser modules into data/processed/ extra JSONL
 	uv run python data/processing_scripts/parse_docs.py --output data/processed/docs_chunks.jsonl
 	uv run python data/processing_scripts/parse_ada_ast.py --output data/processed/ada_ast_units.jsonl
-	uv run python data/processing_scripts/parse_ada_ast.py --input-dir data/raw_repos/RobertBoettcherSF --output data/processed/hub_ast_units.jsonl
 
 gen-contracts: ## Generate gnatprove-verified synthetic contract turns (cached; FORCE=1 to regenerate)
 	uv run python scripts/gen_contract_mutations.py $(if $(FORCE),--force,)

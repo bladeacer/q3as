@@ -81,13 +81,6 @@ DOC_SOURCE_DIRS = ["learn"]
 AGENT_SKILL_SOURCE_DIRS = ["ada-spark", "SimpleEnglish", "skills"]
 
 
-def _hub_cache_dirs() -> list[Path]:
-    """Cached Sternenfisch-hub repositories (owner RobertBoettcherSF)."""
-    import source_paths
-
-    return sorted(d for d in (source_paths.cache_root() / "RobertBoettcherSF").glob("*") if d.is_dir())
-
-
 def _resolved_source(name: str) -> Path:
     """Cache directory for a source repo (or its legacy sibling location)."""
     import source_paths
@@ -2329,7 +2322,8 @@ def _process_pair_task(
 
 
 # Cap on how many AST-derived records with the same structural (alpha-renamed)
-# code signature are kept. The hub corpus is highly templated: hundreds of
+# code signature are kept. The Ada-Algorithms corpus is highly templated:
+# hundreds of
 # records are the same algorithm with different identifier spellings, and the
 # variant-renaming pass makes them exactly equal. Cap, not drop: a few copies
 # of an idiom are useful signal, hundreds are duplication. Records with no
@@ -2354,14 +2348,14 @@ def dedup_grouped(
 
     1. **Exact duplicates** - identical message lists generated in two
        different groups (a package spec extracted through different source
-       paths, a variant turn that renames structurally identical hub code
-       to the same fresh names). Group-aware splitting cannot catch these,
-       and copies that straddle splits would leak eval answers into
-       training.
+        paths, a variant turn that renames structurally identical code
+        to the same fresh names). Group-aware splitting cannot catch these,
+        and copies that straddle splits would leak eval answers into
+        training.
     2. **Structural duplicates of AST-derived records** - records whose
-       assistant Ada code has the same alpha-renamed token shape
-       (``eval_guard.structural_text``). The hub corpus contains large
-       families of the same algorithm under different spellings; more than
+        assistant Ada code has the same alpha-renamed token shape
+        (``eval_guard.structural_text``). The Ada-Algorithms corpus contains
+        large families of the same algorithm under different spellings; more than
        ``AST_STRUCTURAL_CAP`` copies of one shape add duplication, not
        signal, so extras are dropped.
 
@@ -2995,7 +2989,7 @@ def main() -> None:
     if args.extra_input_dir:
         extra_dirs = args.extra_input_dir
     else:
-        extra_dirs = source_paths.default_code_dirs() + _hub_cache_dirs()
+        extra_dirs = source_paths.default_code_dirs()
     doc_dirs = (
         args.doc_dir
         if args.doc_dir
@@ -3028,7 +3022,6 @@ def main() -> None:
             path for path in (
                 DEFAULT_OUTPUT_DIR / "docs_chunks.jsonl",
                 DEFAULT_OUTPUT_DIR / "ada_ast_units.jsonl",
-                DEFAULT_OUTPUT_DIR / "hub_ast_units.jsonl",
                 DEFAULT_OUTPUT_DIR / "contract_mutations.jsonl",
             )
             if path.exists()

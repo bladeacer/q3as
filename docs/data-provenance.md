@@ -25,14 +25,14 @@ resolves as a fallback, but nothing creates it anymore.
 | [agent-sh/ada-spark](https://github.com/agent-sh/ada-spark) | `data/raw_repos/agent-sh/ada-spark` | Current-toolchain guidance in system prompts | MIT |
 | [AminBlg/SimpleEnglish](https://github.com/AminBlg/SimpleEnglish) | `data/raw_repos/AminBlg/SimpleEnglish` | STE writing rules and word map (paraphrased, no spec text) | MIT |
 | [AdaCore/skills](https://github.com/AdaCore/skills) | `data/raw_repos/AdaCore/skills` | Toolchain QA (gnatprove, alire, gnatdoc, gnattest, gnatfuzz) | Apache-2.0 |
-| [Sternenfisch algorithm hub](https://github.com/RobertBoettcherSF/RobertBoettcherSF.github.io) (and the ~1400 repositories its README links) | `data/raw_repos/RobertBoettcherSF/<repo>` | Ada/SPARK algorithm implementations: distributed systems, graph algorithms, image processing, compression, SPARK-verified sheets, parsers. Fetcher parses the hub README and caches every linked repository owned by the hub owner. Per-repo descriptions follow each repository's own README. All repos MIT; the author approved training use (LLM-usage disclosure and license in the hub README) | MIT |
+| [RobertBoettcherSF/Ada-Algorithms](https://github.com/RobertBoettcherSF/Ada-Algorithms) | `data/raw_repos/RobertBoettcherSF/Ada-Algorithms` | Ada/SPARK algorithm implementations in a single monorepo (distributed systems, graph algorithms, image processing, compression, SPARK-verified sheets, parsers): thousands of files across category directories. Fetched as one archive. The author approved training use (LLM-usage disclosure and license in the repository's README) | MIT |
 
 Licensing summary: Apache-2.0 and MIT code is redistributable with
 attribution; CC-BY-4.0 course material is used with attribution; the
 GPL-licensed Ada-83-TLALOC code is used for model training only (weights are
 not source-code redistribution) and is covered by the author's explicit
-permission. The Sternenfisch hub repositories are MIT with the author's
-green light for training use.
+permission. The RobertBoettcherSF Ada-Algorithms monorepo is MIT with the
+author's green light for training use.
 
 ## ada-eval is eval-proper
 
@@ -75,20 +75,21 @@ This catches more than copy-paste: it has caught sibling-repo code that is
 structurally identical to an eval sample after renaming, and `learn` doc
 examples that are verbatim eval subprograms (eval samples were authored
 from the same corpus we mine). Detection is content-based, so it works no
-matter which repo a turn claims as its source. It fires on the hub
-sources too: the first rebuild after adding them dropped 261 records in
-53 groups whose code matched eval content structurally, and the current
+matter which repo a turn claims as its source. It fires on the Ada-Algorithms
+monorepo too: the first rebuild after adding it dropped records in
+groups whose code matched eval content structurally, and the current
 build (see below) still drops a similar volume.
 
 Current shipped dataset (AST_STRUCTURAL_CAP = 10), as recorded in
 `data/processed/dataset_metadata.json` at build time:
 
-- 15,034 turns; group-aware splits 13,547 train / 731 val / 756 test,
+- 31,949 turns; group-aware splits 28,860 train / 1,519 val / 1,570 test,
 - eval guard: 479 blocked signatures (255 exact, 176 structural, plus
-  prompts), 376 records dropped in 75 groups,
-- dedup before split: 6,999 duplicates removed (2,191 verbatim, 4,808
+  prompts), 516 records dropped in 116 groups,
+- dedup before split: 24,823 duplicates removed (6,509 verbatim, 18,314
   AST-structural over the cap),
-- 500 empty-assistant records dropped.
+- 2,438 empty-assistant records dropped (mostly spec-only units from the Ada-
+  Algorithms monorepo).
 
 The guard counts shift slightly between builds because dedup and the cap
 change which duplicate of a guarded group is seen first; `make
@@ -106,11 +107,10 @@ layer of defense.
    `prompt.md`, or compacted records.
 2. After any change to data sources or the dataset, run
    `make check-integrity` (must exit 0) alongside `make validate-defects`.
-3. **When adding a new data source:** add its URL to `CORE_REPOS` in
-   `scripts/fetch_repos.py` (or list it under `hub:`-style discovery),
-   update the table above and the `Makefile` source list, and re-run
-   `make check-integrity` before building the dataset. AGENTS.md reminds
-   agents of this obligation.
+   3. **When adding a new data source:** add its URL to `CORE_REPOS` in
+   `scripts/fetch_repos.py`, update the table above and the `Makefile`
+   source list, and re-run `make check-integrity` before building the
+   dataset. AGENTS.md reminds agents of this obligation.
 4. Adding new eval samples to ada-eval automatically grows the blocklist;
    rebuild the dataset afterward.
 5. If the guard reports `degraded` (ada-eval missing), builds proceed but

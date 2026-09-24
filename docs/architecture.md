@@ -6,8 +6,8 @@ What each part of q3as does and how the pieces connect.
 
 1. `make download` fetches the official [`Qwen/Qwen3-8B`](https://huggingface.co/Qwen/Qwen3-8B) to `models/qwen3-8b/`. Unsloth is the training framework only (patched kernels, QLoRA); the weights are always Qwen's original release.
 2. `make fetch-sources` fills the archive cache `data/raw_repos/<owner>/<repo>/`
-   with HTTP tarballs of every source repository (core sources plus every
-   repository the Sternenfisch hub README links). No git metadata, cached
+   with HTTP tarballs of every source repository (core sources only;
+   ada-eval, learn, skills, the Ada-Algorithms algorithm monorepo, etc.). No git metadata, cached
    by repository identity: re-runs fetch nothing already on disk.
 3. `make parse-data` runs the parser modules (heading-aware doc chunking,
    AST extraction) into standalone JSONL under `data/processed/`.
@@ -32,7 +32,7 @@ What each part of q3as does and how the pieces connect.
 | `data/processing_scripts/parse_ada_ast.py` | Ada semantic-unit extraction (libadalang when available, structural fallback): specs, bodies, aspects, constrained types; builds contract-writing turns |
 | `data/processing_scripts/eval_guard.py` | Eval-integrity guard (see [Data provenance](data-provenance.md)) |
 | `data/processing_scripts/source_paths.py` | Central source-path resolution: repo name to cache directory (`data/raw_repos/<owner>/<repo>`), legacy sibling fallback |
-| `scripts/fetch_repos.py` | Archive-cache fetcher: parallel HTTP tarballs, per-repo metadata (URL, license SPDX), hub-README repo discovery |
+| `scripts/fetch_repos.py` | Archive-cache fetcher: parallel HTTP tarballs, per-repo metadata (URL, license SPDX), all repos in `CORE_REPOS` (including the Ada-Algorithms monorepo) |
 | `scripts/validate_defects.py` | GNAT-compiles defect pairs; exit code fails any family that "compiles clean" |
 | `scripts/ada_env.sh` / `scripts/alire_env.py` | Alire toolchain entry points (shell / Python) |
 | `training/download_model.py` | HF download with terminating sanity checks (deep GPU check runs in a child process with a timeout) |

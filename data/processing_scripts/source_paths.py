@@ -30,21 +30,7 @@ if str(_SCRIPTS_DIR) not in sys.path:
 
 from fetch_repos import CACHE_DIR, CORE_REPOS, GITHUB_REPO_RE
 
-# repo URL -> directory name used by every pipeline stage. Mostly the repo
-# name; kept explicit so a rename upstream does not silently split sources.
-_DIR_BY_URL: dict[str, str] = {
-    "https://github.com/bladeacer/adacovex": "adacovex",
-    "https://github.com/bladeacer/Ada_CRDT": "Ada_CRDT",
-    "https://github.com/ViMoBr/Ada-83-TLALOC": "Ada-83-TLALOC",
-    "https://github.com/AdaCore/ada-eval": "ada-eval",
-    "https://github.com/AdaCore/learn": "learn",
-    "https://github.com/AdaCore/training_material": "training_material",
-    "https://github.com/agent-sh/ada-spark": "ada-spark",
-    "https://github.com/AminBlg/SimpleEnglish": "SimpleEnglish",
-    "https://github.com/AdaCore/skills": "skills",
-}
-
-SOURCES: list[tuple[str, str]] = [(_url, _DIR_BY_URL[_url]) for _url in CORE_REPOS]
+SOURCES: list[tuple[str, str]] = [(url, url.rsplit("/", 1)[-1]) for url in CORE_REPOS]
 
 OWNER_BY_NAME: dict[str, str] = {}
 for _url, _dir in SOURCES:
@@ -52,7 +38,8 @@ for _url, _dir in SOURCES:
     assert _m is not None
     OWNER_BY_NAME[_dir] = _m.group(1)
 
-# Names pipeline stages reference directly (keep in sync with _DIR_BY_URL).
+# Names pipeline stages reference directly (mirrors the repo names in
+# CORE_REPOS; keep in sync if a URL or its target directory diverges).
 ADACOVEX = "adacovex"
 ADA_CRDT = "Ada_CRDT"
 ADA_83_TLALOC = "Ada-83-TLALOC"
@@ -62,6 +49,7 @@ TRAINING_MATERIAL = "training_material"
 ADA_SPARK = "ada-spark"
 SIMPLE_ENGLISH = "SimpleEnglish"
 SKILLS = "skills"
+ADA_ALGORITHMS = "Ada-Algorithms"
 
 
 def root() -> Path:
@@ -113,9 +101,9 @@ def require(dir_name: str) -> Path:
 
 
 def default_code_dirs() -> list[Path]:
-    """Ada code sources: existing dirs among adacovex, Ada_CRDT, TLALOC, ada-eval."""
+    """Ada code sources: existing dirs among adacovex, Ada_CRDT, TLALOC, ada-eval, Ada-Algorithms."""
     dirs: list[Path] = []
-    for name in (ADACOVEX, ADA_CRDT, ADA_83_TLALOC, ADA_EVAL):
+    for name in (ADACOVEX, ADA_CRDT, ADA_83_TLALOC, ADA_EVAL, ADA_ALGORITHMS):
         resolved = resolve(name)
         if resolved is not None:
             dirs.append(resolved)
@@ -143,9 +131,9 @@ def default_guidance_dirs() -> list[Path]:
 
 
 def default_eval_sources() -> list[Path]:
-    """Defect-validation sources: adacovex, Ada_CRDT, ada-eval (existing only)."""
+    """Defect-validation sources: adacovex, Ada_CRDT, ada-eval, Ada-Algorithms."""
     dirs: list[Path] = []
-    for name in (ADACOVEX, ADA_CRDT, ADA_EVAL):
+    for name in (ADACOVEX, ADA_CRDT, ADA_EVAL, ADA_ALGORITHMS):
         resolved = resolve(name)
         if resolved is not None:
             dirs.append(resolved)

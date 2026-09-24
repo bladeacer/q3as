@@ -19,8 +19,9 @@ for cap in "${CAPS[@]}"; do
     --input-dir data/raw/ \
     --extra-input-dir data/raw_repos/bladeacer/adacovex \
     --extra-input-dir data/raw_repos/bladeacer/Ada_CRDT \
-    --extra-input-dir data/raw_repos/ViMoBr/Ada-83-TLALOC \
-    --extra-input-dir data/raw_repos/AdaCore/ada-eval \
+     --extra-input-dir data/raw_repos/ViMoBr/Ada-83-TLALOC \
+     --extra-input-dir data/raw_repos/AdaCore/ada-eval \
+     --extra-input-dir data/raw_repos/RobertBoettcherSF/Ada-Algorithms \
     --doc-dir data/raw_repos/AdaCore/learn \
     --doc-dir data/raw_repos/AdaCore/training_material \
     --guidance-dir data/raw_repos/agent-sh/ada-spark \
@@ -28,7 +29,6 @@ for cap in "${CAPS[@]}"; do
     --guidance-dir data/raw_repos/AdaCore/skills \
     --extra-turns data/processed/docs_chunks.jsonl \
     --extra-turns data/processed/ada_ast_units.jsonl \
-    --extra-turns data/processed/hub_ast_units.jsonl \
     --extra-turns data/processed/contract_mutations.jsonl \
     --ast-structural-cap "$cap" \
     --output-dir "$dir"

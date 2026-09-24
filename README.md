@@ -33,7 +33,7 @@ Core sources (fetched into the local archive cache `data/raw_repos/<owner>/<repo
 - **[AminBlg/SimpleEnglish](https://github.com/AminBlg/SimpleEnglish)** - ASD-STE100-style writing skill; governs all generated explanations. *(MIT)*
 - **[AdaCore/skills](https://github.com/AdaCore/skills)** - Official AdaCore toolchain skills (gnatprove, alire, gnatdoc, gnattest, gnatfuzz); become toolchain QA turns. *(Apache-2.0)*
 
-Hub source (fetched the same way, ~1400 repositories): **[RobertBoettcherSF/RobertBoettcherSF.github.io](https://github.com/RobertBoettcherSF/RobertBoettcherSF.github.io)** - the author's hub README links their Ada/SPARK algorithm implementations (distributed systems, graph algorithms, SPARK-verified sheets, parsers, and more). The fetcher parses the hub README and caches every linked repository of that owner; all are MIT and the author has approved training use. Source descriptions follow each repository's own README.
+- **[RobertBoettcherSF/Ada-Algorithms](https://github.com/RobertBoettcherSF/Ada-Algorithms)** - A single monorepo of the author's Ada/SPARK algorithm implementations (distributed systems, graph algorithms, image processing, compression, SPARK-verified sheets, parsers, and more), organized into category directories. *(MIT)* - the author has approved training use (LLM-usage disclosure and license in the repository's README).
 
 ## Quick Start
 
@@ -114,7 +114,7 @@ present):
   (patience 10, eval every 50 steps, 500 max steps), so plan for the
   full training budget.
 - A cold start adds the Qwen3-8B download (~16 GB) and the first
-  `make fetch-sources` (~1400 repository tarballs); both depend on
+  `make fetch-sources` (one monolithic Ada-Algorithms tarball); both depend on
   bandwidth. One-time extras: `uv sync` and `make prove` (Alire
   toolchain).
 

@@ -10,8 +10,8 @@ which commands to use. Regenerate the tree below with `make agents-tree`.
 1. `make download` fetches the official `Qwen/Qwen3-8B` to `models/qwen3-8b/`
    (Unsloth is the training framework only, never the weight source).
 2. `make fetch-sources` fills the archive cache `data/raw_repos/<owner>/<repo>`
-   (HTTP tarballs, no git, cached; core sources plus every RobertBoettcherSF
-   hub repo parsed from the hub README).
+   (HTTP tarballs, no git, cached; core sources plus the RobertBoettcherSF
+   `Ada-Algorithms` monorepo).
 3. `make parse-data` runs the parser modules (doc chunking, AST extraction)
    into `data/processed/*.jsonl`.
 4. `make build-dataset` walks the cached Ada source trees, ingests
@@ -84,8 +84,8 @@ records from ada-eval.
   the real GNAT and checks the claimed compiler messages. Exit code is the
   contract: any "compiles clean" defect is a failure.
 - `scripts/fetch_repos.py` - archive-cache fetcher (HTTP tarballs, parallel,
-  cached; parses the Sternenfisch hub README for the repo list). `make
-  fetch-sources` runs it.
+  cached; every repo in `CORE_REPOS` including the Ada-Algorithms monorepo).
+  `make fetch-sources` runs it.
 - `scripts/ada_env.sh` - runs any command inside the Alire toolchain
   environment (`alr exec`); all Ada tool invocations go through it.
 - `scripts/alire_env.py` - Python side of the same: `find_tool("gnatprove")`
@@ -133,8 +133,8 @@ community index lacks.
   pytest for the dataset logic.
 - The source repositories (see the table in `docs/data-provenance.md`:
   adacovex, Ada_CRDT, Ada-83-TLALOC, ada-eval, learn, training_material,
-  ada-spark, SimpleEnglish, skills, plus the ~1400 RobertBoettcherSF hub
-  repos) are inputs only; `scripts/fetch_repos.py` fetches them into the
+  ada-spark, SimpleEnglish, skills, plus the RobertBoettcherSF
+  `Ada-Algorithms` monorepo) are inputs only; `scripts/fetch_repos.py` fetches them into the
   gitignored `data/raw_repos/` cache. Their licenses are credited in
   `README.md`.
 
@@ -153,7 +153,6 @@ q3as/
            dataset_train.jsonl
            dataset_val.jsonl
            docs_chunks.jsonl
-           hub_ast_units.jsonl
        processing_scripts/
            build_dataset.py
            code_variants.py

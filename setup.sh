@@ -37,7 +37,8 @@ INDEX_BRANCH="stable-1.4.0"
 FALLBACK_LATEST_ALR="2.0.1"
 
 # Sibling repositories are fetched by scripts/fetch_repos.py (archive
-# cache); see the CORE_REPOS list there and the Sternenfisch hub.
+# cache); see the CORE_REPOS list there and the RobertBoettcherSF
+# Ada-Algorithms monorepo.
 
 fetch_repos() {
   echo "==> Fetching source repositories into data/raw_repos (archive cache)"

@@ -36,8 +36,8 @@ family's claimed compiler message is GNAT-verified by
 ## Parser outputs and provenance
 
 The parser modules write standalone JSONL files under `data/processed/`
-(`docs_chunks`, `ada_ast_units`, `hub_ast_units` from `make parse-data`,
-`contract_mutations` from `make gen-contracts`). `make build-dataset`
+(`docs_chunks`, `ada_ast_units`, `contract_mutations` from `make
+parse-data` and `make gen-contracts`). `make build-dataset`
 merges all of them via `--extra-turns`. The build metadata
 (`dataset_metadata.json`) records per-file ingestion counts under
 `extra_turns_files` (`records` / `ingested` / `defects` / `variants`) and
@@ -83,7 +83,8 @@ splits honest:
    split.
 2. **Dedup before split** - two duplicate families are removed:
    verbatim copies generated from different groups, and AST-derived
-   records whose assistant code has the same alpha-renamed shape beyond    a small cap (`AST_STRUCTURAL_CAP`, currently 10): the algorithm-hub
+    records whose assistant code has the same alpha-renamed shape beyond
+    a small cap (`AST_STRUCTURAL_CAP`, currently 10): the Ada-Algorithms
    corpus is templated, and hundreds of its records are the same
    algorithm under different identifier spellings. Deliberately kept:
    the dataset's intended variety - variant turns (renamed/reordered

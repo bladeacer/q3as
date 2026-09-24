@@ -14,17 +14,16 @@ Why archives instead of clones:
 - one HTTP GET per repo, parallelizable and restartable,
 - the cache is content-addressed by repo identity, not by git state.
 
-Sources come from three places, all combinable:
+Sources come from two places, all combinable:
 
-- ``--repo URL``            an explicit repository (the core sources:
-                            ada-eval, learn, skills, ...).
-- ``--hub URL``             a repository whose README links many others
-                            (the Sternenfisch algorithm hub). Every GitHub
-                            link owned by the hub's owner is fetched.
+- ``--repo URL``            an explicit repository (any repo not in CORE_REPOS).
 - ``--from-manifest FILE``  one URL per line, ``#`` comments allowed.
 
+The default (no flags) fetches every repository in ``CORE_REPOS``, which
+includes the RobertBoettcherSF ``Ada-Algorithms`` monorepo.
+
 Usage:
-    python3 scripts/fetch_repos.py                     # core + hub
+    python3 scripts/fetch_repos.py                     # core (default)
     python3 scripts/fetch_repos.py --list              # cache status
     python3 scripts/fetch_repos.py --refresh core      # re-fetch core
     python3 scripts/fetch_repos.py --refresh all       # re-fetch everything
@@ -55,11 +54,11 @@ ROOT = Path(__file__).resolve().parents[1]
 CACHE_DIR = ROOT / "data" / "raw_repos"
 META_FILE = ".q3as-source.json"
 GITHUB_REPO_RE = re.compile(r"https://github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)")
-HUB_URL = "https://github.com/RobertBoettcherSF/RobertBoettcherSF.github.io"
 
-# The core sources (exact URLs). The hub contributes the long tail of
-# algorithm repositories. ada-eval is also the uv path dependency used by
-# eval/generate.py and eval/eval_pipeline.py.
+# The core sources (exact URLs). ada-eval is also the uv path dependency used by
+# eval/generate.py and eval/eval_pipeline.py. The RobertBoettcherSF
+# Ada-Algorithms monorepo provides the algorithm corpus (MIT, author-approved
+# for training).
 CORE_REPOS = [
     "https://github.com/bladeacer/adacovex",
     "https://github.com/bladeacer/Ada_CRDT",
@@ -70,6 +69,7 @@ CORE_REPOS = [
     "https://github.com/agent-sh/ada-spark",
     "https://github.com/AminBlg/SimpleEnglish",
     "https://github.com/AdaCore/skills",
+    "https://github.com/RobertBoettcherSF/Ada-Algorithms",
 ]
 
 USER_AGENT = "q3as-dataset-fetcher (+https://github.com/q3as)"
@@ -80,7 +80,7 @@ class RepoRequest:
     """One repository to fetch, with provenance of the request."""
 
     url: str
-    origin: str  # "core" | "hub:<owner>/<repo>" | "cli" | "manifest"
+    origin: str  # "core" | "cli" | "manifest"
     required: bool = True
 
     @property
@@ -137,48 +137,6 @@ def _api_json(repo_url: str) -> dict | None:
     except (ValueError, urllib.error.URLError, OSError, TimeoutError):
         return None
     return payload if isinstance(payload, dict) else None
-
-
-def _fetch_readme(repo_url: str) -> str | None:
-    """Fetch the repo's README via the API (follows default branch)."""
-    match = GITHUB_REPO_RE.fullmatch(repo_url.rstrip("/"))
-    if not match:
-        return None
-    owner, repo = match.groups()
-    for branch in ("main", "master"):
-        url = f"https://raw.githubusercontent.com/{owner}/{repo}/{branch}/README.md"
-        try:
-            return _http_get(url, timeout=20).decode("utf-8", errors="replace")
-        except (urllib.error.URLError, OSError, TimeoutError):
-            continue
-    return None
-
-
-def hub_repo_urls(hub_url: str) -> list[str]:
-    """Every GitHub repository URL the hub README links to, deduplicated.
-
-    Only links owned by the hub's owner count: the README legitimately
-    links to external pages (Wikipedia, tutorialada) that are not data
-    sources. The hub itself is excluded.
-    """
-    readme = _fetch_readme(hub_url)
-    if not readme:
-        raise RuntimeError(f"Cannot fetch hub README from {hub_url}")
-    match = GITHUB_REPO_RE.fullmatch(hub_url.rstrip("/"))
-    assert match, f"Not a GitHub URL: {hub_url}"
-    hub_owner, hub_repo = match.group(1), match.group(2)
-    seen: set[str] = set()
-    urls: list[str] = []
-    for owner, repo in GITHUB_REPO_RE.findall(readme):
-        repo = repo.rstrip(".")
-        if owner != hub_owner or repo == hub_repo:
-            continue
-        url = f"https://github.com/{owner}/{repo}"
-        if url not in seen:
-            seen.add(url)
-            urls.append(url)
-    logger.info("Hub %s links %d repositories", hub_url, len(urls))
-    return urls
 
 
 # --------------------------------------------------------------------------- #
@@ -305,7 +263,6 @@ def fetch_all(requests: list[RepoRequest], jobs: int = 8) -> list[FetchResult]:
 
 
 def build_requests(
-    hubs: list[str],
     repos: list[str],
     manifest: Path | None,
     refresh: str | None,
@@ -330,26 +287,11 @@ def build_requests(
             line = line.strip()
             if line and not line.startswith("#"):
                 add(line, "manifest")
-    for hub in hubs:
-        hub = (hub or "").strip()
-        if not hub:
-            continue
-        parts = hub.rstrip("/").rsplit("/", 2)
-        hub_origin = "hub:" + ("/".join(parts[-2:]) if len(parts) >= 2 else hub)
-        try:
-            hub_urls = hub_repo_urls(hub)
-        except (RuntimeError, OSError, urllib.error.URLError) as exc:
-            logger.warning("Hub %s failed: %s - skipping its repositories", hub, exc)
-            continue
-        for url in hub_urls:
-            add(url, hub_origin)
 
     if refresh == "core":
         requests = [r for r in requests if r.origin == "core"]
-    elif refresh == "hub":
-        requests = [r for r in requests if r.origin.startswith("hub:")]
     elif refresh not in (None, "all"):
-        raise SystemExit(f"--refresh must be one of: core, hub, all (got {refresh!r})")
+        raise SystemExit(f"--refresh must be one of: core, all (got {refresh!r})")
     return requests
 
 
@@ -391,9 +333,8 @@ def list_cache() -> int:
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--repo", action="append", default=[], help="Extra repository URL. Repeatable.")
-    parser.add_argument("--hub", action="append", default=[], help="Hub repository whose README lists repos. Repeatable.")
     parser.add_argument("--from-manifest", type=Path, help="File with one repository URL per line.")
-    parser.add_argument("--refresh", choices=["core", "hub", "all"], help="Re-fetch even when cached.")
+    parser.add_argument("--refresh", choices=["core", "all"], help="Re-fetch even when cached.")
     parser.add_argument("--jobs", type=int, default=8, help="Parallel downloads (default 8).")
     parser.add_argument("--list", action="store_true", help="Print cache status and exit.")
     parser.add_argument("-v", "--verbose", action="store_true")
@@ -407,8 +348,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.list:
         return list_cache()
 
-    hubs = args.hub or [HUB_URL]
-    requests = build_requests(hubs, args.repo, args.from_manifest, args.refresh)
+    requests = build_requests(args.repo, args.from_manifest, args.refresh)
     logger.info("Fetching %d repositories (%d jobs)", len(requests), args.jobs)
     results = fetch_all(requests, jobs=args.jobs)
 
