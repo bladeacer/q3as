@@ -74,8 +74,8 @@ records from ada-eval.
 - `training/download_model.py` - HF model download plus terminating sanity
   checks (light by default; deep GPU check runs in a child process with a
   timeout so the pipeline can never hang).
-- `training/train_unsloth.py` - QLoRA training script (Unsloth, 2048-token
-  window, LoRA adapters on Qwen3-8B).
+- `training/train_unsloth.py` - QLoRA training script (Unsloth, 1024-token
+  window, single-process dataset tokenization, LoRA adapters on Qwen3-8B).
 - `eval/generate.py` - batch generation for the fine-tuned and base models.
 - `eval/baseline_eval.py` - BLEU/compliance metrics and result aggregation
   (`outputs/eval_results.json`).

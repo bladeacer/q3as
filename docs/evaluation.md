@@ -60,6 +60,7 @@ sanity check.
 
 ```bash
 make generate        # batch generation with base and fine-tuned models
+                     # defaults: 12,000 prompt chars, 512 new tokens
 make eval            # BLEU + compliance metrics -> outputs/eval_results.json
 make eval-pipeline   # ada-eval BUILD/TEST/PROVE -> outputs/eval_results/
 ```

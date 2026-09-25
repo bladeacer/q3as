@@ -59,7 +59,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--gradient-accumulation", type=int, default=8, help="Gradient accumulation steps (effective batch = batch-size x this).")
     parser.add_argument("--max-steps", type=int, default=500, help="Maximum training steps.")
     parser.add_argument("--save-steps", type=int, default=100, help="Save a checkpoint every N steps.")
-    parser.add_argument("--max-seq-length", type=int, default=2048, help="Maximum sequence length.")
+    parser.add_argument(
+        "--max-seq-length", type=int, default=1024,
+        help="Maximum training sequence length. Keep at 1024 or lower on an 8 GB GPU.",
+    )
     parser.add_argument("--lora-rank", type=int, default=8, help="LoRA rank.")
     parser.add_argument("--lora-alpha", type=int, default=16, help="LoRA alpha.")
     parser.add_argument(
@@ -182,6 +185,10 @@ def setup_training_environment(args: argparse.Namespace, has_val: bool) -> dict[
         "gradient_accumulation_steps": args.gradient_accumulation,
         "max_steps": args.max_steps,
         "max_seq_length": args.max_seq_length,
+        "max_length": args.max_seq_length,
+        "dataset_num_proc": 1,
+        "dataloader_num_workers": 0,
+        "dataloader_pin_memory": False,
         "lora_rank": args.lora_rank,
         "lora_alpha": args.lora_alpha,
         "model_name": args.model_name,
@@ -205,6 +212,7 @@ def setup_training_environment(args: argparse.Namespace, has_val: bool) -> dict[
         "save_strategy": "steps",
         "save_steps": args.save_steps,
         "save_total_limit": 3,
+        "save_only_model": True,
         "fp16": False,
         "bf16": True,
         "gradient_checkpointing": True,
@@ -322,6 +330,13 @@ def main() -> None:
         train_dataset = Dataset.from_list(format_examples(dataset))
         eval_dataset = Dataset.from_list(format_examples(val_data)) if val_data else None
         test_dataset = Dataset.from_list(format_examples(test_data)) if test_data else None
+        train_count = len(dataset)
+        val_count = len(val_data)
+        test_count = len(test_data)
+        del dataset, val_data, test_data
+        import gc
+
+        gc.collect()
 
         # -----------------------------------------------------------------
         # Memory-safe eval loss. On this 8 GB card, HF Trainer's eval path
@@ -340,7 +355,7 @@ def main() -> None:
         # -----------------------------------------------------------------
         _eval_ctx: dict[str, Any] = {"model": model, "tokenizer": tokenizer}
 
-        def _chunked_eval_loss(dataset: Dataset, chunk: int = 128) -> float | None:
+        def _chunked_eval_loss(dataset: Dataset, chunk: int = 64) -> float | None:
             """Mean token-level NLL over *dataset*, computed in chunks."""
             import torch
 
@@ -359,20 +374,18 @@ def main() -> None:
                         continue
                     causal = mdl.get_base_model()  # Qwen3ForCausalLM (fast)
                     hidden = causal.model(input_ids=ids).last_hidden_state[0]  # [seq, hidden]
-                    losses: list[torch.Tensor] = []
                     for start in range(0, hidden.shape[0] - 1, chunk):
                         end = min(start + chunk, hidden.shape[0] - 1)
                         # position t predicts token t+1
                         logits = causal.lm_head(hidden[start:end])
                         targets = ids[0, start + 1:end + 1]
-                        losses.append(
-                            torch.nn.functional.cross_entropy(
-                                logits.float(), targets, reduction="none",
-                            )
+                        loss_sum = torch.nn.functional.cross_entropy(
+                            logits.float(), targets, reduction="sum",
                         )
-                    token_losses = torch.cat(losses)
-                    total_nll += float(token_losses.sum())
-                    total_tokens += int(token_losses.numel())
+                        total_nll += float(loss_sum)
+                        total_tokens += int(targets.numel())
+                        del logits, targets, loss_sum
+                    del hidden, ids
             mdl.train()
             return total_nll / total_tokens if total_tokens else None
 
@@ -431,7 +444,7 @@ def main() -> None:
         )
 
         callbacks: list[Any] = []
-        if val_data:
+        if eval_dataset is not None:
             callbacks.append(
                 EvalEarlyStoppingCallback(
                     patience=args.early_stopping_patience,
@@ -494,7 +507,7 @@ def main() -> None:
         # Chunked path for the same memory reasons as validation.
         test_metrics: dict[str, float] | None = None
         if test_dataset is not None:
-            logger.info("Evaluating the held-out test split (%d examples)...", len(test_data))
+            logger.info("Evaluating the held-out test split (%d examples)...", test_count)
             test_loss = _chunked_eval_loss(test_dataset)
             test_metrics = {}
             if test_loss is not None:
@@ -507,8 +520,6 @@ def main() -> None:
         # Free training state before exporting. The merged-16bit save
         # dequantizes base weights on GPU; leftover optimizer/gradients and
         # allocator cache OOM an 8 GB card during the merge.
-        import gc
-
         del trainer
         gc.collect()
 
@@ -553,18 +564,18 @@ def main() -> None:
             "experiment": {
                 "skip_merged_save": args.skip_merged_save,
             },
-            "dataset_examples": len(dataset),
+            "dataset_examples": train_count,
             "train_loss_final": train_loss_final,
             "train_loss_history": train_loss_history,
             "eval_loss_history": eval_loss_history,
             "splits": {
-                "train": len(dataset),
-                "val": len(val_data),
-                "test": len(test_data),
-                "val_source": str(args.val_dataset) if val_data else "fallback-carve",
-                "test_source": str(args.test_dataset) if test_data else "fallback-carve",
+                "train": train_count,
+                "val": val_count,
+                "test": test_count,
+                "val_source": str(args.val_dataset) if eval_dataset is not None else "fallback-carve",
+                "test_source": str(args.test_dataset) if test_dataset is not None else "fallback-carve",
             },
-            "early_stopping_patience": args.early_stopping_patience if val_data else None,
+            "early_stopping_patience": args.early_stopping_patience if eval_dataset is not None else None,
             "early_stopped": early_stopped,
             "train_seconds": round(train_seconds, 1),
             "output_dir": str(output_dir),

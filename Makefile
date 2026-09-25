@@ -9,6 +9,11 @@ DATASET_EXTRA_TURNS := \
 	data/processed/ada_ast_units.jsonl \
 	data/processed/contract_mutations.jsonl
 
+DATASET_WORKERS ?= 1
+MAX_NEW_TOKENS ?= 512
+MAX_PROMPT_CHARS ?= 12000
+TRAIN_FLAGS ?= --skip-merged-save
+
 .PHONY: $(DATASET_EXTRA_TURNS)
 
 $(DATASET_EXTRA_TURNS):
@@ -37,8 +42,8 @@ help: ## Show this help message
 	@echo "                      plus parser outputs (docs chunks, Ada AST units) when present"
 	@echo "  make fetch-sources - Fetch source repos into the archive cache (data/raw_repos)"
 	@echo "                       libadalang/structural Ada AST extraction into JSONL"
-	@echo "  make train         - Run QLoRA fine-tuning with Unsloth on the local base model"
-	@echo "  make generate      - Generate Ada code with the fine-tuned and base models"
+	@echo "  make train         - Run 8 GB-safe QLoRA fine-tuning with Unsloth (adapter-only by default)"
+	@echo "  make generate      - Generate Ada code with bounded memory settings"
 	@echo "  make eval          - Run baseline evaluation with BLEU + ada-eval metrics"
 	@echo "                      (compilation, test, SPARK proof; base model comparison)"
 	@echo "  make eval-pipeline - Run full ada-eval BUILD/TEST/PROVE pipeline"
@@ -92,15 +97,17 @@ build-dataset: parse-data gen-contracts ## Build the training dataset from cache
 		--guidance-dir data/raw_repos/agent-sh/ada-spark \
 		--guidance-dir data/raw_repos/AminBlg/SimpleEnglish \
 		--guidance-dir data/raw_repos/AdaCore/skills \
+		--workers $(DATASET_WORKERS) \
 		$(foreach f,$(DATASET_EXTRA_TURNS),--extra-turns $(f))
 
 train: ## Run QLoRA fine-tuning with Unsloth on the local base model (models/qwen3-8b); full stdout captured to training.log
 	@set -o pipefail; \
 	HF_HUB_DISABLE_XET=1 HF_DEACTIVATE_ASYNC_LOAD=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True $(EXPORT_HEADERS) \
-		uv run python -u training/train_unsloth.py 2>&1 | tee -a training.log
+		uv run python -u training/train_unsloth.py $(TRAIN_FLAGS) 2>&1 | tee -a training.log
 
 generate: ## Generate Ada code with the fine-tuned and base (local download) models
-	uv run python eval/generate.py --model outputs/q3as --base-model models/qwen3-8b
+	uv run python eval/generate.py --model outputs/q3as --base-model models/qwen3-8b \
+		--max-new-tokens $(MAX_NEW_TOKENS) --max-prompt-chars $(MAX_PROMPT_CHARS)
 
 eval: ## Run baseline evaluation (BLEU + compilation/test/SPARK metrics, base comparison)
 	uv run python eval/baseline_eval.py --model outputs/q3as --base-model models/qwen3-8b
@@ -141,8 +148,8 @@ validate-defects: ## Compile-check dataset defect pairs with the Alire GNAT
 	uv run python scripts/validate_defects.py --source data/raw_repos/bladeacer/adacovex --source data/raw_repos/bladeacer/Ada_CRDT --source data/raw_repos/AdaCore/ada-eval --source data/raw_repos/RobertBoettcherSF/Ada-Algorithms
 
 parse-data: fetch-sources ## Run the parser modules into data/processed/ extra JSONL
-	uv run python data/processing_scripts/parse_docs.py --output data/processed/docs_chunks.jsonl
-	uv run python data/processing_scripts/parse_ada_ast.py --output data/processed/ada_ast_units.jsonl
+	uv run python data/processing_scripts/parse_docs.py --output data/processed/docs_chunks.jsonl --workers $(DATASET_WORKERS)
+	uv run python data/processing_scripts/parse_ada_ast.py --output data/processed/ada_ast_units.jsonl --workers $(DATASET_WORKERS)
 
 gen-contracts: ## Generate gnatprove-verified synthetic contract turns (cached; FORCE=1 to regenerate)
 	uv run python scripts/gen_contract_mutations.py $(if $(FORCE),--force,)

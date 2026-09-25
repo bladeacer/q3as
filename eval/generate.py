@@ -49,10 +49,13 @@ DEFAULT_BASE_MODEL = Path("models/qwen3-8b")
 _ADA_EVAL_SRC = Path(__file__).resolve().parents[1].parent / "ada-eval" / "src"
 if str(_ADA_EVAL_SRC) not in sys.path:
     sys.path.insert(0, str(_ADA_EVAL_SRC))
+_PROCESSING_SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "data" / "processing_scripts"
+if str(_PROCESSING_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_PROCESSING_SCRIPTS_DIR))
 
 # Long prompts push up KV-cache and activation memory at generation time; on
 # a 7 GB host RAM / 8 GB VRAM box they are truncated before tokenization.
-MAX_PROMPT_CHARS = 24000
+MAX_PROMPT_CHARS = 12000
 
 
 def parse_args() -> argparse.Namespace:
@@ -76,8 +79,12 @@ def parse_args() -> argparse.Namespace:
         help="Max samples per dataset.",
     )
     parser.add_argument(
-        "--max-new-tokens", type=int, default=1024,
+        "--max-new-tokens", type=int, default=512,
         help="Max new tokens per sample.",
+    )
+    parser.add_argument(
+        "--max-prompt-chars", type=int, default=MAX_PROMPT_CHARS,
+        help="Maximum prompt characters sent to the model.",
     )
     parser.add_argument(
         "--temperature", type=float, default=0.7,
@@ -117,7 +124,8 @@ def _worker_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model-label", type=str, required=True)
     parser.add_argument("--dataset", type=str, default=None)
     parser.add_argument("--max-samples", type=int, default=20)
-    parser.add_argument("--max-new-tokens", type=int, default=1024)
+    parser.add_argument("--max-new-tokens", type=int, default=512)
+    parser.add_argument("--max-prompt-chars", type=int, default=MAX_PROMPT_CHARS)
     parser.add_argument("--temperature", type=float, default=0.7)
     parser.add_argument("--enable-thinking", action="store_true", default=False)
     parser.add_argument("--seed", type=int, default=42)
@@ -363,9 +371,9 @@ def load_model(model_path: Path, base_model_path: Path):
       on load.
 
     4-bit loading keeps the whole 8B model in GPU VRAM (~5.5 GB) instead
-    of spilling bf16 weights into system RAM, which OOMs hosts with less
-    RAM than a bf16 copy of the model needs. ``device_map="auto"`` is
-    deliberately avoided: it offloads overflow weights to system RAM.
+    of leaving it on CPU, which OOMs hosts with less RAM than a bf16 copy
+    of the model needs. An explicit device map prevents automatic CPU
+    placement and avoids CPU offload.
     """
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
@@ -377,9 +385,14 @@ def load_model(model_path: Path, base_model_path: Path):
         bnb_4bit_use_double_quant=True,
     )
 
-    tokenizer = AutoTokenizer.from_pretrained(str(model_path), trust_remote_code=True)
     model: Any
     adapter_dir = model_path / "lora_adapter"
+    tokenizer_path = adapter_dir if (adapter_dir / "tokenizer.json").is_file() else model_path
+    tokenizer = AutoTokenizer.from_pretrained(str(tokenizer_path), trust_remote_code=True)
+    load_options: dict[str, Any] = {
+        "low_cpu_mem_usage": True,
+        "device_map": 0 if torch.cuda.is_available() else None,
+    }
     if adapter_dir.is_dir():
         from peft import PeftModel
 
@@ -390,6 +403,7 @@ def load_model(model_path: Path, base_model_path: Path):
             str(base_model_path),
             trust_remote_code=True,
             quantization_config=bnb_config,
+            **load_options,
         )
         model = PeftModel.from_pretrained(base_model, str(adapter_dir))
     else:
@@ -405,6 +419,7 @@ def load_model(model_path: Path, base_model_path: Path):
             str(model_path),
             trust_remote_code=True,
             quantization_config=bnb_config,
+            **load_options,
         )
     model.eval()
     return model, tokenizer
@@ -466,6 +481,7 @@ def generate_batch(
     temperature: float,
     enable_thinking: bool = False,
     system_prompt: str | None = None,
+    max_prompt_chars: int = MAX_PROMPT_CHARS,
 ) -> list[str]:
     """Generate code for a batch of prompts using the model's chat template."""
     import torch
@@ -474,7 +490,7 @@ def generate_batch(
         try:
             # Cap prompt size: huge prompts blow up KV-cache and host memory
             # on small-RAM hosts.
-            prompt = prompt[:MAX_PROMPT_CHARS]
+            prompt = prompt[:max_prompt_chars]
             messages = []
             if system_prompt:
                 messages.append({"role": "system", "content": system_prompt})
@@ -535,6 +551,7 @@ def run_generation_for_model(
             model, tokenizer, prompts,
             args.max_new_tokens, args.temperature, args.enable_thinking,
             system_prompt=args.system_prompt,
+            max_prompt_chars=getattr(args, "max_prompt_chars", MAX_PROMPT_CHARS),
         )
         elapsed_ms = int((time.perf_counter() - start) * 1000)
 
@@ -648,6 +665,7 @@ def main() -> None:
             "--model-label", label,
             "--max-samples", str(args.max_samples),
             "--max-new-tokens", str(args.max_new_tokens),
+            "--max-prompt-chars", str(args.max_prompt_chars),
             "--temperature", str(args.temperature),
         ]
         if args.dataset:

@@ -14,7 +14,7 @@ What each part of q3as does and how the pieces connect.
 4. `make build-dataset` walks the cached Ada source trees, ingests the
    parser outputs, and emits `data/processed/dataset.jsonl` plus
    `dataset_{train,val,test}.jsonl` (chat-format turns).
-5. `make train` runs QLoRA fine-tuning (Unsloth, 2048-token window, LoRA
+5. `make train` runs QLoRA fine-tuning (Unsloth, 1024-token window, LoRA
    adapters on Qwen3-8B) with seeded, val-monitored training and early
    stopping; checkpoints and a training summary (train/val/test loss
    histories) land in `outputs/q3as/`.

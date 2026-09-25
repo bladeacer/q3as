@@ -108,7 +108,13 @@ present):
 | `make eval` (BLEU + compliance) | ~1 min |
 | `make eval-report` | seconds |
 
-`make all` takes roughly 5 hours. Notes:
+`make all` takes roughly 5 hours. The default pipeline is tuned for an 8 GB
+GPU and an 8 GB host: dataset preparation uses one worker, training uses a
+1024-token window and one tokenization process, the adapter-only output skips
+the merged 16-bit export, and generation uses 12,000 prompt characters and
+512 new tokens per model. Override `DATASET_WORKERS`, `MAX_PROMPT_CHARS`,
+`MAX_NEW_TOKENS`, or `TRAIN_FLAGS` on the `make` command line when more
+memory is available. Notes:
 
 - Early stopping cannot fire before step 550 at the default cadence
   (patience 10, eval every 50 steps, 500 max steps), so plan for the

@@ -153,6 +153,10 @@ splits honest:
 - **Seed 42** everywhere: `SFTConfig(seed=...)`, LoRA `random_state`,
   dataset shuffling. Content-derived randomness in the builder is
   deterministic too, so dataset bytes are identical for any worker count.
+- **8 GB host profile**: the training window is 1024 tokens. Dataset
+  tokenization uses one process, the data loader uses no workers, and
+  checkpoints omit optimizer state. The `make` pipeline also uses one
+  dataset worker and saves the LoRA adapter without a merged 16-bit export.
 - **Splits**: trains on `dataset_train.jsonl` by default; val loss is
   computed every 50 steps (`--eval-steps`); a fallback seeded carve-out
   protects custom single-file datasets.
