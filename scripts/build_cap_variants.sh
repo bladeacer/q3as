@@ -20,7 +20,6 @@ for cap in "${CAPS[@]}"; do
     --extra-input-dir data/raw_repos/bladeacer/adacovex \
     --extra-input-dir data/raw_repos/bladeacer/Ada_CRDT \
      --extra-input-dir data/raw_repos/ViMoBr/Ada-83-TLALOC \
-     --extra-input-dir data/raw_repos/AdaCore/ada-eval \
      --extra-input-dir data/raw_repos/RobertBoettcherSF/Ada-Algorithms \
     --doc-dir data/raw_repos/AdaCore/learn \
     --doc-dir data/raw_repos/AdaCore/training_material \

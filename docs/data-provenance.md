@@ -19,7 +19,7 @@ resolves as a fallback, but nothing creates it anymore.
 | [adacovex](https://github.com/bladeacer/adacovex) | `data/raw_repos/bladeacer/adacovex` | Ada/SPARK source with contract specs (code pairs, defect pairs, AST turns) | Apache-2.0 |
 | [Ada_CRDT](https://github.com/bladeacer/Ada_CRDT) | `data/raw_repos/bladeacer/Ada_CRDT` | Spec/body pairs for diversity | MIT |
 | [Ada-83-TLALOC](https://github.com/ViMoBr/Ada-83-TLALOC) | `data/raw_repos/ViMoBr/Ada-83-TLALOC` | Ada 83-era source (legacy patterns). Training use explicitly permitted by the author ([forum post](https://forum.ada-lang.io/t/fine-tuning-8b-ai-model-on-ada-spark/4746/3)) | GPL-3.0-or-later w/ GCC runtime exception; tests CC-BY-SA-4.0 |
-| [ada-eval](https://github.com/AdaCore/ada-eval) | `data/raw_repos/AdaCore/ada-eval` | **Eval-proper only** (see below). Sample code walked by parsers, guarded; also the uv path dependency for eval tooling | Apache-2.0 |
+| [ada-eval](https://github.com/AdaCore/ada-eval) | `data/raw_repos/AdaCore/ada-eval` | **Eval-proper only** (see below). Used for benchmark generation/evaluation and the guard; the training pipeline never passes it as an input; also the uv path dependency for eval tooling | Apache-2.0 |
 | [AdaCore/learn](https://github.com/AdaCore/learn) | `data/raw_repos/AdaCore/learn` | Course material: doc-QA and heading-chunked doc sections | CC-BY-4.0 |
 | [AdaCore/training_material](https://github.com/AdaCore/training_material) | `data/raw_repos/AdaCore/training_material` | AdaCore training courses (RST): doc-QA and heading-chunked doc sections. Description follows the repo README: collection of Ada/SPARK teaching courses in ReStructured Text | CC-BY-4.0 |
 | [agent-sh/ada-spark](https://github.com/agent-sh/ada-spark) | `data/raw_repos/agent-sh/ada-spark` | Current-toolchain guidance in system prompts | MIT |
@@ -46,8 +46,8 @@ of it would let the model memorize the benchmark.
 The sample-authoring recipe in the ada-eval README ("Adding a new Sample")
 is documentation we follow when extending the benchmark, not data.
 
-Parser targets do include the cached ada-eval tree for AST and contract
-turns; every record derived from that tree is subject to the guard below.
+Default parser targets do not include the cached ada-eval tree. The guard
+still scans its data directory before records are deduplicated and split.
 
 ## The eval guard
 

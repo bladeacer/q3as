@@ -27,8 +27,6 @@ import time
 from pathlib import Path
 from typing import Any
 
-from transformers import TrainerCallback
-
 os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
 # transformers v5 materializes tensors on GPU before bitsandbytes quantization
 # (https://github.com/huggingface/transformers issues tracked upstream), OOMing
@@ -38,6 +36,9 @@ os.environ.setdefault("HF_DEACTIVATE_ASYNC_LOAD", "1")
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 # Import unsloth before transformers/trl so its patches apply.
 os.environ.setdefault("UNSLOTH_RETURN_LOGITS", "1")
+
+import unsloth  # noqa: F401
+from transformers import TrainerCallback
 
 logger = logging.getLogger("q3as_train")
 
@@ -266,7 +267,6 @@ def main() -> None:
     )
 
     try:
-        import unsloth  # noqa: F401  (imported first so its patches apply)
         from unsloth import FastLanguageModel, is_bfloat16_supported
 
         bfloat_available = is_bfloat16_supported()

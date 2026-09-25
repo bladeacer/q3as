@@ -2626,8 +2626,7 @@ def build_dataset(
 ) -> int:
     """Run the full ingestion -> pairing -> sanitization -> JSONL pipeline.
 
-    Processes all input directories plus extra input directories
-    (adacovex, Ada_CRDT, TLALOC, ada-eval), extracts Ada code blocks from
+    Processes the supplied input directories, extracts Ada code blocks from
     documentation sources (learn), embeds agent-skill guidance
     (ada-spark, SimpleEnglish, AdaCore skills) into system prompts, and
     generates correct-vs-wrong defect pairs plus toolchain QA turns.

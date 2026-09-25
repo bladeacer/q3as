@@ -101,9 +101,9 @@ def require(dir_name: str) -> Path:
 
 
 def default_code_dirs() -> list[Path]:
-    """Ada code sources: existing dirs among adacovex, Ada_CRDT, TLALOC, ada-eval, Ada-Algorithms."""
+    """Ada training sources: existing dirs among adacovex, Ada_CRDT, TLALOC, and Ada-Algorithms."""
     dirs: list[Path] = []
-    for name in (ADACOVEX, ADA_CRDT, ADA_83_TLALOC, ADA_EVAL, ADA_ALGORITHMS):
+    for name in (ADACOVEX, ADA_CRDT, ADA_83_TLALOC, ADA_ALGORITHMS):
         resolved = resolve(name)
         if resolved is not None:
             dirs.append(resolved)

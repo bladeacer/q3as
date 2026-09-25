@@ -33,7 +33,7 @@ help: ## Show this help message
 	@echo "  make sync          - Install/update all dependencies via uv sync"
 	@echo "  make download      - Download and sanity-check the Qwen3-8B model (Qwen/Qwen3-8B -> models/qwen3-8b)"
 	@echo "  make build-dataset - Build the training dataset from Ada source trees"
-	@echo "                      (cache: adacovex, Ada_CRDT, Ada-83-TLALOC, ada-eval + the RobertBoettcherSF Ada-Algorithms monorepo)"
+	@echo "                      (cache: adacovex, Ada_CRDT, Ada-83-TLALOC, and the RobertBoettcherSF Ada-Algorithms monorepo)"
 	@echo "                      plus parser outputs (docs chunks, Ada AST units) when present"
 	@echo "  make fetch-sources - Fetch source repos into the archive cache (data/raw_repos)"
 	@echo "                       libadalang/structural Ada AST extraction into JSONL"
@@ -75,7 +75,7 @@ check-model: ## Check if model exists; download if missing
 	fi
 
 build-dataset: parse-data gen-contracts ## Build the training dataset from cached Ada source trees
-	## Ada code sources (cache): adacovex, Ada_CRDT, Ada-83-TLALOC, ada-eval,
+	## Ada code sources (cache): adacovex, Ada_CRDT, Ada-83-TLALOC,
 	## plus the RobertBoettcherSF Ada-Algorithms monorepo (MIT).
 	## Doc sources (cache): learn, training_material (CC-BY-4.0). Guidance in system
 	## prompts: ada-spark (MIT), SimpleEnglish (MIT, STE rules), skills (Apache-2.0).
@@ -86,7 +86,6 @@ build-dataset: parse-data gen-contracts ## Build the training dataset from cache
 		--extra-input-dir data/raw_repos/bladeacer/adacovex \
 		--extra-input-dir data/raw_repos/bladeacer/Ada_CRDT \
 		--extra-input-dir data/raw_repos/ViMoBr/Ada-83-TLALOC \
-		--extra-input-dir data/raw_repos/AdaCore/ada-eval \
 		--extra-input-dir data/raw_repos/RobertBoettcherSF/Ada-Algorithms \
 		--doc-dir data/raw_repos/AdaCore/learn \
 		--doc-dir data/raw_repos/AdaCore/training_material \

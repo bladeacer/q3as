@@ -47,7 +47,8 @@ directory (formerly the `../ada-eval` sibling) is eval-proper
 (the 19 benchmark samples and their canonical solutions); the guard
 (`data/processing_scripts/eval_guard.py`) hashes every eval subprogram and
 prompt in normalized and alpha-renamed structural forms and
-`build_dataset` drops any matching record group before splitting.
+`build_dataset` does not pass ada-eval as a training source and still drops
+any matching record group before splitting.
 `make check-integrity` must exit 0 after any dataset change. Never train
 on `canonical_solution`, `base/`, `tests/`, `prompt.md`, or compacted
 records from ada-eval.

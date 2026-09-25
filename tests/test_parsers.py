@@ -14,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "data" / "processin
 
 import parse_ada_ast as pa
 import parse_docs as pd
+import source_paths as sp
 
 # --------------------------------------------------------------------------- #
 # parse_docs: markdown and rst splitting
@@ -214,3 +215,24 @@ class TestPairAndTurns:
         records = pa.build_ada_ast_turns(specs, bodies, [])
         for record in records:
             json.dumps(record)
+
+
+def test_training_sources_exclude_ada_eval(monkeypatch, tmp_path: Path):
+    fake_sources = {
+        name: tmp_path / name
+        for name in (sp.ADACOVEX, sp.ADA_CRDT, sp.ADA_83_TLALOC, sp.ADA_EVAL, sp.ADA_ALGORITHMS)
+    }
+    monkeypatch.setattr(sp, "resolve", fake_sources.get)
+
+    assert [path.name for path in sp.default_code_dirs()] == [
+        sp.ADACOVEX,
+        sp.ADA_CRDT,
+        sp.ADA_83_TLALOC,
+        sp.ADA_ALGORITHMS,
+    ]
+    assert [path.name for path in sp.default_eval_sources()] == [
+        sp.ADACOVEX,
+        sp.ADA_CRDT,
+        sp.ADA_EVAL,
+        sp.ADA_ALGORITHMS,
+    ]
