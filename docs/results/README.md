@@ -1,6 +1,6 @@
 # Evaluation Results
 
-Per-version summaries of every `make eval` / `make eval-pipeline` run. Metrics JSON lives beside each markdown file. Regenerate with `make eval-report` after a run; the version comes from `alire.toml`.
+Per-version summaries of every `make eval` / `make eval-pipeline` run. Metrics JSON lives beside each markdown file. Regenerate with `make eval-report` after a run; the version comes from [`alire.toml`](../../alire.toml).
 
 ## All versions
 
@@ -22,4 +22,4 @@ Per-version summaries of every `make eval` / `make eval-pipeline` run. Metrics J
 
 _Version order: newest first._
 
-Navigation: [project README](../../README.md) · [architecture](../architecture.md) · [evaluation guide](../evaluation.md)
+Navigation: [project README](../../README.md) · [docs index](../README.md) · [changelog index](../changelogs/index.md) · [results index](README.md)

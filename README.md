@@ -2,11 +2,17 @@
 
 Specialized fine-tuning initiative targeting the full Ada language spectrum: **Ada 83, Ada 95, Ada 2005, Ada 2012, SPARK 2014, and Ada 2022**.
 
-`q3as` ingests Ada source trees (`.ads`, `.adb`, `.gpr`, `alire.toml`), pairs specification and implementation files, detects the target Ada standard via heuristic rules, and produces a standardized JSONL dataset formatted with the OpenAI/Qwen chat template (`system`, `user`, `assistant` messages) for QLoRA fine-tuning with Unsloth on 8 GB VRAM.
+`q3as` ingests Ada source trees (`.ads`, `.adb`, `.gpr`,
+[`alire.toml`](alire.toml)), pairs specification and implementation files,
+detects the target Ada standard via heuristic rules, and produces a standardized
+JSONL dataset formatted with the OpenAI/Qwen chat template (`system`, `user`,
+`assistant` messages) for QLoRA fine-tuning with Unsloth on 8 GB VRAM.
 
 Every generated explanation follows **ASD-STE100 Simplified Technical English**: active voice, short sentences, no em-dashes, one word one meaning, technical terms defined at first use.
 
 ## Documentation
+
+Full index, with a reading order: [docs/README.md](docs/README.md).
 
 | Doc | Contents |
 |---|---|
@@ -15,8 +21,9 @@ Every generated explanation follows **ASD-STE100 Simplified Technical English**:
 | [Data provenance](docs/data-provenance.md) | Data sources, licenses, eval-integrity guard |
 | [Toolchain setup](docs/toolchain-setup.md) | Alire management, vendored index for outdated `alr` |
 | [Evaluation](docs/evaluation.md) | Benchmark, metrics, interpretation, running |
+| [Docs index](docs/README.md) | Every documentation page, and how they fit together |
 | [Results index](docs/results/README.md) | Per-version eval summaries and the last-3 comparison table |
-| [Changelog](CHANGELOG.md) | What changed in each version |
+| [Changelog index](docs/changelogs/index.md) | What changed in each version, one file per release |
 
 ## Project Credits
 
@@ -34,7 +41,14 @@ Core sources (fetched into the local archive cache `data/raw_repos/<owner>/<repo
 - **[AminBlg/SimpleEnglish](https://github.com/AminBlg/SimpleEnglish)** - ASD-STE100-style writing skill; governs all generated explanations. *(MIT)*
 - **[AdaCore/skills](https://github.com/AdaCore/skills)** - Official AdaCore toolchain skills (gnatprove, alire, gnatdoc, gnattest, gnatfuzz); become toolchain QA turns. *(Apache-2.0)*
 
-- **[RobertBoettcherSF/Ada-Algorithms](https://github.com/RobertBoettcherSF/Ada-Algorithms)** - A single monorepo of the author's Ada/SPARK algorithm implementations (distributed systems, graph algorithms, image processing, compression, SPARK-verified sheets, parsers, and more), organized into category directories. *(MIT, see the repository's `LICENSE`)* - the author has approved training use. That approval is not recorded in the repository: the README carries no LLM-usage disclosure, so keep the provenance note here rather than looking for a citation in the source.
+- **[RobertBoettcherSF/Ada-Algorithms](https://github.com/RobertBoettcherSF/Ada-Algorithms)**
+  - A single monorepo of the author's Ada/SPARK algorithm implementations
+  (distributed systems, graph algorithms, image processing, compression,
+  SPARK-verified sheets, parsers, and more), organized into category
+  directories. *(MIT, see that repository's `LICENSE`)* - the author
+  has approved training use. That approval is not recorded in the repository:
+  the README carries no LLM-usage disclosure, so keep the provenance note here
+  rather than looking for a citation in the source.
 
 ## Quick Start
 
@@ -49,10 +63,11 @@ Core sources (fetched into the local archive cache `data/raw_repos/<owner>/<repo
 Or via Make: `make setup`.
 
 The bootstrap fetches the source repositories into the local archive cache
-(`data/raw_repos/`, gitignored), creates `.env` from `.env.dev`, installs
-dependencies with `uv sync`, and (on distributions with an outdated `alr`)
-registers the vendored Alire index so `gnatprove` 16.x and `gnatformat_bin`
-26.x resolve (see [docs/toolchain-setup.md](docs/toolchain-setup.md)).
+(`data/raw_repos/`, gitignored), creates `.env` from [`.env.dev`](.env.dev),
+installs dependencies with `uv sync`, and (on distributions with an outdated
+`alr`) registers the vendored Alire index so `gnatprove` 16.x and
+`gnatformat_bin` 26.x resolve (see
+[docs/toolchain-setup.md](docs/toolchain-setup.md)).
 
 Source repos are cached outside version control on purpose: the pipeline
 only reads their code and docs as training data, so committing copies would
@@ -132,7 +147,12 @@ memory is available. Notes:
 
 q3as downloads the **official [`Qwen/Qwen3-8B`](https://huggingface.co/Qwen/Qwen3-8B)** checkpoint. Unsloth is the training framework only (patched kernels and QLoRA); the weights are Qwen's original release, never an unsloth-provisioned copy. If the repo requires accepting a license, you need a Hugging Face access token.
 
-The downloaded base model lives at `models/qwen3-8b` and is the single source of truth for the pipeline: training (`train_unsloth.py`), generation (`generate.py`), and evaluation (`baseline_eval.py`) all default to that local copy of `Qwen/Qwen3-8B`, so the same downloaded weights are used end to end.
+The downloaded base model lives at `models/qwen3-8b` and is the single source of
+truth for the pipeline: training
+([`train_unsloth.py`](training/train_unsloth.py)), generation
+([`generate.py`](eval/generate.py)), and evaluation
+([`baseline_eval.py`](eval/baseline_eval.py)) all default to that local copy of
+`Qwen/Qwen3-8B`, so the same downloaded weights are used end to end.
 
 1. Create a token at [https://huggingface.co/settings/tokens](https://huggingface.co/settings/tokens)
 2. Copy the placeholder environment file:
@@ -142,7 +162,8 @@ The downloaded base model lives at `models/qwen3-8b` and is the single source of
 3. Edit `.env` and replace `your_huggingface_token_here` with your actual token
 4. The `.env` file is git-ignored, so your token will not be committed
 
-The token is loaded automatically from `.env` when running `download_model.py`. You can also set it manually:
+The token is loaded automatically from `.env` when running
+[`download_model.py`](training/download_model.py). You can also set it manually:
 
 ```bash
 export HF_TOKEN="your_huggingface_token_here"

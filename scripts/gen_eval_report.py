@@ -49,6 +49,14 @@ TRAINING_SUMMARY = ROOT / "outputs" / "q3as" / "training_summary.json"
 
 MODELS = {"base_qwen3-8b": "base", "fine_tuned": "fine-tuned"}
 
+# Same navigation footer on every page under docs/, so a reader can reach the
+# docs index, the changelog index and the results index from any of them. The
+# paths are relative to docs/results/, where both generated file kinds live.
+NAV_FOOTER = (
+    "Navigation: [project README](../../README.md) · [docs index](../README.md)"
+    " · [changelog index](../changelogs/index.md) · [results index](README.md)"
+)
+
 
 # --------------------------------------------------------------------------- #
 # Metric extraction
@@ -428,6 +436,8 @@ def render_markdown(version: str, data: dict[str, Any]) -> str:
     lines.append("")
     lines.append("[\u2190 Back to results index](README.md)")
     lines.append("")
+    lines.append(NAV_FOOTER)
+    lines.append("")
     return "\n".join(lines)
 
 
@@ -444,7 +454,8 @@ def render_index(versions: list[dict[str, Any]]) -> str:
     lines.append(
         "Per-version summaries of every `make eval` / `make eval-pipeline` run. "
         "Metrics JSON lives beside each markdown file. Regenerate with "
-        "`make eval-report` after a run; the version comes from `alire.toml`."
+        "`make eval-report` after a run; the version comes from "
+        "[`alire.toml`](../../alire.toml)."
     )
     lines.append("")
     lines.append("## All versions")
@@ -498,7 +509,7 @@ def render_index(versions: list[dict[str, Any]]) -> str:
         lines.append("_Version order: newest first._")
         lines.append("")
 
-    lines.append("Navigation: [project README](../../README.md) · [architecture](../architecture.md) · [evaluation guide](../evaluation.md)")
+    lines.append(NAV_FOOTER)
     lines.append("")
     return "\n".join(lines)
 

@@ -10,18 +10,19 @@ configured for reproducibility and early stopping.
 | `code_pair` | Spec/body completion from real Ada trees |
 | `defect_pair` | Correct code next to a deliberately broken variant, with diagnosis, the GNAT-verified compiler message, and the fix |
 | `doc_qa` | Ada code blocks from AdaCore course material, with a completion answer and an STE-compliant explanation answer |
-| `doc_section` | Heading-chunked sections of course material (`parse_docs.py`) |
-| `ast_qa` | AST-derived turns (`parse_ada_ast.py`): body-from-spec completion, contract reading, **contract writing** (bare spec in, `Pre`/`Post`/`Global`/`Depends` declaration out), and constrained types. The parser emits these as `ast_impl`, `ast_contract`, `ast_contract_write` and `ast_type`; the builder records them under the single dataset kind `ast_qa`, which is the name that appears in `dataset_metadata.json` |
+| `doc_section` | Heading-chunked sections of course material ([`parse_docs.py`](../data/processing_scripts/parse_docs.py)) |
+| `ast_qa` | AST-derived turns ([`parse_ada_ast.py`](../data/processing_scripts/parse_ada_ast.py)): body-from-spec completion, contract reading, **contract writing** (bare spec in, `Pre`/`Post`/`Global`/`Depends` declaration out), and constrained types. The parser emits these as `ast_impl`, `ast_contract`, `ast_contract_write` and `ast_type`; the builder records them under the single dataset kind `ast_qa`, which is the name that appears in `dataset_metadata.json` |
 | `toolchain_qa` | Question/answer turns from the AdaCore agent skills |
-| `contract_synth` | gnatprove-verified synthetic contract turns (`scripts/gen_contract_mutations.py`): contract writing, why-weakened-contracts-fail, and fix turns |
+| `contract_synth` | gnatprove-verified synthetic contract turns ([`scripts/gen_contract_mutations.py`](../scripts/gen_contract_mutations.py)): contract writing, why-weakened-contracts-fail, and fix turns |
 | `ast_defect` / `variant` | Defect and renamed-variant turns derived from ingested parser records (same split group as their source record) |
 
 ### How AST units are extracted
 
-`parse_ada_ast.py` has two interchangeable backends behind one record
-shape. It uses **libadalang** when the shared library is present
-(`make ast-deps`, see [toolchain setup](toolchain-setup.md)) and its
-**structural scanner** otherwise, so the dataset builds either way.
+[`parse_ada_ast.py`](../data/processing_scripts/parse_ada_ast.py) has two
+interchangeable backends behind one record shape. It uses **libadalang** when
+the shared library is present (`make ast-deps`, see
+[toolchain setup](toolchain-setup.md)) and its **structural scanner** otherwise,
+so the dataset builds either way.
 
 The difference is precision, not reach. libadalang parses the unit, so it
 resolves the enclosing package through the real tree, separates
@@ -30,14 +31,14 @@ declarations from bodies, knows whether a spec is syntactically valid
 than by pattern matching. The scanner is regex-based and approximates the
 same fields.
 
-Both backends emit the same keys, and the turn kinds above do not change
-between them, so switching backends changes how many units are found but
-not what a turn looks like. Two behaviours are deliberate and shared:
-anonymous access types declare an unnamed dereference function, which has
-no name to train on and is skipped by both; and the aspect clause is parsed
-by the same `_extract_aspects` helper in both, so the `Pre`/`Post` maps
-match. `tests/test_parsers.py` pins the libadalang path when it is
-installed and asserts the two backends agree on subprogram names.
+Both backends emit the same keys, and the turn kinds above do not change between
+them, so switching backends changes how many units are found but not what a turn
+looks like. Two behaviours are deliberate and shared: anonymous access types
+declare an unnamed dereference function, which has no name to train on and is
+skipped by both; and the aspect clause is parsed by the same `_extract_aspects`
+helper in both, so the `Pre`/`Post` maps match.
+[`tests/test_parsers.py`](../tests/test_parsers.py) pins the libadalang path
+when it is installed and asserts the two backends agree on subprogram names.
 
 ## Natural-language variety, code exactness
 
@@ -51,10 +52,11 @@ purpose.
 
 ## Defect families (incorrect-example generation)
 
-`build_dataset.py` injects wrong-code variants next to correct code. Each
-family's claimed compiler message is GNAT-verified by
-`scripts/validate_defects.py` (`make validate-defects`); any family that
-"compiles clean" fails the check.
+[`build_dataset.py`](../data/processing_scripts/build_dataset.py) injects
+wrong-code variants next to correct code. Each family's claimed compiler message
+is GNAT-verified by
+[`scripts/validate_defects.py`](../scripts/validate_defects.py) (`make
+validate-defects`); any family that "compiles clean" fails the check.
 
 ## Parser outputs and provenance
 
@@ -101,9 +103,9 @@ turns, and doc-QA code all have broken counterparts where applicable.
 
 ## Splits and leakage control
 
-`build_dataset.py` writes `dataset.jsonl` plus
-`dataset_{train,val,test}.jsonl` (~90/5/5). Three mechanisms keep the
-splits honest:
+[`build_dataset.py`](../data/processing_scripts/build_dataset.py) writes
+`dataset.jsonl` plus `dataset_{train,val,test}.jsonl` (~90/5/5). Three
+mechanisms keep the splits honest:
 
 1. **Group-aware split** - every turn derived from one source unit (a code
    pair and its defect pairs, the doc sections of one file) stays in one
@@ -120,13 +122,14 @@ splits honest:
    breakdown (`exact`, `ast_structural_capped`) in the build metadata;
    duplicates cannot straddle splits because the first occurrence wins.
 
-   The cap value is evidence-based, not a guess. Two rounds of a
-   controlled experiment (`scripts/build_cap_variants.sh` +
-   `scripts/run_cap_experiment.sh`) trained identical 40-step QLoRA
-   probes (same seed, LR, batch 1x8, 10-step eval schedule) on datasets
-   that differ only in the cap; a probe takes 14 to 18 minutes per cap on
-   the reference GPU. Exact repro of both rounds: `STEPS=40 ACC=8
-   EVAL_STEPS=10`.
+   The cap value is evidence-based, not a guess. Two rounds of a controlled
+   experiment
+   ([`scripts/build_cap_variants.sh`](../scripts/build_cap_variants.sh) +
+   [`scripts/run_cap_experiment.sh`](../scripts/run_cap_experiment.sh)) trained
+   identical 40-step QLoRA probes (same seed, LR, batch 1x8, 10-step eval
+   schedule) on datasets that differ only in the cap; a probe takes 14 to 18
+   minutes per cap on the reference GPU. Exact repro of both rounds: `STEPS=40
+   ACC=8 EVAL_STEPS=10`.
 
    Round 1 screened all caps on a 40-example probe carved from the
    then-current cap-2 build's val/test splits:
@@ -149,10 +152,10 @@ splits honest:
    data (verified afterwards by content hash). That flatters whichever
    arm memorizes more of the probe, so the near-tie was not trustworthy.
 
-   Round 2 re-scored caps 2, 5, and 10 on a leak-free 121-record probe
-   (55 val + 66 test, every record content-checked absent from all three
-   arm train sets; built with `scripts/make_probe_splits.py`, run with
-   `OUT=outputs/capexp_big DATA_ROOT=outputs/capexp/datasets` plus the
+   Round 2 re-scored caps 2, 5, and 10 on a leak-free 121-record probe (55 val +
+   66 test, every record content-checked absent from all three arm train sets;
+   built with [`scripts/make_probe_splits.py`](../scripts/make_probe_splits.py),
+   run with `OUT=outputs/capexp_big DATA_ROOT=outputs/capexp/datasets` plus the
    probe overrides):
 
    | cap | val loss (step 40) | test loss | test ppl |
@@ -161,13 +164,13 @@ splits honest:
    | 5   | 1.052              | 0.935     | 2.55     |
    | **10** | **0.972**       | **0.846** | **2.33** |
 
-   Cap 10 wins by 8 to 10 percent on both splits, an order larger than
-   the round-1 spread, with the same ranking (5 above 2, 10 on top). The
-   default `AST_STRUCTURAL_CAP` is 10. Results CSVs:
-   `outputs/capexp/results.csv` (round 1) and `outputs/capexp_big/
-   results.csv` (round 2), regenerable and not committed; see
-   `scripts/collect_cap_results.py`. Per-cap summaries live in
-   `outputs/capexp{,_big}/run_cap*/`.
+   Cap 10 wins by 8 to 10 percent on both splits, an order larger than the
+   round-1 spread, with the same ranking (5 above 2, 10 on top). The default
+   `AST_STRUCTURAL_CAP` is 10. Results CSVs: `outputs/capexp/results.csv` (round
+   1) and `outputs/capexp_big/ results.csv` (round 2), regenerable and not
+   committed; see
+   [`scripts/collect_cap_results.py`](../scripts/collect_cap_results.py).
+   Per-cap summaries live in `outputs/capexp{,_big}/run_cap*/`.
 3. **Eval guard** - ada-eval benchmark content is dropped before splitting
    (see [Data provenance](data-provenance.md)).
 
@@ -175,7 +178,7 @@ splits honest:
 
 ## Training configuration
 
-`training/train_unsloth.py`:
+[`training/train_unsloth.py`](../training/train_unsloth.py):
 
 - **Seed 42** everywhere: `SFTConfig(seed=...)`, LoRA `random_state`,
   dataset shuffling. Content-derived randomness in the builder is
@@ -205,9 +208,10 @@ bit-deterministic; seed 42 gives functional, not bitwise, reproducibility.
 
 ## Result reporting: training metrics and trend analysis
 
-`make eval-report` (`scripts/gen_eval_report.py`) extends each
-`docs/results/result-vX.Y.Z.md` with a **Training metrics** section built
-from `outputs/q3as/training_summary.json`:
+`make eval-report`
+([`scripts/gen_eval_report.py`](../scripts/gen_eval_report.py)) extends each
+`docs/results/result-vX.Y.Z.md` with a **Training metrics** section built from
+`outputs/q3as/training_summary.json`:
 
 - the traditional loss table: train / validation (best) / test loss and
   perplexity,
@@ -237,3 +241,5 @@ make lint               # ruff + mypy over all project sources
 make validate-defects   # GNAT-compiles defect pairs, checks claimed messages
 make check-integrity    # fails if any split contains eval content
 ```
+
+Navigation: [project README](../README.md) · [docs index](README.md) · [changelog index](changelogs/index.md) · [results index](results/README.md)

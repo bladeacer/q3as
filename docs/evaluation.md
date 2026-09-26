@@ -14,12 +14,11 @@ framework (cached at `data/raw_repos/AdaCore/ada-eval`). Three sample sets are u
 | `spark_custom` | Custom SPARK verification challenges (2 samples) |
 | `spark_human_eval_silver` | HumanEval-style silver-standard tasks (4 samples) |
 
-Samples live in the cached ada-eval's
-`data/base/expanded/<dataset>/<sample>/` with a
-`base/` project (what the model may edit), a `solution/` project (the
-reference answer - `make eval` scores generations against it, and it must
-never appear in training data; see
-[Data provenance](data-provenance.md)), and a `tests/` project.
+Samples live in the cached ada-eval's `data/base/expanded/<dataset>/<sample>/`
+with a `base/` project (what the model may edit), a `solution/` project (the
+reference answer - `make eval` scores generations against it, and it must never
+appear in training data; see [Data provenance](data-provenance.md)), and a
+`tests/` project.
 
 These samples are the *entire* ada-eval corpus; there is no surplus data
 there for training.
@@ -49,8 +48,8 @@ nothing to score.
 
 ## Reading the results
 
-`eval/eval_pipeline.py` writes per-sample JSONL under
-`outputs/eval_results/<model>/<dataset>/` and a human-readable
+[`eval/eval_pipeline.py`](../eval/eval_pipeline.py) writes per-sample JSONL
+under `outputs/eval_results/<model>/<dataset>/` and a human-readable
 `outputs/comparison_report.txt`. When interpreting:
 
 - **n is small** (19 samples per model). Treat percentages as directional;
@@ -61,9 +60,9 @@ nothing to score.
   provable contracts.
 - **All-error PROVE rows** (result `error` instead of `unproved`) mean the
   harness never really ran gnatprove - a pipeline bug, not a model result.
-  `eval/ada_eval_common.py` classifies `proved_incorrectly` and
-  `subprogram_not_found` as unproved rather than as errors, so an incorrect
-  proof cannot inflate the proved rate.
+  [`eval/ada_eval_common.py`](../eval/ada_eval_common.py) classifies
+  `proved_incorrectly` and `subprogram_not_found` as unproved rather than as
+  errors, so an incorrect proof cannot inflate the proved rate.
 
 ## Running
 
@@ -77,3 +76,5 @@ make eval-pipeline   # ada-eval BUILD/TEST/PROVE -> outputs/eval_results/
 The pipeline resolves gnatprove/gprbuild through the Alire environment
 (see [Toolchain setup](toolchain-setup.md)) and seeds generation (seed 42)
 for reproducible sampling.
+
+Navigation: [project README](../README.md) · [docs index](README.md) · [changelog index](changelogs/index.md) · [results index](results/README.md)

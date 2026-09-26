@@ -26,123 +26,145 @@ which commands to use. Regenerate the tree below with `make agents-tree`.
    `outputs/generated_solutions/<label>/`.
 7. `make eval` and `make eval-pipeline` score them (BLEU, compilation, unit
    tests, SPARK proofs) and write reports to `outputs/`; `make eval-report`
-   writes the versioned summary to `docs/results/result-vX.Y.Z.md` (version
-   from `alire.toml`, bumped with `make bump-version`), including the
+   writes the versioned summary to `docs/results/result-vX.Y.Z.md` (version from
+   [`alire.toml`](alire.toml), bumped with `make bump-version`), including the
    train/val/test loss table and a training-trend verdict.
 
-End-user and developer documentation lives in `docs/` (architecture,
-datasets and training, data provenance, toolchain setup, evaluation);
-README links to it. Keep those pages current when behavior changes.
+End-user and developer documentation lives in [`docs/`](docs) (architecture,
+datasets and training, data provenance, toolchain setup, evaluation); README
+links to it. Keep those pages current when behavior changes.
 
 ## Data provenance and eval integrity
 
-**Full documentation: `docs/data-provenance.md` - keep it in sync.** When a
-new data source is added (new URL in `CORE_REPOS` of
-`scripts/fetch_repos.py`, new hub, new parser source), update that page's
-source table and license notes, then run `make check-integrity` before
-building. The same applies when the guard, the defect families, or the
-split logic change: update `docs/datasets-and-training.md`.
+**Full documentation: [`docs/data-provenance.md`](docs/data-provenance.md) -
+keep it in sync.** When a new data source is added (new URL in `CORE_REPOS` of
+[`scripts/fetch_repos.py`](scripts/fetch_repos.py), new hub, new parser source),
+update that page's source table and license notes, then run `make
+check-integrity` before building. The same applies when the guard, the defect
+families, or the split logic change: update
+[`docs/datasets-and-training.md`](docs/datasets-and-training.md).
 
 The contract in short: everything under the cached ada-eval's `data/`
-directory (formerly the `../ada-eval` sibling) is eval-proper
-(the 19 benchmark samples and their canonical solutions); the guard
-(`data/processing_scripts/eval_guard.py`) hashes every eval subprogram and
-prompt in normalized and alpha-renamed structural forms and
-`build_dataset` does not pass ada-eval as a training source and still drops
-any matching record group before splitting.
-`make check-integrity` must exit 0 after any dataset change. Never train
-on `canonical_solution`, `base/`, `tests/`, `prompt.md`, or compacted
+directory (formerly the `../ada-eval` sibling) is eval-proper (the 19 benchmark
+samples and their canonical solutions); the guard
+([`data/processing_scripts/eval_guard.py`](data/processing_scripts/eval_guard.py))
+hashes every eval subprogram and prompt in normalized and alpha-renamed
+structural forms and `build_dataset` does not pass ada-eval as a training source
+and still drops any matching record group before splitting. `make
+check-integrity` must exit 0 after any dataset change. Never train on
+`canonical_solution`, `base/`, `tests/`, `prompt.md`, or compacted
 records from ada-eval.
 
 ## Where the important files live
 
-- `data/processing_scripts/build_dataset.py` - the dataset builder. Discovers
-  and pairs Ada sources, sanitizes prose into Simplified Technical English
-  (STE), injects correct-vs-wrong defect pairs (seventeen families), distills
-  agent-skill guidance into system prompts, dedups (verbatim plus a cap of
-  `AST_STRUCTURAL_CAP = 10` on alpha-renamed AST-record shapes, chosen by a
-  controlled cap-tuning experiment, see docs/datasets-and-training.md), drops
-  empty-assistant records, and writes JSONL plus metadata with per-source
-  provenance.
-- `data/processing_scripts/source_paths.py` - resolves every source repo to
-  its cache directory (`data/raw_repos/<owner>/<repo>`, with the legacy
-  sibling location as fallback); no pipeline file hard-codes paths.
-- `data/processing_scripts/eval_guard.py` - eval-integrity guard. Hashes every
-  Ada subprogram and prompt in the cached ada-eval `data/` tree (normalized and
-  alpha-renamed structural forms) and drops any training record matching
-  them; `make check-integrity` fails if a split file contains eval content.
-- `data/processing_scripts/` - dataset helpers live beside the builder.
-- `training/download_model.py` - HF model download plus terminating sanity
-  checks (light by default; deep GPU check runs in a child process with a
-  timeout so the pipeline can never hang).
-- `training/train_unsloth.py` - QLoRA training script (Unsloth, 1024-token
-  window, single-process dataset tokenization, LoRA adapters on Qwen3-8B).
-- `eval/generate.py` - batch generation for the fine-tuned and base models.
-- `eval/baseline_eval.py` - reference-based scoring: joins the
-  `make generate` output to the ada-eval canonical solutions and reports
-  BLEU-4, exact match, file-set match, and standard compliance per model,
-  plus the ada-eval BUILD/TEST/PROVE tallies (`outputs/eval_results.json`).
-  Exits non-zero when there is nothing to score; it never scores the
-  training corpus.
-- `eval/ada_eval_common.py` - the single build/test/prove tally shared by
-  both eval modules and the report, plus the packed-dataset naming rules.
-  Do not reimplement it: a third divergent copy is what made the published
-  prove counts disagree with the comparison report.
-- `eval/eval_pipeline.py` - BUILD/TEST/PROVE comparison report between base
-  and fine-tuned models via ada-eval.
-- `scripts/validate_defects.py` - compiles the dataset's defect pairs with
-  the real GNAT and checks the claimed compiler messages. Exit code is the
-  contract: any "compiles clean" defect is a failure.
-- `scripts/fetch_repos.py` - archive-cache fetcher (HTTP tarballs, parallel,
-  cached; every repo in `CORE_REPOS` including the Ada-Algorithms monorepo).
-  `make fetch-sources` runs it.
-- `scripts/ada_env.sh` - runs any command inside the Alire toolchain
-  environment (`alr exec`); all Ada tool invocations go through it.
-- `scripts/alire_env.py` - Python side of the same: `find_tool("gnatprove")`
-  resolves binaries through the Alire environment for subprocess calls.
-- `scripts/build_libadalang.py` - builds and installs the shared
-  `libadalang.so` that the AST parser's ctypes wrapper dlopens
-  (`make ast-deps`). Resolves `alire-ast.toml` in the gitignored
-  `.alire-ast/` workspace and builds `ast.gpr` there, so the SPARK
-  toolchain in `.alire-dev/` is untouched. Optional: without it
-  `parse_ada_ast.py` uses its structural scanner.
-- `scripts/toolshims/unzip` - a Python `unzip` stand-in that `build_libadalang.py`
-  puts on PATH, because the libadalang chain ships `.zip` source archives and
-  `alr` would otherwise offer to install `unzip` with sudo.
-- `scripts/gen_agents_tree.py` - rewrites the file tree section below.
-- `alire.toml` / `alire-dev.toml` / `alire-ast.toml` - publishing, dev, and
-  AST manifests. Dev-only toolchain deps (gnatprove, gnatformat) live in the
-  dev manifest; `libadalang` lives in the AST manifest because only the
-  dataset parser needs it. `make bump-version` keeps all three in step.
-- `q3as-local-index/` - vendored Alire index (mirrors the crates q3as needs
-  from the community index branch `stable-1.4.0`, plus a patched
-  `gnatcoll_gmp` and the pinned `libadalang`). setup.sh registers it
-  ahead of the community index when the installed `alr` is older than the
-  latest release, so modern binary crates (gnatprove 16.x, gnatformat 26.x)
-  install on old distro alr packages (e.g. alr 1.2.1 on Debian).
-- `setup.sh` - one-shot bootstrap: fetches the data/guidance repositories
-  into the archive cache with `scripts/fetch_repos.py` (HTTP tarballs, no
-  git), creates `.env` from `.env.dev` (never overwrites), registers the
-  vendored Alire index when `alr` is outdated, runs `uv sync`, extracts
-  local Python headers for Triton.
-- `scripts/python_env.sh` - prints the `CPATH` Triton needs to compile its
-  CUDA driver shim, resolved from the interpreter that will run training (the
-  venv, else `python3`) instead of a hardcoded version. The single place both
-  the `Makefile` (`train`) and `scripts/run_cap_experiment.sh` ask; it
-  warns on stderr when the headers are missing. `setup.sh` writes the cache
-  it reads.
-- `Makefile` - entry points for every step; `make help` lists them.
-- `deploy/Modelfile` - Ollama deployment definition for the fine-tuned model.
-- `tests/` - pytest unit tests for the dataset builder, the eval scorers,
-  the Alire toolchain resolver, and the reporting helpers (`make test`).
-- `CHANGELOG.md` - per-version changes, newest first. It shares the
-  repo's versioned-artifact convention with `docs/results/`: the version
-  comes from `alire.toml` via `make bump-version`, and each release links
-  its own `docs/results/result-vX.Y.Z.md` when one exists. Add an entry
-  when behaviour, metrics, or documented claims change - not for every
+- [`data/processing_scripts/build_dataset.py`](data/processing_scripts/build_dataset.py)
+  - the dataset builder. Discovers and pairs Ada sources, sanitizes prose into
+  Simplified Technical English (STE), injects correct-vs-wrong defect pairs
+  (seventeen families), distills agent-skill guidance into system prompts,
+  dedups (verbatim plus a cap of `AST_STRUCTURAL_CAP = 10` on alpha-renamed
+  AST-record shapes, chosen by a controlled cap-tuning experiment, see
+  docs/datasets-and-training.md), drops empty-assistant records, and writes
+  JSONL plus metadata with per-source provenance.
+- [`data/processing_scripts/source_paths.py`](data/processing_scripts/source_paths.py)
+  - resolves every source repo to its cache directory
+  (`data/raw_repos/<owner>/<repo>`, with the legacy sibling location as
+  fallback); no pipeline file hard-codes paths.
+- [`data/processing_scripts/eval_guard.py`](data/processing_scripts/eval_guard.py)
+  - eval-integrity guard. Hashes every Ada subprogram and prompt in the cached
+  ada-eval `data/` tree (normalized and alpha-renamed structural forms)
+  and drops any training record matching them; `make check-integrity` fails if a
+  split file contains eval content.
+- [`data/processing_scripts/`](data/processing_scripts) - dataset helpers live
+  beside the builder.
+- [`training/download_model.py`](training/download_model.py) - HF model download
+  plus terminating sanity checks (light by default; deep GPU check runs in a
+  child process with a timeout so the pipeline can never hang).
+- [`training/train_unsloth.py`](training/train_unsloth.py) - QLoRA training
+  script (Unsloth, 1024-token window, single-process dataset tokenization, LoRA
+  adapters on Qwen3-8B).
+- [`eval/generate.py`](eval/generate.py) - batch generation for the fine-tuned
+  and base models.
+- [`eval/baseline_eval.py`](eval/baseline_eval.py) - reference-based scoring:
+  joins the `make generate` output to the ada-eval canonical solutions and
+  reports BLEU-4, exact match, file-set match, and standard compliance per
+  model, plus the ada-eval BUILD/TEST/PROVE tallies
+  (`outputs/eval_results.json`). Exits non-zero when there is nothing to score;
+  it never scores the training corpus.
+- [`eval/ada_eval_common.py`](eval/ada_eval_common.py) - the single
+  build/test/prove tally shared by both eval modules and the report, plus the
+  packed-dataset naming rules. Do not reimplement it: a third divergent copy is
+  what made the published prove counts disagree with the comparison report.
+- [`eval/eval_pipeline.py`](eval/eval_pipeline.py) - BUILD/TEST/PROVE comparison
+  report between base and fine-tuned models via ada-eval.
+- [`scripts/validate_defects.py`](scripts/validate_defects.py) - compiles the
+  dataset's defect pairs with the real GNAT and checks the claimed compiler
+  messages. Exit code is the contract: any "compiles clean" defect is a failure.
+- [`scripts/fetch_repos.py`](scripts/fetch_repos.py) - archive-cache fetcher
+  (HTTP tarballs, parallel, cached; every repo in `CORE_REPOS` including the
+  Ada-Algorithms monorepo). `make fetch-sources` runs it.
+- [`scripts/ada_env.sh`](scripts/ada_env.sh) - runs any command inside the Alire
+  toolchain environment (`alr exec`); all Ada tool invocations go through it.
+- [`scripts/alire_env.py`](scripts/alire_env.py) - Python side of the same:
+  `find_tool("gnatprove")` resolves binaries through the Alire environment for
+  subprocess calls.
+- [`scripts/build_libadalang.py`](scripts/build_libadalang.py) - builds and
+  installs the shared `libadalang.so` that the AST parser's ctypes wrapper
+  dlopens (`make ast-deps`). Resolves [`alire-ast.toml`](alire-ast.toml) in the
+  gitignored `.alire-ast/` workspace and builds [`ast.gpr`](ast.gpr) there, so
+  the SPARK toolchain in `.alire-dev/` is untouched. Optional: without it
+  [`parse_ada_ast.py`](data/processing_scripts/parse_ada_ast.py) uses its
+  structural scanner.
+- [`scripts/toolshims/unzip`](scripts/toolshims/unzip) - a Python
+  [`unzip`](scripts/toolshims/unzip) stand-in that
+  [`build_libadalang.py`](scripts/build_libadalang.py) puts on PATH, because the
+  libadalang chain ships `.zip` source archives and `alr` would otherwise offer
+  to install [`unzip`](scripts/toolshims/unzip) with sudo.
+- [`scripts/gen_agents_tree.py`](scripts/gen_agents_tree.py) - rewrites the file
+  tree section below.
+- [`alire.toml`](alire.toml) / [`alire-dev.toml`](alire-dev.toml) /
+  [`alire-ast.toml`](alire-ast.toml) - publishing, dev, and AST manifests.
+  Dev-only toolchain deps (gnatprove, gnatformat) live in the dev manifest;
+  `libadalang` lives in the AST manifest because only the dataset parser needs
+  it. `make bump-version` keeps all three in step.
+- [`q3as-local-index/`](q3as-local-index) - vendored Alire index (mirrors the
+  crates q3as needs from the community index branch `stable-1.4.0`, plus a
+  patched `gnatcoll_gmp` and the pinned `libadalang`). setup.sh registers it
+  ahead of the community index when the installed `alr` is older than the latest
+  release, so modern binary crates (gnatprove 16.x, gnatformat 26.x) install on
+  old distro alr packages (e.g. alr 1.2.1 on Debian).
+- [`setup.sh`](setup.sh) - one-shot bootstrap: fetches the data/guidance
+  repositories into the archive cache with
+  [`scripts/fetch_repos.py`](scripts/fetch_repos.py) (HTTP tarballs, no git),
+  creates `.env` from [`.env.dev`](.env.dev) (never overwrites), registers the
+  vendored Alire index when `alr` is outdated, runs `uv sync`, extracts local
+  Python headers for Triton.
+- [`scripts/python_env.sh`](scripts/python_env.sh) - prints the `CPATH` Triton
+  needs to compile its CUDA driver shim, resolved from the interpreter that will
+  run training (the venv, else `python3`) instead of a hardcoded version. The
+  single place both the [`Makefile`](Makefile) (`train`) and
+  [`scripts/run_cap_experiment.sh`](scripts/run_cap_experiment.sh) ask; it warns
+  on stderr when the headers are missing. [`setup.sh`](setup.sh) writes the
+  cache it reads.
+- [`Makefile`](Makefile) - entry points for every step; `make help` lists them.
+- [`deploy/Modelfile`](deploy/Modelfile) - Ollama deployment definition for the
+  fine-tuned model.
+- [`tests/`](tests) - pytest unit tests for the dataset builder, the eval
+  scorers, the Alire toolchain resolver, and the reporting helpers (`make
+  test`).
+- [`docs/changelogs/`](docs/changelogs) - one changelog file per version
+  (`vX.Y.Z.md`) plus [`index.md`](docs/changelogs/index.md), the index that
+  links every version. It shares the repo's versioned-artifact convention with
+  [`docs/results/`](docs/results): the version comes from
+  [`alire.toml`](alire.toml) via `make bump-version`, and each release links its
+  own `docs/results/result-vX.Y.Z.md` when one exists. Add a `vX.Y.Z.md` and
+  index it when behaviour, metrics, or documented claims change - not for every
   commit. Link a results file only if it is present; a withdrawn run is
-  described in prose instead of linked. Run `make agents-tree` after
-  adding a file, and `make lint` (which checks every markdown link).
+  described in prose instead of linked. There is no root `CHANGELOG.md`.
+- [`docs/README.md`](docs/README.md) - the documentation index, linked from the
+  project README. Every page under [`docs/`](docs) ends with the same navigation
+  footer (project README, docs index, changelog index, results index); keep it
+  when adding a page. Run `make agents-tree` after adding a file, and `make
+  lint` (which checks every markdown link and anchor).
 
 ## Ada toolchain through Alire
 
@@ -154,18 +176,19 @@ through `alr exec`:
 - Python: `from alire_env import find_tool` then pass
   `env=alire_env_path()` to `subprocess.run`.
 
-`make prove` syncs the toolchain. Because alr 1.2.1 has no `--manifest`
-option, it copies `alire-dev.toml` into the gitignored `.alire-dev/`
-workspace and runs `alr update` there; the real manifests are never modified
-by tooling. On old alr the vendored `q3as-local-index/` (registered by
-`setup.sh`) supplies the modern binary crates the pinned `stable-1.2.1`
-community index lacks.
+`make prove` syncs the toolchain. Because alr 1.2.1 has no `--manifest` option,
+it copies [`alire-dev.toml`](alire-dev.toml) into the gitignored `.alire-dev/`
+workspace and runs `alr update` there; the real manifests are never modified by
+tooling. On old alr the vendored [`q3as-local-index/`](q3as-local-index)
+(registered by [`setup.sh`](setup.sh)) supplies the modern binary crates the
+pinned `stable-1.2.1` community index lacks.
 
-The AST parser has a second, independent Alire workspace:
-`make ast-deps` copies `alire-ast.toml` into `.alire-ast/` and resolves
-`libadalang` there, so touching the parser toolchain never disturbs the
-prover. It stays optional: without it `parse_ada_ast.py` logs
-`libadalang available: False` and uses its structural scanner.
+The AST parser has a second, independent Alire workspace: `make ast-deps` copies
+[`alire-ast.toml`](alire-ast.toml) into `.alire-ast/` and resolves `libadalang`
+there, so touching the parser toolchain never disturbs the prover. It stays
+optional: without it
+[`parse_ada_ast.py`](data/processing_scripts/parse_ada_ast.py) logs `libadalang
+available: False` and uses its structural scanner.
 
 ## Conventions
 
@@ -175,12 +198,13 @@ prover. It stays optional: without it `parse_ada_ast.py` logs
   Change them only with `make validate-defects` evidence.
 - Python: `uv` for env/deps, ruff + mypy clean for all touched files,
   pytest for the dataset logic.
-- The source repositories (see the table in `docs/data-provenance.md`:
-  adacovex, Ada_CRDT, Ada-83-TLALOC, ada-eval, learn, training_material,
-  ada-spark, SimpleEnglish, skills, plus the RobertBoettcherSF
-  `Ada-Algorithms` monorepo) are inputs only; `scripts/fetch_repos.py` fetches them into the
+- The source repositories (see the table in
+  [`docs/data-provenance.md`](docs/data-provenance.md): adacovex, Ada_CRDT,
+  Ada-83-TLALOC, ada-eval, learn, training_material, ada-spark, SimpleEnglish,
+  skills, plus the RobertBoettcherSF `Ada-Algorithms` monorepo) are inputs only;
+  [`scripts/fetch_repos.py`](scripts/fetch_repos.py) fetches them into the
   gitignored `data/raw_repos/` cache. Their licenses are credited in
-  `README.md`.
+  [`README.md`](README.md).
 
 ## Project tree
 
@@ -208,6 +232,11 @@ q3as/
    deploy/
        Modelfile
    docs/
+       changelogs/
+           index.md
+           v0.1.0.md
+           v0.2.0.md
+           v0.3.0.md
        results/
            README.md
            result-data-v0.1.0.json
@@ -218,6 +247,7 @@ q3as/
        data-provenance.md
        datasets-and-training.md
        evaluation.md
+       README.md
        toolchain-setup.md
    eval/
        ada_eval_common.py
@@ -278,7 +308,6 @@ q3as/
    alire-dev.toml
    alire.toml
    ast.gpr
-   CHANGELOG.md
    LICENSE
    Makefile
    pyproject.toml

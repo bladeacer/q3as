@@ -6,13 +6,13 @@ pipeline guarantees that evaluation content never leaks into training.
 ## Data sources
 
 All sources are fetched into a local archive cache by
-`scripts/fetch_repos.py` (`make fetch-sources`). The cache lives at
-`data/raw_repos/<owner>/<repo>/` (gitignored), holds HTTP tarballs (no git
-metadata), and is content-addressed by repository identity: a re-run
-re-fetches nothing already on disk. Per-repository metadata
-(`.q3as-source.json`) records the URL, fetch time, and the license SPDX
-when the GitHub API answers. The legacy `../<repo>` sibling layout still
-resolves as a fallback, but nothing creates it anymore.
+[`scripts/fetch_repos.py`](../scripts/fetch_repos.py) (`make fetch-sources`).
+The cache lives at `data/raw_repos/<owner>/<repo>/` (gitignored), holds HTTP
+tarballs (no git metadata), and is content-addressed by repository identity: a
+re-run re-fetches nothing already on disk. Per-repository metadata
+(`.q3as-source.json`) records the URL, fetch time, and the license SPDX when the
+GitHub API answers. The legacy `../<repo>` sibling layout still resolves as a
+fallback, but nothing creates it anymore.
 
 | Source | Cache path | Used for | License |
 |---|---|---|---|
@@ -27,36 +27,38 @@ resolves as a fallback, but nothing creates it anymore.
 | [AdaCore/skills](https://github.com/AdaCore/skills) | `data/raw_repos/AdaCore/skills` | Toolchain QA (gnatprove, alire, gnatdoc, gnattest, gnatfuzz) | Apache-2.0 |
 | [RobertBoettcherSF/Ada-Algorithms](https://github.com/RobertBoettcherSF/Ada-Algorithms) | `data/raw_repos/RobertBoettcherSF/Ada-Algorithms` | Ada/SPARK algorithm implementations in a single monorepo (distributed systems, graph algorithms, image processing, compression, SPARK-verified sheets, parsers): thousands of files across category directories. Fetched as one archive. The author approved training use; that approval is not recorded in the repository (the README carries no LLM-usage disclosure). The MIT text is the repository's `LICENSE` | MIT |
 
-Licensing summary: Apache-2.0 and MIT code is redistributable with
-attribution; CC-BY-4.0 course material is used with attribution; the
-GPL-licensed Ada-83-TLALOC code is used for model training only (weights are
-not source-code redistribution) and is covered by the author's explicit
-permission. The RobertBoettcherSF Ada-Algorithms monorepo is MIT (its `LICENSE`
-file) with the author's green light for training use, a permission granted
-outside the repository.
+Licensing summary: Apache-2.0 and MIT code is redistributable with attribution;
+CC-BY-4.0 course material is used with attribution; the GPL-licensed
+Ada-83-TLALOC code is used for model training only (weights are not source-code
+redistribution) and is covered by the author's explicit permission. The
+RobertBoettcherSF Ada-Algorithms monorepo is MIT (its `LICENSE` file, in the
+cached copy under `data/raw_repos/`) with the author's green light
+for training use, a permission granted outside the repository.
 
 ## Toolchain inputs (not training data)
 
-The table above is training data. The Ada toolchain q3as parses and proves
-with is a separate set of external inputs, resolved through Alire rather
-than `scripts/fetch_repos.py`, and none of it is model input:
+The table above is training data. The Ada toolchain q3as parses and proves with
+is a separate set of external inputs, resolved through Alire rather than
+[`scripts/fetch_repos.py`](../scripts/fetch_repos.py), and none of it is model
+input:
 
 | Input | Origin | License |
 |---|---|---|
-| `libadalang` crate (24.0.0) | [AdaCore/libadalang](https://github.com/AdaCore/libadalang) release archive, via the vendored `q3as-local-index` | Apache-2.0 WITH LLVM-exception |
+| `libadalang` crate (24.0.0) | [AdaCore/libadalang](https://github.com/AdaCore/libadalang) release archive, via the vendored [`q3as-local-index`](../q3as-local-index) | Apache-2.0 WITH LLVM-exception |
 | libadalang Python bindings (24.0.0) | the same release archive, `python/` subdirectory, installed by `uv sync` as the `ast` group | Apache-2.0 WITH LLVM-exception |
 | `gnat`, `gnatcoll*`, `libgpr2`, `langkit_support`, `adasat`, `xmlada` | community Alire index, pulled in by the `libadalang` crate | GPL-3.0-or-later w/ GCC runtime exception (tools only, not redistributed) |
 | GMP | the distribution's `libgmp-dev`, unpacked to the user cache without sudo | LGPL-3.0-only (linked, not redistributed) |
 
 The bindings change what the dataset contains, so it is worth being precise
-about what they are for: `parse_ada_ast.py` uses libadalang for exact
-extraction of specs, bodies, types, and aspect clauses, and falls back to
-its regex scanner when the shared library is absent. The scanner's output
-is not discarded or down-weighted; libadalang simply removes the class of
-mistakes a regex cannot make, and it reports `valid` per unit so
-syntactically broken sources are visible. Neither path can introduce
-eval-proper content: both read the same cached Ada trees, and
-`make check-integrity` still gates the splits.
+about what they are for:
+[`parse_ada_ast.py`](../data/processing_scripts/parse_ada_ast.py) uses
+libadalang for exact extraction of specs, bodies, types, and aspect clauses, and
+falls back to its regex scanner when the shared library is absent. The scanner's
+output is not discarded or down-weighted; libadalang simply removes the class of
+mistakes a regex cannot make, and it reports `valid` per unit so syntactically
+broken sources are visible. Neither path can introduce eval-proper content: both
+read the same cached Ada trees, and `make check-integrity` still gates the
+splits.
 
 ## ada-eval is eval-proper
 
@@ -75,8 +77,8 @@ still scans its data directory before records are deduplicated and split.
 
 ## The eval guard
 
-`data/processing_scripts/eval_guard.py` blocks eval content from reaching
-any training split:
+[`data/processing_scripts/eval_guard.py`](../data/processing_scripts/eval_guard.py)
+blocks eval content from reaching any training split:
 
 1. **Blocklist.** It hashes all eval samples' base projects, canonical
    solutions, tests, prompts, and any `data/generated`/`data/evaluated`
@@ -137,10 +139,13 @@ layer of defense.
 2. After any change to data sources or the dataset, run
    `make check-integrity` (must exit 0) alongside `make validate-defects`.
    3. **When adding a new data source:** add its URL to `CORE_REPOS` in
-   `scripts/fetch_repos.py`, update the table above and the `Makefile`
-   source list, and re-run `make check-integrity` before building the
-   dataset. AGENTS.md reminds agents of this obligation.
+   [`scripts/fetch_repos.py`](../scripts/fetch_repos.py), update the table above
+   and the [`Makefile`](../Makefile) source list, and re-run `make
+   check-integrity` before building the dataset. AGENTS.md reminds agents of
+   this obligation.
 4. Adding new eval samples to ada-eval automatically grows the blocklist;
    rebuild the dataset afterward.
 5. If the guard reports `degraded` (ada-eval missing), builds proceed but
    `make check-integrity` exits 2: integrity is unverified, not proven.
+
+Navigation: [project README](../README.md) · [docs index](README.md) · [changelog index](changelogs/index.md) · [results index](results/README.md)
