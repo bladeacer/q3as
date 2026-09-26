@@ -33,7 +33,7 @@ Core sources (fetched into the local archive cache `data/raw_repos/<owner>/<repo
 - **[AminBlg/SimpleEnglish](https://github.com/AminBlg/SimpleEnglish)** - ASD-STE100-style writing skill; governs all generated explanations. *(MIT)*
 - **[AdaCore/skills](https://github.com/AdaCore/skills)** - Official AdaCore toolchain skills (gnatprove, alire, gnatdoc, gnattest, gnatfuzz); become toolchain QA turns. *(Apache-2.0)*
 
-- **[RobertBoettcherSF/Ada-Algorithms](https://github.com/RobertBoettcherSF/Ada-Algorithms)** - A single monorepo of the author's Ada/SPARK algorithm implementations (distributed systems, graph algorithms, image processing, compression, SPARK-verified sheets, parsers, and more), organized into category directories. *(MIT)* - the author has approved training use (LLM-usage disclosure and license in the repository's README).
+- **[RobertBoettcherSF/Ada-Algorithms](https://github.com/RobertBoettcherSF/Ada-Algorithms)** - A single monorepo of the author's Ada/SPARK algorithm implementations (distributed systems, graph algorithms, image processing, compression, SPARK-verified sheets, parsers, and more), organized into category directories. *(MIT, see the repository's `LICENSE`)* - the author has approved training use. That approval is not recorded in the repository: the README carries no LLM-usage disclosure, so keep the provenance note here rather than looking for a citation in the source.
 
 ## Quick Start
 
@@ -122,7 +122,10 @@ memory is available. Notes:
 - A cold start adds the Qwen3-8B download (~16 GB) and the first
   `make fetch-sources` (one monolithic Ada-Algorithms tarball); both depend on
   bandwidth. One-time extras: `uv sync` and `make prove` (Alire
-  toolchain).
+  toolchain). `make ast-deps` is optional and adds a ~20 minute one-time
+  libadalang source build; it upgrades the dataset's Ada AST extraction from
+  the regex scanner to real ASTs. See
+  [toolchain setup](docs/toolchain-setup.md).
 
 ## Hugging Face Token Setup
 

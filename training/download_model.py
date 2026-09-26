@@ -370,10 +370,11 @@ def run_sanity(
 
 def main() -> int:
     args = parse_args()
-    if args.verbose:
-        logging.getLogger().setLevel(logging.DEBUG)
-
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+    # basicConfig first: it would otherwise overwrite an earlier setLevel(DEBUG).
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose else logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+    )
 
     if args.sanity_child:
         # Internal mode: run the deep check in this process and report the

@@ -19,6 +19,7 @@ Usage:
 
 from __future__ import annotations
 
+import argparse
 import functools
 import os
 import subprocess
@@ -32,6 +33,12 @@ ADA_ENV_SH = PROJECT_ROOT / "scripts" / "ada_env.sh"
 # when a tool is only on the system PATH (an Alire 'external' install such
 # as a distribution gnatprove), it is used with a one-time warning.
 ALIRE_TOOLS = ("gnat", "gprbuild", "gnatprove", "gnatdoc", "gnatformat", "gprclean", "gprls")
+
+# The tools q3as actually invokes, and the ones the eval pipeline refuses to
+# run without (see the "prove"/"build"/"test" tables in eval/eval_pipeline.py).
+# gnatdoc is deliberately absent from ALIRE_TOOLS' required set: alire-dev.toml
+# does not depend on it, so it is never present and must not fail a check.
+REQUIRED_TOOLS = ("gnat", "gprbuild", "gnatprove", "gnatformat", "gprclean", "gprls")
 
 
 class ToolNotAvailable(RuntimeError):
@@ -95,17 +102,21 @@ def find_tool(name: str) -> Path:
     packages alr detects) and dev machines without the full manifest
     resolution; every system-PATH hit is reported once so mixed
     environments stay visible.
+
+    The warning keys off whether the hit is in the Alire prefix, not off
+    which of the two searches found it. When no Alire environment exists the
+    prefix is empty, so the two searches would be the same and a
+    distribution-provided tool would be reported as managed.
     """
-    path_value = alire_env_path()
-    for searched, source in ((path_value, "alire"), (os.environ.get("PATH", ""), "system")):
-        for directory in searched.split(os.pathsep):
-            if not directory:
-                continue
-            candidate = Path(directory) / name
-            if candidate.is_file() and os.access(candidate, os.X_OK):
-                if source == "system" and name in ALIRE_TOOLS:
-                    _warn_system_tool(name, candidate)
-                return candidate
+    prefix = _alire_path_entry() or ""
+    alire_dirs = [d for d in prefix.split(os.pathsep) if d]
+    system_dirs = [d for d in os.environ.get("PATH", "").split(os.pathsep) if d]
+    for directory in alire_dirs + system_dirs:
+        candidate = Path(directory) / name
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            if directory not in alire_dirs and name in ALIRE_TOOLS:
+                _warn_system_tool(name, candidate)
+            return candidate
     raise ToolNotAvailable(
         f"{name} not found in the Alire environment or PATH. "
         "Run `make prove` (Alire dev workspace build) to install it."
@@ -129,3 +140,49 @@ def has_tool(name: str) -> bool:
     except ToolNotAvailable:
         return False
     return True
+
+
+def main() -> int:
+    """Report where each Alire-managed tool resolves, for `make prove` checks.
+
+    Prints one line per tool and exits non-zero when a tool q3as actually
+    invokes is missing, so this is usable as a verification step and not only
+    as a debugging aid. Tools outside REQUIRED_TOOLS (gnatdoc) are reported but
+    never fail the check.
+    """
+    parser = argparse.ArgumentParser(description="Resolve the Alire-managed Ada toolchain.")
+    parser.add_argument(
+        "--quiet", action="store_true", help="only report missing tools"
+    )
+    args = parser.parse_args()
+
+    prefix = _alire_path_entry()
+    if prefix is None:
+        print("Alire environment: unavailable (run `make prove`)")
+
+    missing: list[str] = []
+    for tool in ALIRE_TOOLS:
+        required = tool in REQUIRED_TOOLS
+        try:
+            resolved = find_tool(tool)
+        except ToolNotAvailable:
+            mark = "MISSING" if required else "missing (optional)"
+            if required:
+                missing.append(tool)
+            print(f"  {tool:<12} {mark}")
+            continue
+        if args.quiet:
+            continue
+        alire_dirs = prefix.split(os.pathsep) if prefix else []
+        origin = "" if str(Path(resolved).parent) in alire_dirs else "  (system PATH)"
+        print(f"  {tool:<12} {resolved}{origin}")
+
+    if missing:
+        print(f"\nmissing required tool(s): {', '.join(missing)}", file=sys.stderr)
+        print("Run `make prove` to fetch the managed toolchain.", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

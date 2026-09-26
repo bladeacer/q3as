@@ -33,7 +33,9 @@ from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "eval"))
 
+from ada_eval_common import UNPROVED_RESULTS
 from bump_version import read_version
 
 logger = logging.getLogger(__name__)
@@ -92,7 +94,12 @@ def collect_ada_eval_metrics(eval_dir: Path) -> dict[str, Any]:
                         result = entry.get("result")
                         if result == "proved":
                             proved += 1
-                        elif result == "unproved":
+                        elif result in UNPROVED_RESULTS:
+                            # Shares the classification with the eval modules:
+                            # an incorrect proof or an unfound check is
+                            # unproved, not a harness error. Counting them as
+                            # errors here while the eval modules counted them
+                            # as unproved made the two disagree for one run.
                             unproved += 1
                             unproved_checks.update(entry.get("unproved_checks") or {})
                             proved_checks.update(entry.get("proved_checks") or {})

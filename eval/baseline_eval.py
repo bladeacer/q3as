@@ -1,33 +1,47 @@
-"""baseline_eval.py - Baseline evaluation for q3as fine-tuned model.
+"""baseline_eval.py - Reference-based evaluation of q3as generation quality.
 
-Provides comprehensive evaluation of Ada code generation quality
-from the q3as fine-tuned model, comparing against the base Qwen3-8B
-model. Evaluation metrics include:
+Scores what the models actually produced. `make generate` writes one record
+per benchmark sample to ``outputs/generated_solutions/<label>/<dataset>.jsonl``,
+each carrying the model's ``generated_solution`` as a base64 file map. This
+module joins those against the ada-eval canonical solutions (by dataset and
+sample name) and reports, per model:
 
-- BLEU score against reference Ada implementations
-- Ada standard compliance (keyword-based)
-- Compilation pass rate (via ada-eval BUILD)
-- Unit test pass rate (via ada-eval TEST)
-- SPARK verification success rate (via ada-eval PROVE)
+- BLEU-4 against the canonical solution (correct implementation: clipped
+  n-gram precisions, brevity penalty, add-one smoothing for the high-order
+  precisions that short Ada files usually zero out)
+- exact-match rate of the subprogram's own source file
+- file-set match rate (did the model produce the reference's project layout)
+- Ada standard compliance, scored against the standard detected on the
+  *canonical* solution
+- compilation, unit-test, and SPARK proof rates (from ada-eval results)
 
-The base model defaults to the LOCAL download (models/qwen3-8b, i.e.
-Qwen/Qwen3-8B) - the same weights used for fine-tuning - so that
-the comparison isolates the effect of fine-tuning.
+It deliberately does not read the training dataset: scoring the gold answers
+against themselves measures the corpus, not the model. The base model
+defaults to the LOCAL download (models/qwen3-8b, i.e. Qwen/Qwen3-8B) - the
+same weights used for fine-tuning - so the comparison isolates the effect of
+fine-tuning.
+
+The comparison is only as good as the generations on disk. With no
+``make generate`` output this exits non-zero rather than reporting zeros,
+because a table of 0.0% rates reads as a measurement.
 
 Usage:
     uv run python eval/baseline_eval.py --model outputs/q3as
-    uv run python eval/baseline_eval.py --model outputs/q3as --base-model models/qwen3-8b --max-samples 20
-    uv run python eval/baseline_eval.py --model outputs/q3as --evals build test prove
+    uv run python eval/baseline_eval.py --model outputs/q3as --max-samples 20
+    uv run python eval/baseline_eval.py --model outputs/q3as --evals build prove
 """
 
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import logging
+import math
 import re
 import sys
 from collections import Counter
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -39,12 +53,17 @@ _PROCESSING_SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "data" / "proces
 if str(_PROCESSING_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_PROCESSING_SCRIPTS_DIR))
 
+from ada_eval_common import aggregate_eval_results
 from alire_env import has_tool
 
 logger = logging.getLogger("q3as_eval")
 
 # ada-eval lives in the source cache (fetch_repos.py); fall back to the
 # legacy sibling layout for checkouts that have not re-run setup yet.
+# The dataset builder owns Ada standard detection; reuse it rather than
+# re-deriving standards here (its comment-stripped weighted matcher is the
+# one the training data was built with).
+import build_dataset as bd
 import source_paths
 
 ADA_EVAL_DIR = source_paths.resolve("ada-eval") or Path("data/raw_repos/_missing/ada-eval")
@@ -52,15 +71,15 @@ EVAL_RESULTS_DIR = Path("outputs/eval_results")
 GENERATED_DIR = Path("outputs/generated_solutions")
 DEFAULT_BASE_MODEL = Path("models/qwen3-8b")
 BASE_MODEL_LABEL = "base_qwen3-8b"
+FINE_TUNED_LABEL = "fine_tuned"
 
-
-def check_tools_available() -> bool:
-    """Check if required GNAT tools are available in the Alire environment."""
-    for tool in ["gnatprove", "gprbuild", "gnatformat"]:
-        if not has_tool(tool):
-            logger.warning("Required tool not found in the Alire environment: %s", tool)
-            return False
-    return True
+# The tools each ada-eval kind needs. Honoured by --evals, so asking for
+# only BUILD does not fail because gnatprove is missing.
+EVAL_TOOLS: dict[str, tuple[str, ...]] = {
+    "build": ("gprbuild",),
+    "test": ("gprbuild", "gprclean"),
+    "prove": ("gprbuild", "gnatprove"),
+}
 
 ADA_EVAL_CATEGORIES = {
     "spark_learn": "Learning examples with SPARK contracts",
@@ -77,35 +96,296 @@ DEFAULT_STANDARD_KEYWORDS: dict[str, list[str]] = {
     "Ada 83": ["procedure", "function", "package body"],
 }
 
+# Ada-aware tokenisation: identifiers, numbers, character literals, strings,
+# and multi-character operators. Whitespace splitting would glue operators to
+# operands and make n-gram overlap meaningless.
+_TOKEN_RE = re.compile(
+    r"""
+    '(?:[^']|'')+'          # character literal
+    | "(?:[^"]|"")*"        # string literal
+    | [A-Za-z][A-Za-z0-9_]* # identifier
+    | \d+(?:\.\d+)?(?:[eE][-+]?\d+)?   # numeric literal
+    | \*\*|:=|<=|>=|/=|<>|=>|\.\.|<<|>>  # multi-character operators
+    | [^\s]                 # any single remaining character
+    """,
+    re.VERBOSE,
+)
+
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Baseline evaluation for q3as model.")
-    parser.add_argument("--model", type=Path, default=Path("outputs/q3as"), help="Fine-tuned model checkpoint path.")
-    parser.add_argument("--base-model", type=Path, default=DEFAULT_BASE_MODEL, help="Base model path (default: local models/qwen3-8b download of Qwen/Qwen3-8B).")
-    parser.add_argument("--dataset", type=Path, default=Path("data/processed/dataset.jsonl"), help="Evaluation dataset.")
-    parser.add_argument("--max-samples", type=int, default=50, help="Maximum number of samples to evaluate.")
-    parser.add_argument("--evals", nargs="+", choices=["build", "test", "prove"], default=["build", "test", "prove"], help="Evaluation types to run via ada-eval.")
+    parser = argparse.ArgumentParser(
+        description="Reference-based evaluation of q3as generation quality."
+    )
+    parser.add_argument(
+        "--model", type=Path, default=Path("outputs/q3as"),
+        help="Fine-tuned model checkpoint path (used for the label and a presence check).",
+    )
+    parser.add_argument(
+        "--base-model", type=Path, default=DEFAULT_BASE_MODEL,
+        help="Base model path (default: local models/qwen3-8b download of Qwen/Qwen3-8B).",
+    )
+    parser.add_argument(
+        "--generated-dir", type=Path, default=GENERATED_DIR,
+        help="Root of the per-model generations written by `make generate`.",
+    )
+    parser.add_argument(
+        "--max-samples", type=int, default=0,
+        help="Cap on scored samples per model (0 = all).",
+    )
+    parser.add_argument(
+        "--evals", nargs="+", choices=sorted(EVAL_TOOLS), default=sorted(EVAL_TOOLS),
+        help="ada-eval result kinds to summarise.",
+    )
     parser.add_argument("--verbose", "-v", action="store_true", help="Enable debug logging.")
     return parser.parse_args()
 
 
-def load_dataset(path: Path, max_samples: int = 50) -> list[dict[str, Any]]:
-    if not path.exists():
-        logger.error("Dataset not found: %s", path)
+# --------------------------------------------------------------------------- #
+# Generation / reference loading
+# --------------------------------------------------------------------------- #
+
+
+def _dataset_of(path: Path) -> str:
+    """Recover the ada-eval dataset name from a generated file name.
+
+    generate.py writes ``spark_<dataset>.jsonl``; the ada-eval dataset is
+    already prefixed with ``spark_``, which makes the doubled prefix easy to
+    mis-parse. Stripping one leading ``spark_`` recovers the real name.
+    """
+    stem = path.stem
+    return stem.removeprefix("spark_")
+
+
+def load_reference_index(ada_eval_dir: Path) -> dict[tuple[str, str], dict[str, Any]]:
+    """Index the canonical solutions by (dataset, sample name)."""
+    compacted = ada_eval_dir / "data" / "base" / "compacted"
+    index: dict[tuple[str, str], dict[str, Any]] = {}
+    if not compacted.exists():
+        logger.warning("No ada-eval reference data at %s", compacted)
+        return index
+    for jsonl_file in sorted(compacted.glob("*.jsonl")):
+        dataset = jsonl_file.stem
+        try:
+            with open(jsonl_file, encoding="utf-8") as f:
+                for line in f:
+                    if not line.strip():
+                        continue
+                    try:
+                        sample = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    index[(dataset, sample.get("name", ""))] = sample
+        except OSError as exc:
+            logger.warning("Cannot read reference %s: %s", jsonl_file, exc)
+    return index
+
+
+def load_generated(generated_dir: Path, label: str) -> list[tuple[str, dict[str, Any]]]:
+    """Load one model's generations as (dataset, record) pairs."""
+    model_dir = generated_dir / label
+    if not model_dir.exists():
+        logger.warning("No generations for %s at %s", label, model_dir)
         return []
-    data: list[dict[str, Any]] = []
-    with open(path, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                record = json.loads(line)
-                data.append(record)
-            except json.JSONDecodeError:
-                continue
-    logger.info("Loaded %d evaluation samples from %s", len(data), path)
-    return data[:max_samples]
+    records: list[tuple[str, dict[str, Any]]] = []
+    for jsonl_file in sorted(model_dir.glob("*.jsonl")):
+        dataset = _dataset_of(jsonl_file)
+        try:
+            with open(jsonl_file, encoding="utf-8") as f:
+                for line in f:
+                    if not line.strip():
+                        continue
+                    try:
+                        records.append((dataset, json.loads(line)))
+                    except json.JSONDecodeError:
+                        continue
+        except OSError as exc:
+            logger.warning("Cannot read generations %s: %s", jsonl_file, exc)
+    return records
+
+
+def decode_files(solution: Any) -> dict[str, str]:
+    """Decode an ada-eval file map ({name: base64}) into {name: text}."""
+    if not isinstance(solution, dict):
+        return {}
+    decoded: dict[str, str] = {}
+    for name, blob in solution.items():
+        if not isinstance(blob, str):
+            continue
+        try:
+            decoded[name] = base64.b64decode(blob, validate=False).decode("utf-8", "replace")
+        except (ValueError, TypeError) as exc:
+            logger.debug("Cannot decode %s: %s", name, exc)
+    return decoded
+
+
+def normalise_code(text: str) -> str:
+    """Normalise line endings and trailing whitespace for comparison."""
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    return "\n".join(line.rstrip() for line in text.split("\n")).strip()
+
+
+# --------------------------------------------------------------------------- #
+# Metrics
+# --------------------------------------------------------------------------- #
+
+
+def tokenize(code: str) -> list[str]:
+    """Split Ada source into comparable tokens."""
+    return _TOKEN_RE.findall(code)
+
+
+def bleu(reference: str, hypothesis: str, max_n: int = 4) -> float:
+    """Corpus BLEU-4 for a single reference/hypothesis pair.
+
+    Standard BLEU: geometric mean of clipped n-gram precisions for n=1..4,
+    multiplied by a brevity penalty. Short Ada files almost always produce a
+    zero 3- or 4-gram precision, which would zero the whole score, so each
+    higher-order precision gets add-one smoothing on its denominator. The
+    result is comparable across samples; it is not corpus BLEU (no
+    multi-reference aggregation).
+    """
+    ref_tokens = tokenize(reference)
+    hyp_tokens = tokenize(hypothesis)
+    if not ref_tokens or not hyp_tokens:
+        return 0.0
+
+    precisions: list[float] = []
+    for n in range(1, max_n + 1):
+        if len(hyp_tokens) < n:
+            # Not enough tokens to form any n-gram: treat as smoothed 0.
+            precisions.append(0.0)
+            continue
+        ref_ngrams = Counter(tuple(ref_tokens[i:i + n]) for i in range(len(ref_tokens) - n + 1))
+        hyp_ngrams = Counter(tuple(hyp_tokens[i:i + n]) for i in range(len(hyp_tokens) - n + 1))
+        clipped = sum((ref_ngrams & hyp_ngrams).values())
+        total = sum(hyp_ngrams.values())
+        precisions.append((clipped + 1) / (total + 1))
+
+    if min(precisions) <= 0.0:
+        # A zero precision (smoothing cannot rescue a 0/0) must not be
+        # smoothed into a positive score, but it also must not poison the
+        # geometric mean into a hard zero for an otherwise close match.
+        precisions = [p if p > 0.0 else 1e-9 for p in precisions]
+
+    log_mean = sum(math.log(p) for p in precisions) / len(precisions)
+    brevity_penalty = (
+        1.0
+        if len(hyp_tokens) > len(ref_tokens)
+        else math.exp(1 - len(ref_tokens) / max(len(hyp_tokens), 1))
+    )
+    return brevity_penalty * math.exp(log_mean)
+
+
+def check_ada_compliance(code: str, expected_standard: str) -> dict[str, Any]:
+    """Score a generated file against the markers of its target standard."""
+    detected_keywords = [kw for kw in DEFAULT_STANDARD_KEYWORDS.get(expected_standard, []) if kw in code]
+    expected = DEFAULT_STANDARD_KEYWORDS.get(expected_standard, [])
+    return {
+        "expected_standard": expected_standard,
+        "detected_keywords": detected_keywords,
+        "compliance_score": len(detected_keywords) / max(len(expected), 1),
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Per-model scoring
+# --------------------------------------------------------------------------- #
+
+
+def score_model(
+    label: str,
+    generated_dir: Path,
+    references: dict[tuple[str, str], dict[str, Any]],
+    max_samples: int = 0,
+) -> dict[str, Any]:
+    """Score one model's generations against the canonical solutions.
+
+    Reports coverage as well as scores: the benchmark has 19 samples but a
+    generation run may only have produced some of them, and a rate computed
+    over 7 samples must not read like one computed over 19.
+    """
+    generated = load_generated(generated_dir, label)
+    if max_samples > 0:
+        generated = generated[:max_samples]
+
+    per_sample: list[dict[str, Any]] = []
+    unmatched = 0
+    for dataset, record in generated:
+        name = record.get("name", "")
+        reference = references.get((dataset, name))
+        if reference is None:
+            unmatched += 1
+            logger.warning("No canonical solution for %s/%s; skipping", dataset, name)
+            continue
+
+        primary = (record.get("location") or {}).get("path", "")
+        gen_files = decode_files(record.get("generated_solution"))
+        ref_files = decode_files(reference.get("canonical_solution"))
+        if not gen_files:
+            logger.warning("Empty generated_solution for %s/%s", dataset, name)
+            continue
+
+        gen_primary = normalise_code(gen_files.get(primary, ""))
+        ref_primary = normalise_code(ref_files.get(primary, ""))
+        # Standards are a property of the reference; detecting them on the
+        # model output would grade the model on its own guess.
+        standard = bd.detect_ada_standard(ref_primary) if ref_primary else "Unknown"
+        compliance = check_ada_compliance(gen_primary, standard)
+
+        per_sample.append({
+            "dataset": dataset,
+            "name": name,
+            "primary_file": primary,
+            "standard": standard,
+            "bleu": bleu(ref_primary, gen_primary),
+            "exact_match": bool(ref_primary) and gen_primary == ref_primary,
+            "file_set_match": set(gen_files) == set(ref_files),
+            "compliance": compliance["compliance_score"],
+        })
+
+    scored = len(per_sample)
+    result: dict[str, Any] = {
+        "label": label,
+        "samples_generated": len(generated),
+        "samples_scored": scored,
+        "samples_unmatched": unmatched,
+        "reference_total": len(references),
+        "per_sample": per_sample,
+    }
+    if scored:
+        result.update({
+            "bleu": sum(s["bleu"] for s in per_sample) / scored,
+            "exact_match_rate": sum(1 for s in per_sample if s["exact_match"]) / scored,
+            "file_set_match_rate": sum(1 for s in per_sample if s["file_set_match"]) / scored,
+            "compliance": sum(s["compliance"] for s in per_sample) / scored,
+            "standard_distribution": dict(Counter(s["standard"] for s in per_sample)),
+        })
+    return result
+
+
+# --------------------------------------------------------------------------- #
+# ada-eval BUILD / TEST / PROVE results
+# --------------------------------------------------------------------------- #
+
+
+def compute_stats_from_ada_eval(model_label: str, evals: list[str] | None = None) -> dict[str, Any]:
+    """Read build/test/prove stats for one model from the ada-eval results."""
+    return aggregate_eval_results(EVAL_RESULTS_DIR / model_label, evals)
+
+
+# --------------------------------------------------------------------------- #
+# Reporting helpers
+# --------------------------------------------------------------------------- #
+
+
+def check_tools_available(evals: list[str]) -> bool:
+    """Check the tools the requested evals need, in the Alire environment."""
+    ok = True
+    for tool in sorted({t for kind in evals for t in EVAL_TOOLS.get(kind, ())}):
+        if not has_tool(tool):
+            logger.warning("Required tool not found in the Alire environment: %s", tool)
+            ok = False
+    return ok
 
 
 def load_eval_methodology() -> dict[str, Any]:
@@ -115,319 +395,167 @@ def load_eval_methodology() -> dict[str, Any]:
     compacted_dir = ADA_EVAL_DIR / "data" / "base" / "compacted"
     if compacted_dir.exists():
         for jsonl_file in compacted_dir.glob("*.jsonl"):
-            category_name = jsonl_file.stem
             try:
-                with open(jsonl_file, "r") as f:
+                with open(jsonl_file, encoding="utf-8") as f:
                     count = sum(1 for _ in f)
-                methodology["categories"][category_name] = {
-                    "description": ADA_EVAL_CATEGORIES.get(category_name, "Custom evaluation category"),
+                methodology["categories"][jsonl_file.stem] = {
+                    "description": ADA_EVAL_CATEGORIES.get(jsonl_file.stem, "Custom category"),
                     "sample_count": count,
                     "file": str(jsonl_file),
                 }
             except OSError:
-                pass
-    expanded_dir = ADA_EVAL_DIR / "data" / "base" / "expanded"
-    if expanded_dir.exists():
-        methodology["expanded_categories"] = [d.name for d in expanded_dir.iterdir() if d.is_dir()]
+                continue
     return methodology
 
 
-def compute_bleu(reference: str, hypothesis: str) -> float:
-    ref_ngrams = Counter(reference[i:i+3] for i in range(len(reference) - 2))
-    hyp_ngrams = Counter(hypothesis[i:i+3] for i in range(len(hypothesis) - 2))
-    if not ref_ngrams or not hyp_ngrams:
-        return 0.0
-    overlap = sum((ref_ngrams & hyp_ngrams).values())
-    return overlap / sum(hyp_ngrams.values())
+def print_stats_block(stats: dict[str, Any]) -> None:
+    for key, label, numerator in (
+        ("build", "Compilation", "compiled"),
+        ("test", "Unit Tests", "passed"),
+        ("prove", "SPARK Proof", "proved"),
+    ):
+        block = stats.get(key, {})
+        total = block.get("total", 0)
+        if total > 0:
+            print(f"  {label}: {block.get(numerator, 0)}/{total} ({block[numerator] / total * 100:.1f}%)")
 
 
-def check_ada_compliance(code: str, expected_standard: str) -> dict[str, Any]:
-    detected_keywords: list[str] = []
-    expected_keywords = DEFAULT_STANDARD_KEYWORDS.get(expected_standard, [])
-    for keyword in expected_keywords:
-        if keyword in code:
-            detected_keywords.append(keyword)
-    return {
-        "expected_standard": expected_standard,
-        "detected_keywords": detected_keywords,
-        "compliance_score": len(detected_keywords) / max(len(expected_keywords), 1),
-    }
-
-
-def derive_eval_categories() -> list[dict[str, Any]]:
-    categories: list[dict[str, Any]] = []
-    compacted_dir = ADA_EVAL_DIR / "data" / "base" / "compacted"
-    if not compacted_dir.exists():
-        return categories
-    for jsonl_file in sorted(compacted_dir.glob("*.jsonl")):
-        try:
-            with open(jsonl_file, "r") as f:
-                samples = [json.loads(line) for line in f if line.strip()]
-            categories.append({
-                "name": jsonl_file.stem,
-                "sample_count": len(samples),
-                "file": str(jsonl_file),
-            })
-        except (json.JSONDecodeError, OSError):
-            continue
-    return categories
-
-
-def extract_ada_code(generated_text: str) -> str:
-    """Extract Ada code block from model output."""
-    match = re.search(r"```ada\s*\n(.*?)```", generated_text, re.DOTALL)
-    if match:
-        return match.group(1).strip()
-    match = re.search(r"```\s*\n(.*?)```", generated_text, re.DOTALL)
-    if match:
-        return match.group(1).strip()
-    return generated_text.strip()
-
-
-def compute_stats_from_ada_eval(model_label: str) -> dict[str, dict[str, int]]:
-    """Read build/test/prove stats from ada-eval evaluated packed datasets.
-
-    ada-eval writes results per generated dataset under
-    outputs/eval_results/<model_label>/<dataset>/*.jsonl, where each line is
-    an evaluated sample with an ``evaluation_results`` list.
-    """
-    stats: dict[str, dict[str, int]] = {
-        "build": {"compiled": 0, "failed": 0, "total": 0},
-        "test": {"passed": 0, "failed": 0, "total": 0},
-        "prove": {"proved": 0, "unproved": 0, "error": 0, "total": 0},
-    }
-    model_eval_dir = EVAL_RESULTS_DIR / model_label
-    if not model_eval_dir.exists():
-        return stats
-
-    for result_file in sorted(model_eval_dir.rglob("*.jsonl")):
-        try:
-            with open(result_file, "r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        sample = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    for es in sample.get("evaluation_results", []) or []:
-                        kind = es.get("eval")
-                        if kind == "build":
-                            stats["build"]["total"] += 1
-                            if es.get("compiled"):
-                                stats["build"]["compiled"] += 1
-                            else:
-                                stats["build"]["failed"] += 1
-                        elif kind == "test":
-                            stats["test"]["total"] += 1
-                            if es.get("compiled") and es.get("passed_tests"):
-                                stats["test"]["passed"] += 1
-                            else:
-                                stats["test"]["failed"] += 1
-                        elif kind == "prove":
-                            stats["prove"]["total"] += 1
-                            result = es.get("result", "error")
-                            if result == "proved":
-                                stats["prove"]["proved"] += 1
-                            elif result in ("unproved", "proved_incorrectly"):
-                                stats["prove"]["unproved"] += 1
-                            else:
-                                stats["prove"]["error"] += 1
-        except OSError as exc:
-            logger.warning("Cannot read result file %s: %s", result_file, exc)
-    return stats
-
-
-def run_evaluation(args: argparse.Namespace) -> dict[str, Any]:
-    """Execute the full evaluation pipeline.
-
-    Computes BLEU, compliance, compilation, test, and SPARK proof metrics
-    for both the fine-tuned and base models.
-    """
-    model_label = "fine_tuned"
-    base_model_label = BASE_MODEL_LABEL
-
-    results: dict[str, Any] = {
-        "total_samples": 0,
-        "avg_bleu": 0.0,
-        "avg_compliance": 0.0,
-        "standard_distribution": {},
-        "eval_categories": derive_eval_categories(),
-        "methodology_source": str(ADA_EVAL_DIR) if ADA_EVAL_DIR.exists() else "default",
-        "per_sample": [],
-        "fine_tuned": {"model": str(args.model), "stats": {}},
-        "base_model": {"model": str(args.base_model), "stats": {}},
-    }
-
-    dataset = load_dataset(args.dataset, args.max_samples)
-    if not dataset:
-        logger.error("No data available for evaluation.")
-        return results
-
-    bleu_scores: list[float] = []
-    compliance_scores: list[float] = []
-
-    for sample in dataset:
-        messages = sample.get("messages", [])
-        if len(messages) < 3:
-            continue
-
-        user_content = next((m["content"] for m in messages if m["role"] == "user"), "")
-        assistant_content = next((m["content"] for m in messages if m["role"] == "assistant"), "")
-        system_content = next((m["content"] for m in messages if m["role"] == "system"), "")
-
-        standard = "Unknown"
-        for std in ["SPARK 2014", "Ada 2022", "Ada 2012", "Ada 2005", "Ada 95", "Ada 83"]:
-            if std.lower() in system_content.lower():
-                standard = std
-                break
-
-        bleu = compute_bleu(user_content[:200], assistant_content[:200]) if assistant_content else 0.0
-        bleu_scores.append(bleu)
-
-        compliance = check_ada_compliance(assistant_content, standard) if assistant_content else {"compliance_score": 0.0}
-        compliance_scores.append(compliance["compliance_score"])
-
-        results["standard_distribution"][standard] = results["standard_distribution"].get(standard, 0) + 1
-        results["per_sample"].append({
-            "standard": standard,
-            "bleu": bleu,
-            "compliance": compliance["compliance_score"],
-        })
-
-    results["total_samples"] = len(bleu_scores)
-    results["avg_bleu"] = sum(bleu_scores) / max(len(bleu_scores), 1)
-    results["avg_compliance"] = sum(compliance_scores) / max(len(compliance_scores), 1)
-
-    # Compute ada-eval metrics for both models
-    ft_stats = compute_stats_from_ada_eval(model_label)
-    base_stats = compute_stats_from_ada_eval(base_model_label)
-
-    results["fine_tuned"]["stats"] = ft_stats
-    results["base_model"]["stats"] = base_stats
-
-    # Compute pass rates
-    if ft_stats["build"]["total"] > 0:
-        results["fine_tuned"]["compile_rate"] = ft_stats["build"]["compiled"] / ft_stats["build"]["total"]
-    if ft_stats["test"]["total"] > 0:
-        results["fine_tuned"]["test_pass_rate"] = ft_stats["test"]["passed"] / ft_stats["test"]["total"]
-    if ft_stats["prove"]["total"] > 0:
-        results["fine_tuned"]["prove_success_rate"] = ft_stats["prove"]["proved"] / ft_stats["prove"]["total"]
-
-    if base_stats["build"]["total"] > 0:
-        results["base_model"]["compile_rate"] = base_stats["build"]["compiled"] / base_stats["build"]["total"]
-    if base_stats["test"]["total"] > 0:
-        results["base_model"]["test_pass_rate"] = base_stats["test"]["passed"] / base_stats["test"]["total"]
-    if base_stats["prove"]["total"] > 0:
-        results["base_model"]["prove_success_rate"] = base_stats["prove"]["proved"] / base_stats["prove"]["total"]
-
-    logger.info(
-        "Evaluation complete: %d samples, avg BLEU=%.4f, avg compliance=%.4f",
-        results["total_samples"], results["avg_bleu"], results["avg_compliance"],
-    )
-    return results
-
-
-def print_stats_block(label: str, stats: dict[str, dict[str, int]]) -> None:
-    b = stats.get("build", {})
-    t = stats.get("test", {})
-    p = stats.get("prove", {})
-    if b.get("total", 0) > 0:
-        compile_rate = b.get("compiled", 0) / b["total"] * 100
-        print(f"  Compilation: {b.get('compiled', 0)}/{b['total']} passed ({compile_rate:.1f}%)")
-    if t.get("total", 0) > 0:
-        test_rate = t.get("passed", 0) / t["total"] * 100
-        print(f"  Unit Tests:  {t.get('passed', 0)}/{t['total']} passed ({test_rate:.1f}%)")
-    if p.get("total", 0) > 0:
-        prove_rate = p.get("proved", 0) / p["total"] * 100
-        print(f"  SPARK Proof: {p.get('proved', 0)}/{p['total']} proved ({prove_rate:.1f}%)")
-
-
-def main() -> None:
+def main() -> int:
     args = parse_args()
-    if args.verbose:
-        logging.getLogger().setLevel(logging.DEBUG)
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+    # basicConfig must come first: it sets the root level when no handlers
+    # exist, and would otherwise overwrite a setLevel(DEBUG) applied before it.
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose else logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+    )
 
-    logger.info("Starting q3as baseline evaluation...")
+    logger.info("Starting q3as reference-based evaluation")
     logger.info("Fine-tuned model: %s", args.model)
     logger.info("Base model: %s", args.base_model)
     logger.info("Evals: %s", args.evals)
+    logger.info("Generations root: %s", args.generated_dir)
 
     if not args.model.exists():
         logger.error("Fine-tuned model not found at %s - run `make train` first.", args.model)
-        sys.exit(1)
-    if not args.base_model.exists():
-        logger.error(
-            "Base model not found at %s - run `make download` first.", args.base_model
+        return 1
+
+    if not check_tools_available(args.evals):
+        logger.warning(
+            "Some tools for %s are missing; run `make prove` for the full "
+            "ada-eval pipeline. Generation metrics are unaffected.",
+            args.evals,
         )
-        sys.exit(1)
 
-    # Check tool availability
-    tools_ok = check_tools_available()
-    if not tools_ok:
-        logger.warning("GNAT tools (gnatprove, gprbuild, gnatformat) not found in the Alire environment.")
-        logger.warning("Install them via `make prove` (Alire dev workspace build).")
-        logger.warning("BLEU and compliance metrics will still be computed.")
+    references = load_reference_index(ADA_EVAL_DIR)
+    if not references:
+        logger.error(
+            "No ada-eval canonical solutions at %s; run `make fetch-sources`.", ADA_EVAL_DIR
+        )
+        return 1
+    logger.info("Indexed %d canonical solutions", len(references))
 
-    methodology = load_eval_methodology()
-    if methodology.get("categories"):
-        logger.info("Evaluation categories derived from ada-eval: %s", list(methodology["categories"].keys()))
+    labels = [(FINE_TUNED_LABEL, str(args.model)), (BASE_MODEL_LABEL, str(args.base_model))]
+    per_model: dict[str, Any] = {}
+    for label, model_path in labels:
+        scored = score_model(label, args.generated_dir, references, args.max_samples)
+        scored["model"] = model_path
+        scored["ada_eval"] = compute_stats_from_ada_eval(label, args.evals)
+        per_model[label] = scored
+        logger.info(
+            "%s: %d/%d samples scored (benchmark has %d), BLEU=%.4f, exact=%d",
+            label, scored.get("samples_scored", 0), scored.get("samples_generated", 0),
+            scored.get("reference_total", 0), scored.get("bleu", 0.0),
+            sum(1 for s in scored["per_sample"] if s["exact_match"]),
+        )
+        scored_n, benchmark_n = scored.get("samples_scored", 0), scored.get("reference_total", 0)
+        if benchmark_n and scored_n < benchmark_n:
+            logger.warning(
+                "%s covers only %d of the %d benchmark samples. Rates below cover the "
+                "generated subset only; re-run `make generate` for full coverage.",
+                label, scored_n, benchmark_n,
+            )
 
-    results = run_evaluation(args)
+    scored_any = [m for m in per_model.values() if m.get("samples_scored")]
+    if not scored_any:
+        logger.error(
+            "No generated solutions found under %s. Run `make generate` first; "
+            "there is nothing to score.",
+            args.generated_dir,
+        )
+        return 1
 
-    # Print summary
+    results: dict[str, Any] = {
+        # Key names are the contract scripts/gen_eval_report.py reads.
+        "bleu": per_model[FINE_TUNED_LABEL].get("bleu", 0.0),
+        "compliance": per_model[FINE_TUNED_LABEL].get("compliance", 0.0),
+        "per_model": per_model,
+        "generated": {
+            "root": str(args.generated_dir),
+            "reference_total": len(references),
+            "samples": {label: m.get("samples_scored", 0) for label, m in per_model.items()},
+        },
+        "timestamp": datetime.now(UTC).isoformat(timespec="seconds"),
+        "evals": args.evals,
+        "eval_categories": sorted(ADA_EVAL_CATEGORIES),
+        "methodology_source": str(ADA_EVAL_DIR),
+        "metric_notes": {
+            "bleu": "BLEU-4, add-one smoothed, brevity penalty, single reference",
+            "exact_match": "normalised text equality on the subprogram's own source file",
+            "compliance": "standard detected on the canonical solution, not on the model output",
+        },
+    }
+
     print("\n" + "=" * 70)
     print("Q3AS EVALUATION SUMMARY")
     print("=" * 70)
-    print(f"Total samples evaluated     : {results['total_samples']}")
-    print(f"Average BLEU score          : {results['avg_bleu']:.4f}")
-    print(f"Average compliance          : {results['avg_compliance']:.4f}")
-    print(f"Standard distribution       : {results['standard_distribution']}")
-    print()
+    for label, model in per_model.items():
+        print(f"--- {label} ({model['model']}) ---")
+        benchmark = model.get("reference_total", 0)
+        scored_count = model.get("samples_scored", 0)
+        coverage = f"{scored_count}/{benchmark} of the benchmark" if benchmark else str(scored_count)
+        print(f"  Samples scored  : {coverage} (generated {model.get('samples_generated', 0)})")
+        if benchmark and scored_count < benchmark:
+            print(
+                f"  ** partial coverage: {benchmark - scored_count} benchmark samples "
+                "have no generation **"
+            )
+        if model.get("samples_scored"):
+            print(f"  BLEU-4          : {model['bleu']:.4f}")
+            print(
+                f"  Exact match     : {model['exact_match_rate'] * 100:.1f}%"
+                f"  ({sum(1 for s in model['per_sample'] if s['exact_match'])}/{model['samples_scored']})"
+            )
+            print(f"  File-set match  : {model['file_set_match_rate'] * 100:.1f}%")
+            print(f"  Std compliance  : {model['compliance']:.4f}")
+            print(f"  Standards       : {model.get('standard_distribution', {})}")
+        print_stats_block(model["ada_eval"])
 
-    ft = results["fine_tuned"]
-    if ft["stats"] and any(s.get("total", 0) for s in ft["stats"].values()):
-        print(f"--- Fine-tuned ({args.model}) ---")
-        print_stats_block(args.model.name, ft["stats"])
-
-    base = results["base_model"]
-    if base["stats"] and any(s.get("total", 0) for s in base["stats"].values()):
-        print(f"\n--- Base ({args.base_model}) ---")
-        print_stats_block(str(args.base_model), base["stats"])
-
-    # Comparison
-    if ft["stats"] and base["stats"]:
+    ft, base = per_model[FINE_TUNED_LABEL], per_model[BASE_MODEL_LABEL]
+    if ft.get("samples_scored") and base.get("samples_scored"):
         print(f"\n{'=' * 70}")
         print("COMPARISON (Fine-tuned vs Base)")
         print(f"{'=' * 70}")
-        print(f"{'Metric':<25s} {'Base':>10s} {'Fine-tuned':>12s} {'Delta':>10s}")
-        print("-" * 60)
+        print(f"{'Metric':<22s} {'Base':>10s} {'Fine-tuned':>12s} {'Delta':>10s}")
+        print("-" * 56)
+        for key, display in (
+            ("bleu", "BLEU-4"),
+            ("exact_match_rate", "Exact match"),
+            ("file_set_match_rate", "File-set match"),
+            ("compliance", "Std compliance"),
+        ):
+            b, f = base.get(key, 0.0), ft.get(key, 0.0)
+            print(f"{display:<22s} {b:>9.1%} {f:>11.1%} {f - b:>+9.1%}")
+        print(f"\n{'=' * 70}")
 
-        for stat_key, numerator, display in [
-            ("build", "compiled", "Compilation pass rate"),
-            ("test", "passed", "Test pass rate"),
-            ("prove", "proved", "SPARK proof success"),
-        ]:
-            base_block = base["stats"].get(stat_key, {})
-            ft_block = ft["stats"].get(stat_key, {})
-            base_rate = base_block.get(numerator, 0) / max(base_block.get("total", 1), 1) * 100
-            ft_rate = ft_block.get(numerator, 0) / max(ft_block.get("total", 1), 1) * 100
-            delta = ft_rate - base_rate
-            print(f"{display:<25s} {base_rate:>9.1f}% {ft_rate:>11.1f}% {delta:>+9.1f}%")
-
-    print(f"\nMethodology source: {results['methodology_source']}")
-    print(f"Eval categories: {[c['name'] for c in results['eval_categories']]}")
+    print(f"Methodology source: {results['methodology_source']}")
     print("=" * 70 + "\n")
 
-    # Save results
     output_path = Path("outputs") / "eval_results.json"
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(output_path, "w", encoding="utf-8") as f:
-        json.dump(results, f, indent=2, ensure_ascii=False)
+    output_path.write_text(json.dumps(results, indent=2, ensure_ascii=False), encoding="utf-8")
     logger.info("Results saved to %s", output_path)
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

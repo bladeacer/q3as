@@ -36,32 +36,45 @@ EXPORT_HEADERS = $(if $(strip $(PY_CPATH)),CPATH=$(PY_CPATH),)
 help: ## Show this help message
 	@echo "q3as - Qwen 3 Ada SPARK - Available targets:"
 	@echo ""
-	@echo "  make all           - Run full pipeline: model download (if needed), dataset, train (logs to training.log), generate, evaluate"
-	@echo "  make setup         - One-shot bootstrap: fetch source repos into the archive cache, .env, uv sync"
-	@echo "  make sync          - Install/update all dependencies via uv sync"
-	@echo "  make download      - Download and sanity-check the Qwen3-8B model (Qwen/Qwen3-8B -> models/qwen3-8b)"
-	@echo "  make build-dataset - Build the training dataset from Ada source trees"
-	@echo "                      (cache: adacovex, Ada_CRDT, Ada-83-TLALOC, and the RobertBoettcherSF Ada-Algorithms monorepo)"
-	@echo "                      plus parser outputs (docs chunks, Ada AST units) when present"
-	@echo "  make fetch-sources - Fetch source repos into the archive cache (data/raw_repos)"
+	@echo "  make all            - Run full pipeline: model download (if needed), dataset,"
+	@echo "                        train (logs to training.log), generate, evaluate, report"
+	@echo "  make setup          - One-shot bootstrap: fetch source repos into the archive"
+	@echo "                        cache, .env, Alire index, uv sync, Python headers"
+	@echo "  make sync           - Install/update all dependencies via uv sync"
+	@echo "  make download       - Download and sanity-check the Qwen3-8B model"
+	@echo "                        (Qwen/Qwen3-8B -> models/qwen3-8b)"
+	@echo "  make check-model    - Download the model only when it is missing"
+	@echo ""
+	@echo "  make fetch-sources  - Fetch source repos into the archive cache (data/raw_repos)"
 	@echo "  make parse-data     - Run the parser modules into data/processed/ extra JSONL"
-	@echo "                       (doc chunking, libadalang/structural Ada AST extraction)"
+	@echo "                        (doc chunking, libadalang/structural Ada AST extraction)"
+	@echo "  make gen-contracts  - Generate gnatprove-verified contract turns (cached; FORCE=1)"
+	@echo "  make build-dataset  - Build the training dataset from Ada source trees"
+	@echo "                        (cache: adacovex, Ada_CRDT, Ada-83-TLALOC, and the"
+	@echo "                        RobertBoettcherSF Ada-Algorithms monorepo) plus the"
+	@echo "                        parser outputs from parse-data and gen-contracts"
 	@echo "  make ast-deps       - Build and install libadalang.so for the Ada AST parser"
-	@echo "                       (optional; without it the parser uses its structural scanner)"
-	@echo "  make train         - Run 8 GB-safe QLoRA fine-tuning with Unsloth (adapter-only by default)"
-	@echo "  make generate      - Generate Ada code with bounded memory settings"
-	@echo "  make eval          - Run baseline evaluation with BLEU + ada-eval metrics"
-	@echo "                      (compilation, test, SPARK proof; base model comparison)"
-	@echo "  make eval-pipeline - Run full ada-eval BUILD/TEST/PROVE pipeline"
-	@echo "  make eval-report   - Write versioned result summary to docs/results/"
-	@echo "  make bump-version  - Bump version in both Alire manifests (VERSION=x.y.z or PART=major|minor|patch)"
-	@echo "  make prove         - Fetch the Alire dev toolchain (gnatprove etc. from alire-dev.toml)"
-	@echo "  make test          - Run the Python unit tests (pytest)"
-	@echo "  make validate-defects - GNAT-compile defect pairs from the sibling repos and check"
-	@echo "                       the claimed compiler messages (scripts/validate_defects.py)"
-	@echo "  make agents-tree   - Regenerate the project file tree inside AGENTS.md"
-	@echo "  make lint          - Run ruff and mypy over the project sources"
-	@echo "  make clean         - Remove generated outputs and caches"
+	@echo "                        (optional; without it the parser uses its structural scanner)"
+	@echo "  make check-integrity - Fail if any split file contains ada-eval evaluation content"
+	@echo "  make check-links    - Check every relative markdown link/anchor resolves"
+	@echo ""
+	@echo "  make train          - Run 8 GB-safe QLoRA fine-tuning with Unsloth (adapter-only)"
+	@echo "  make generate       - Generate Ada code with bounded memory settings"
+	@echo "  make eval           - Score the generated solutions against the ada-eval canonical"
+	@echo "                        solutions (BLEU-4, exact match, compliance) plus ada-eval"
+	@echo "                        compilation/test/proof for both models"
+	@echo "  make eval-pipeline  - Run full ada-eval BUILD/TEST/PROVE pipeline"
+	@echo "  make eval-report    - Write versioned result summary to docs/results/"
+	@echo "  make validate-defects - GNAT-compile defect pairs and check the claimed messages"
+	@echo ""
+	@echo "  make prove          - Fetch the Alire dev toolchain (gnatprove, gnatformat)"
+	@echo "  make ada-env        - Show the PATH alr exec provides (debug helper)"
+	@echo "  make bump-version   - Bump version in the three Alire manifests + pyproject.toml"
+	@echo "                        (VERSION=x.y.z or PART=major|minor|patch)"
+	@echo "  make test           - Run the Python unit tests (pytest)"
+	@echo "  make lint           - Run ruff and mypy over the project sources"
+	@echo "  make agents-tree    - Regenerate the project file tree inside AGENTS.md"
+	@echo "  make clean          - Remove generated outputs and caches"
 	@echo ""
 	@echo "Usage: make [target]   (default: help)"
 
@@ -124,7 +137,7 @@ eval-pipeline: ## Run full ada-eval BUILD/TEST/PROVE pipeline
 eval-report: ## Write versioned result summary to docs/results/ (version from alire.toml)
 	uv run python scripts/gen_eval_report.py
 
-bump-version: ## Bump version in alire.toml + alire-dev.toml (VERSION=x.y.z or PART=major|minor|patch)
+bump-version: ## Bump version in the three Alire manifests + pyproject.toml (VERSION=x.y.z or PART=major|minor|patch)
 	@if [ -n "$(VERSION)" ]; then \
 		uv run python scripts/bump_version.py set $(VERSION); \
 	else \
@@ -154,7 +167,7 @@ test: ## Run the Python unit tests
 
 lint: ## Run ruff and mypy over the project sources, then check markdown links
 	uv run ruff check data/processing_scripts/ scripts/ eval/ tests/ tools/
-	uv run mypy data/processing_scripts/build_dataset.py data/processing_scripts/parse_docs.py data/processing_scripts/parse_ada_ast.py data/processing_scripts/eval_guard.py data/processing_scripts/code_variants.py scripts/alire_env.py scripts/bump_version.py scripts/build_libadalang.py scripts/gen_eval_report.py scripts/gen_agents_tree.py scripts/collect_cap_results.py scripts/make_probe_splits.py
+	uv run mypy data/processing_scripts/build_dataset.py data/processing_scripts/parse_docs.py data/processing_scripts/parse_ada_ast.py data/processing_scripts/eval_guard.py data/processing_scripts/code_variants.py eval/ada_eval_common.py eval/baseline_eval.py scripts/alire_env.py scripts/bump_version.py scripts/build_libadalang.py scripts/gen_eval_report.py scripts/gen_agents_tree.py scripts/collect_cap_results.py scripts/make_probe_splits.py
 	uv run python tools/check-links.py
 
 validate-defects: ## Compile-check dataset defect pairs with the Alire GNAT

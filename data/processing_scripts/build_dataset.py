@@ -2791,13 +2791,17 @@ def build_dataset(
     # evaluation suite (verbatim, reformatted, or identifier-renamed). One
     # bad turn poisons its whole group. Runs before dedup and split so no
     # eval-derived record can reach any split file.
-    all_grouped, guard_dropped, guard_reasons = eval_guard.contaminated_groups(all_grouped)
+    records_before_guard = len(all_grouped)
+    all_grouped, guard_dropped_groups, guard_reasons = eval_guard.contaminated_groups(all_grouped)
     guard_sigs = eval_guard.load_eval_signatures()
-    if guard_dropped:
+    guard_dropped_records = records_before_guard - len(all_grouped)
+    if guard_dropped_groups:
+        # Report records and groups separately: contaminated_groups returns a
+        # group count, and calling it a record count overstated the drop.
         logger.warning(
-            "Eval guard dropped %d records in %d groups: %s",
-            guard_dropped,
-            len(set(guard_reasons)),
+            "Eval guard dropped %d records in %d contaminated groups: %s",
+            guard_dropped_records,
+            guard_dropped_groups,
             ", ".join(sorted(set(guard_reasons))[:10]),
         )
 
@@ -2877,7 +2881,8 @@ def build_dataset(
             "eval_guard": {
                 "degraded": guard_sigs.degraded,
                 "blocked_signatures": len(guard_sigs),
-                "dropped_records": guard_dropped,
+                "dropped_groups": guard_dropped_groups,
+                "dropped_records": guard_dropped_records,
             },
             "ratios": {"train": 0.90, "val": 0.05, "test": 0.05},
             "counts": split_counts,
@@ -2962,7 +2967,7 @@ def main() -> None:
     parser.add_argument(
         "--extra-turns", type=Path, action="append", default=None,
         help="Pre-built chat JSONL from the parser modules to merge into "
-             "the dataset (repeatable). Defaults to the two standard "
+             "the dataset (repeatable). Defaults to the three standard "
              "parser outputs when they exist.",
     )
     parser.add_argument(

@@ -112,10 +112,11 @@ records from ada-eval.
   ahead of the community index when the installed `alr` is older than the
   latest release, so modern binary crates (gnatprove 16.x, gnatformat 26.x)
   install on old distro alr packages (e.g. alr 1.2.1 on Debian).
-- `setup.sh` - one-shot bootstrap: shallow-clones the sibling repos, creates
-  `.env` from `.env.dev` (never overwrites), registers the vendored Alire
-  index when `alr` is outdated, runs `uv sync`, extracts local Python
-  headers for Triton.
+- `setup.sh` - one-shot bootstrap: fetches the data/guidance repositories
+  into the archive cache with `scripts/fetch_repos.py` (HTTP tarballs, no
+  git), creates `.env` from `.env.dev` (never overwrites), registers the
+  vendored Alire index when `alr` is outdated, runs `uv sync`, extracts
+  local Python headers for Triton.
 - `scripts/python_env.sh` - prints the `CPATH` Triton needs to compile its
   CUDA driver shim, resolved from the interpreter that will run training (the
   venv, else `python3`) instead of a hardcoded version. The single place both
@@ -129,8 +130,9 @@ records from ada-eval.
 
 ## Ada toolchain through Alire
 
-q3as never calls system `gnat`/`gprbuild`/`gnatprove` directly. The dev
-manifest declares the toolchain; commands run through `alr exec`:
+q3as resolves every Ada tool through the Alire environment, never a bare
+`PATH` lookup. The dev manifest declares the toolchain; commands run
+through `alr exec`:
 
 - Shell: `scripts/ada_env.sh <cmd>` (used by Makefile targets).
 - Python: `from alire_env import find_tool` then pass
@@ -193,7 +195,9 @@ q3as/
        results/
            README.md
            result-data-v0.1.0.json
+           result-data-v0.2.0.json
            result-v0.1.0.md
+           result-v0.2.0.md
        architecture.md
        data-provenance.md
        datasets-and-training.md
@@ -201,6 +205,7 @@ q3as/
        toolchain-setup.md
    eval/
        results/
+       ada_eval_common.py
        baseline_eval.py
        eval_pipeline.py
        generate.py
@@ -236,11 +241,13 @@ q3as/
        run_cap_experiment.sh
        validate_defects.py
    tests/
+       test_alire_env.py
        test_build_dataset.py
        test_code_variants.py
        test_defect_families.py
        test_eval_guard.py
        test_eval_report_training.py
+       test_eval_scoring.py
        test_generate.py
        test_parsers.py
        test_reporting.py

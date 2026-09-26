@@ -145,10 +145,11 @@ def _run_worker(args: argparse.Namespace) -> int:
     process can OOM even after empty_cache. A fresh process starts with a
     pristine GPU, which keeps dual-model runs inside 8 GB VRAM.
     """
-    if args.verbose:
-        logging.getLogger().setLevel(logging.DEBUG)
+    # basicConfig first: it sets the root level when no handlers exist yet
+    # and would otherwise overwrite an earlier setLevel(DEBUG).
     logging.basicConfig(
-        level=logging.INFO, format="%(asctime)s [%(levelname)s] [worker] %(message)s"
+        level=logging.DEBUG if args.verbose else logging.INFO,
+        format="%(asctime)s [%(levelname)s] [worker] %(message)s",
     )
 
     set_generation_seed(args.seed)
@@ -627,9 +628,11 @@ def run_generation_for_model(
 
 def main() -> None:
     args = parse_args()
-    if args.verbose:
-        logging.getLogger().setLevel(logging.DEBUG)
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+    # basicConfig first: it would otherwise overwrite an earlier setLevel(DEBUG).
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose else logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+    )
 
     logger.info("Starting Ada code generation pipeline")
     logger.info("Fine-tuned model: %s", args.model)
@@ -683,13 +686,20 @@ def main() -> None:
         if proc.stderr:
             sys.stderr.write(proc.stderr)
         if proc.returncode != 0:
-            logger.error("Worker for %s failed with exit code %d", label, proc.returncode)
-            return {"by_dataset": {}, "total": 0, "output_dir": str(GENERATED_DIR / label)}
+            # A crashed or OOM-killed worker used to be reported as a
+            # successful zero-sample run, which left stale per-sample files on
+            # disk and reported success. Fail the whole command instead.
+            raise SystemExit(
+                f"generation worker for {label} failed with exit code "
+                f"{proc.returncode}; see its output above"
+            )
         try:
             return json.loads(proc.stdout.strip().splitlines()[-1])
         except (json.JSONDecodeError, IndexError):
-            logger.error("Could not parse worker summary for %s", label)
-            return {"by_dataset": {}, "total": 0, "output_dir": str(GENERATED_DIR / label)}
+            raise SystemExit(
+                f"could not parse the summary line from the {label} generation worker; "
+                "see its output above"
+            ) from None
 
     base_label = f"base_{args.base_model.name}"
     summary: dict[str, Any] = {
@@ -704,10 +714,14 @@ def main() -> None:
     with open(Path("outputs/generation_summary.json"), "w") as f:
         json.dump(summary, f, indent=2)
 
-    logger.info(
-        "Generation complete: %d fine-tuned, %d base samples",
-        summary["fine_tuned"]["total"], summary[base_label]["total"],
-    )
+    ft_total = summary["fine_tuned"]["total"]
+    base_total = summary[base_label]["total"]
+    logger.info("Generation complete: %d fine-tuned, %d base samples", ft_total, base_total)
+    if ft_total == 0 and base_total == 0:
+        raise SystemExit(
+            "no samples were generated for either model; refusing to report a "
+            "successful zero-sample run"
+        )
 
 
 if __name__ == "__main__":

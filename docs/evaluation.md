@@ -17,8 +17,8 @@ framework (cached at `data/raw_repos/AdaCore/ada-eval`). Three sample sets are u
 Samples live in the cached ada-eval's
 `data/base/expanded/<dataset>/<sample>/` with a
 `base/` project (what the model may edit), a `solution/` project (the
-reference answer, used only for `canonical_evaluation` sanity checks - it
-must never appear in training data; see
+reference answer - `make eval` scores generations against it, and it must
+never appear in training data; see
 [Data provenance](data-provenance.md)), and a `tests/` project.
 
 These samples are the *entire* ada-eval corpus; there is no surplus data
@@ -36,9 +36,16 @@ Each model response is scored on three dimensions:
    for the target subprogram. Results are `proved`, `unproved` (with the
    specific check kinds left over, e.g. `VC_OVERFLOW_CHECK`), or `error`.
 
-RUN and BASE are compared to measure fine-tuning effect; a canonical
-solutions pass (13/13 across all three) doubles as a standing toolchain
-sanity check.
+`make eval-pipeline` runs BUILD, TEST, and PROVE, in that order, and the
+fine-tuned and base runs are compared side by side to measure the
+fine-tuning effect. There is no RUN or BASE eval kind in q3as: the three
+kinds above are the whole set, and `--evals` selects among them.
+
+`make eval` scores the generations in `outputs/generated_solutions/` against
+the canonical solutions directly (BLEU-4, exact match, file-set match,
+standard compliance), so it measures the models rather than the corpus. It
+needs `make generate` to have run first and exits non-zero when there is
+nothing to score.
 
 ## Reading the results
 
@@ -54,7 +61,9 @@ sanity check.
   provable contracts.
 - **All-error PROVE rows** (result `error` instead of `unproved`) mean the
   harness never really ran gnatprove - a pipeline bug, not a model result.
-  The canonical sanity check distinguishes the two.
+  `eval/ada_eval_common.py` classifies `proved_incorrectly` and
+  `subprogram_not_found` as unproved rather than as errors, so an incorrect
+  proof cannot inflate the proved rate.
 
 ## Running
 

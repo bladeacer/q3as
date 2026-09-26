@@ -5,12 +5,17 @@ on distributions that ship an outdated `alr`.
 
 ## The rule: no system Ada tools
 
-q3as never calls system `gnat`, `gprbuild`, or `gnatprove` directly. All
-Ada tool invocations go through the Alire environment:
+q3as resolves every Ada tool through the Alire environment rather than
+picking a binary off `PATH`:
 
-- Shell: `scripts/ada_env.sh <cmd>` (used by all Makefile targets).
+- Shell: `scripts/ada_env.sh <cmd>`, a thin wrapper around `alr exec`.
 - Python: `from alire_env import find_tool`, then pass
   `env=alire_env_path()` to `subprocess.run`.
+
+The Python side is what the pipeline actually uses: the eval scripts, the
+defect validator, and the contract generator all resolve their binaries
+through `alire_env`. The shell wrapper exists for interactive use and for
+`make ada-env`, which prints the managed `PATH` for debugging.
 
 The dev toolchain (gnatprove, gnatformat) is declared in
 `alire-dev.toml`; `alire.toml` stays a clean publishing manifest. Fetch it
@@ -108,10 +113,17 @@ library is installed; pass `FORCE=1` to rebuild.
 
 ```bash
 make prove                                  # sync the dev toolchain
-scripts/ada_env.sh gnatprove --version      # runs inside the Alire env
 make ast-deps                               # build the AST parser's libadalang
-uv run python scripts/alire_env.py          # resolves managed binaries
+uv run python scripts/alire_env.py          # report where each tool resolves
 ```
 
-The eval pipeline and the defect validator resolve every tool through this
-environment and refuse to run against a missing managed tool.
+`scripts/alire_env.py` exits non-zero when a tool the pipeline invokes is
+missing, so it doubles as the verification step; `gnatdoc` is reported but
+never fails it, because `alire-dev.toml` does not depend on it.
+
+The eval pipeline and the defect validator resolve every tool through
+`alire_env`, which searches the Alire prefix first and only then the system
+`PATH`. A tool found on the system is still used - that is what covers Alire
+"external" installs such as a distribution-provided gnatprove - but it is
+reported once on stderr so a mixed environment stays visible. A tool that is
+missing entirely raises, and the callers say which command installs it.

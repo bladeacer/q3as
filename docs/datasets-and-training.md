@@ -11,10 +11,33 @@ configured for reproducibility and early stopping.
 | `defect_pair` | Correct code next to a deliberately broken variant, with diagnosis, the GNAT-verified compiler message, and the fix |
 | `doc_qa` | Ada code blocks from AdaCore course material, with a completion answer and an STE-compliant explanation answer |
 | `doc_section` | Heading-chunked sections of course material (`parse_docs.py`) |
-| `ast_impl` / `ast_contract` / `ast_contract_write` / `ast_type` | AST-derived turns (`parse_ada_ast.py`): body-from-spec completion, contract reading, **contract writing** (bare spec in, `Pre`/`Post`/`Global`/`Depends` declaration out), and constrained types |
+| `ast_qa` | AST-derived turns (`parse_ada_ast.py`): body-from-spec completion, contract reading, **contract writing** (bare spec in, `Pre`/`Post`/`Global`/`Depends` declaration out), and constrained types. The parser emits these as `ast_impl`, `ast_contract`, `ast_contract_write` and `ast_type`; the builder records them under the single dataset kind `ast_qa`, which is the name that appears in `dataset_metadata.json` |
 | `toolchain_qa` | Question/answer turns from the AdaCore agent skills |
 | `contract_synth` | gnatprove-verified synthetic contract turns (`scripts/gen_contract_mutations.py`): contract writing, why-weakened-contracts-fail, and fix turns |
 | `ast_defect` / `variant` | Defect and renamed-variant turns derived from ingested parser records (same split group as their source record) |
+
+### How AST units are extracted
+
+`parse_ada_ast.py` has two interchangeable backends behind one record
+shape. It uses **libadalang** when the shared library is present
+(`make ast-deps`, see [toolchain setup](toolchain-setup.md)) and its
+**structural scanner** otherwise, so the dataset builds either way.
+
+The difference is precision, not reach. libadalang parses the unit, so it
+resolves the enclosing package through the real tree, separates
+declarations from bodies, knows whether a spec is syntactically valid
+(recorded as `valid`), and reads aspect clauses off the declaration rather
+than by pattern matching. The scanner is regex-based and approximates the
+same fields.
+
+Both backends emit the same keys, and the turn kinds above do not change
+between them, so switching backends changes how many units are found but
+not what a turn looks like. Two behaviours are deliberate and shared:
+anonymous access types declare an unnamed dereference function, which has
+no name to train on and is skipped by both; and the aspect clause is parsed
+by the same `_extract_aspects` helper in both, so the `Pre`/`Post` maps
+match. `tests/test_parsers.py` pins the libadalang path when it is
+installed and asserts the two backends agree on subprogram names.
 
 ## Natural-language variety, code exactness
 
@@ -43,7 +66,11 @@ merges all of them via `--extra-turns`. The build metadata
 `extra_turns_files` (`records` / `ingested` / `defects` / `variants`) and
 per-input-dir pair counts under `records_by_input_dir`, so a missing or
 empty parser output is visible instead of vanishing silently. Records
-dropped by the eval guard or by dedup do not appear in any count.
+dropped by the eval guard or by dedup do not appear in any count. The
+per-kind tally is taken at ingestion, *before* those two passes, so the
+kinds sum to more than the split totals: the difference is exactly
+`deduped_duplicates` plus `eval_guard.dropped_records`, both recorded in
+`dataset_metadata.json`.
 Empty-assistant records ("provide the body" questions with no answer,
 from spec-only or impl-only sources) are dropped at build time and at
 training-load time; their count is recorded under

@@ -25,14 +25,15 @@ resolves as a fallback, but nothing creates it anymore.
 | [agent-sh/ada-spark](https://github.com/agent-sh/ada-spark) | `data/raw_repos/agent-sh/ada-spark` | Current-toolchain guidance in system prompts | MIT |
 | [AminBlg/SimpleEnglish](https://github.com/AminBlg/SimpleEnglish) | `data/raw_repos/AminBlg/SimpleEnglish` | STE writing rules and word map (paraphrased, no spec text) | MIT |
 | [AdaCore/skills](https://github.com/AdaCore/skills) | `data/raw_repos/AdaCore/skills` | Toolchain QA (gnatprove, alire, gnatdoc, gnattest, gnatfuzz) | Apache-2.0 |
-| [RobertBoettcherSF/Ada-Algorithms](https://github.com/RobertBoettcherSF/Ada-Algorithms) | `data/raw_repos/RobertBoettcherSF/Ada-Algorithms` | Ada/SPARK algorithm implementations in a single monorepo (distributed systems, graph algorithms, image processing, compression, SPARK-verified sheets, parsers): thousands of files across category directories. Fetched as one archive. The author approved training use (LLM-usage disclosure and license in the repository's README) | MIT |
+| [RobertBoettcherSF/Ada-Algorithms](https://github.com/RobertBoettcherSF/Ada-Algorithms) | `data/raw_repos/RobertBoettcherSF/Ada-Algorithms` | Ada/SPARK algorithm implementations in a single monorepo (distributed systems, graph algorithms, image processing, compression, SPARK-verified sheets, parsers): thousands of files across category directories. Fetched as one archive. The author approved training use; that approval is not recorded in the repository (the README carries no LLM-usage disclosure). The MIT text is the repository's `LICENSE` | MIT |
 
 Licensing summary: Apache-2.0 and MIT code is redistributable with
 attribution; CC-BY-4.0 course material is used with attribution; the
 GPL-licensed Ada-83-TLALOC code is used for model training only (weights are
 not source-code redistribution) and is covered by the author's explicit
-permission. The RobertBoettcherSF Ada-Algorithms monorepo is MIT with the
-author's green light for training use.
+permission. The RobertBoettcherSF Ada-Algorithms monorepo is MIT (its `LICENSE`
+file) with the author's green light for training use, a permission granted
+outside the repository.
 
 ## Toolchain inputs (not training data)
 
@@ -106,18 +107,23 @@ build (see below) still drops a similar volume.
 Current shipped dataset (AST_STRUCTURAL_CAP = 10), as recorded in
 `data/processed/dataset_metadata.json` at build time:
 
-- 31,949 turns; group-aware splits 28,860 train / 1,519 val / 1,570 test,
+- 73,080 turns; group-aware splits 65,809 train / 3,709 val / 3,562 test,
 - eval guard: 479 blocked signatures (255 exact, 176 structural, plus
-  prompts), 516 records dropped in 116 groups,
-- dedup before split: 24,823 duplicates removed (6,509 verbatim, 18,314
+  prompts), 695 contaminated groups dropped,
+- dedup before split: 58,058 duplicates removed (21,410 verbatim, 36,648
   AST-structural over the cap),
-- 2,438 empty-assistant records dropped (mostly spec-only units from the Ada-
+- 2,413 empty-assistant records dropped (mostly spec-only units from the Ada-
   Algorithms monorepo).
 
 The guard counts shift slightly between builds because dedup and the cap
 change which duplicate of a guarded group is seen first; `make
 check-integrity` re-verifies the whole pipeline from content, so it stays
 the source of truth, not these numbers.
+
+The guard drops whole *groups*, not individual records: one contaminated
+turn removes every sibling turn derived from the same unit, so a group count
+is what the guard reports. `dataset_metadata.json` records it as
+`eval_guard.dropped_groups` alongside `dropped_records`.
 
 Known limit: hash-based blocking identifies content up to renaming and
 reformatting. A semantically equivalent but restructured algorithm is not

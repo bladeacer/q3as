@@ -175,9 +175,11 @@ def split_records(
 def setup_training_environment(args: argparse.Namespace, has_val: bool) -> dict[str, Any]:
     """Configure training hyperparameters for 8 GB VRAM QLoRA training.
 
-    With a validation split: eval loss every --eval-steps, best checkpoint
-    restored at the end, and early stopping once the validation loss has
-    not meaningfully improved for --early-stopping-patience evaluations.
+    With a validation split: eval loss every --eval-steps, and early stopping
+    once the validation loss has not meaningfully improved for
+    --early-stopping-patience evaluations. The adapter saved at the end is the
+    final state, not the best one: ``load_best_model_at_end`` is off, so
+    nothing is restored.
     """
     config: dict[str, Any] = {
         "learning_rate": args.lr,
@@ -219,23 +221,31 @@ def setup_training_environment(args: argparse.Namespace, has_val: bool) -> dict[
         "report_to": "none",
     }
     if has_val:
-        # load_best_model_at_end requires save_steps to be a multiple of
-        # eval_steps; round the user's save interval up to the next multiple.
+        # The adapter saved at the end is the final state, so a checkpoint
+        # that is not a multiple of eval_steps can fall between two eval
+        # points and never be the state the loss curve was measured at.
+        # Keep save_steps a multiple of eval_steps rather than silently
+        # rounding, so the flag on disk matches the flag the user passed.
         eval_steps = max(args.eval_steps, 1)
         save_steps = max(args.save_steps, eval_steps)
-        remainder = save_steps % eval_steps
-        if remainder:
-            save_steps += eval_steps - remainder
+        if save_steps % eval_steps:
+            logger.warning(
+                "save_steps=%d is not a multiple of eval_steps=%d; using %d. "
+                "Checkpoints will not land on every evaluation point.",
+                save_steps, eval_steps, save_steps + (eval_steps - save_steps % eval_steps),
+            )
+            save_steps += eval_steps - save_steps % eval_steps
         config["save_steps"] = save_steps
     return config
 
 
 def main() -> None:
     args = parse_args()
-    if args.verbose:
-        logging.getLogger().setLevel(logging.DEBUG)
-
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+    # basicConfig first: it would otherwise overwrite an earlier setLevel(DEBUG).
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose else logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+    )
 
     logger.info("Starting q3as QLoRA training pipeline...")
 
@@ -255,6 +265,10 @@ def main() -> None:
 
     val_data = load_jsonl_records(args.val_dataset)
     test_data = load_jsonl_records(args.test_dataset)
+    # Track where each split came from, so the recorded provenance cannot claim
+    # a held-out file was used when it was carved out of the training data.
+    val_source = str(args.val_dataset) if val_data else "fallback-carve"
+    test_source = str(args.test_dataset) if test_data else "fallback-carve"
     if val_data:
         logger.info(
             "Validation split: %d examples (%s)", len(val_data), args.val_dataset
@@ -262,8 +276,19 @@ def main() -> None:
     else:
         # Dataset predates the group-aware split (or a custom --dataset was
         # passed): carve deterministic val/test slices off the training data
-        # so eval loss, early stopping, and test metrics still work.
-        dataset, val_data, test_data = split_records(dataset, seed=args.seed)
+        # so eval loss, early stopping, and test metrics still work. An
+        # already-loaded test split is kept: a missing val file must not
+        # discard real held-out data.
+        logger.warning(
+            "No validation split at %s; carving val/test from the training data. "
+            "Reported test metrics will not be held-out.",
+            args.val_dataset,
+        )
+        dataset, carved_val, carved_test = split_records(dataset, seed=args.seed)
+        val_data = carved_val
+        if not test_data:
+            test_data = carved_test
+            test_source = "fallback-carve"
 
     config = setup_training_environment(args, has_val=bool(val_data))
     logger.info(
@@ -572,8 +597,8 @@ def main() -> None:
                 "train": train_count,
                 "val": val_count,
                 "test": test_count,
-                "val_source": str(args.val_dataset) if eval_dataset is not None else "fallback-carve",
-                "test_source": str(args.test_dataset) if test_dataset is not None else "fallback-carve",
+                "val_source": val_source,
+                "test_source": test_source,
             },
             "early_stopping_patience": args.early_stopping_patience if eval_dataset is not None else None,
             "early_stopped": early_stopped,

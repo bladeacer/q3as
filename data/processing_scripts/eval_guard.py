@@ -15,9 +15,10 @@ record against it at two levels:
    canonicalized, case folded (Ada is case insensitive), whitespace
    collapsed. Catches verbatim and re-formatted copies.
 2. **Structural token hashing** - the normalized token sequence with every
-   user identifier alpha-renamed by first occurrence and every number
-   collapsed to one symbol. Catches copies that renamed identifiers or
-   changed numeric spellings while keeping the logic identical.
+   user identifier alpha-renamed by first occurrence. Numeric literals are
+   kept verbatim: a changed bound or constant is a logic change, so a copy
+   that alters one is not a structural duplicate. Catches copies that renamed
+   identifiers while keeping the logic identical.
 
 Prompt text from the eval samples is additionally checked as a substring,
 so a training record that embeds an eval task statement is caught even
@@ -329,7 +330,10 @@ def contaminated_groups(
 
     One bad turn poisons its group: the sibling turns of the same unit are
     paraphrases of the same eval content, so the group goes as a whole.
-    Returns (kept, dropped_count, reasons).
+    Returns (kept, dropped_groups, reasons).
+
+    dropped_groups counts GROUPS, not turns: one contaminated group can remove
+    several records, so callers must not report it as a record count.
     """
     sigs = sigs if sigs is not None else load_eval_signatures()
     if sigs.degraded:

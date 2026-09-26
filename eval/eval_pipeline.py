@@ -12,7 +12,7 @@ written by eval/generate.py.
 
 Usage:
     uv run python eval/eval_pipeline.py
-    uv run python eval/eval_pipeline.py --dataset spark_learn --max-samples 20
+    uv run python eval/eval_pipeline.py --dataset spark_learn
     uv run python eval/eval_pipeline.py --evals build test prove --jobs 4
 """
 
@@ -36,6 +36,7 @@ _SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "scripts"
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
+from ada_eval_common import aggregate_eval_results, has_results, matches_dataset_filter
 from alire_env import alire_env_path, has_tool
 
 logger = logging.getLogger("q3as_eval_pipeline")
@@ -85,10 +86,6 @@ def parse_args() -> argparse.Namespace:
         help="Specific dataset to evaluate.",
     )
     parser.add_argument(
-        "--max-samples", type=int, default=20,
-        help="Maximum samples per dataset.",
-    )
-    parser.add_argument(
         "--evals", nargs="+", choices=["build", "test", "prove"],
         default=["build", "test", "prove"],
         help="Eval types to run.",
@@ -118,11 +115,8 @@ def find_packed_datasets(model_label: str, dataset_filter: str | None) -> list[P
     if not model_dir.is_dir():
         logger.warning("No generated datasets for %s at %s", model_label, model_dir)
         return []
-    return [
-        f for f in sorted(model_dir.glob("*.jsonl"))
-        if not dataset_filter or f.stem == f"{f.stem.split('_', 1)[0]}_{dataset_filter}"
-        or f.stem == dataset_filter
-    ]
+    return [f for f in sorted(model_dir.glob("*.jsonl"))
+            if matches_dataset_filter(f, dataset_filter)]
 
 
 def run_ada_eval(
@@ -170,54 +164,9 @@ def run_ada_eval(
     return results
 
 
-def compute_stats_from_results(eval_results_dir: Path) -> dict[str, dict[str, int]]:
+def compute_stats_from_results(eval_results_dir: Path, evals: list[str] | None = None):
     """Compute build/test/prove statistics from ada-eval evaluated packed datasets."""
-    stats: dict[str, dict[str, int]] = {
-        "build": {"compiled": 0, "failed": 0, "total": 0},
-        "test": {"passed": 0, "failed": 0, "total": 0},
-        "prove": {"proved": 0, "unproved": 0, "error": 0, "total": 0},
-    }
-    if not eval_results_dir.exists():
-        return stats
-
-    for result_file in sorted(eval_results_dir.rglob("*.jsonl")):
-        try:
-            with open(result_file, "r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        sample = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    for es in sample.get("evaluation_results", []) or []:
-                        kind = es.get("eval")
-                        if kind == "build":
-                            stats["build"]["total"] += 1
-                            if es.get("compiled"):
-                                stats["build"]["compiled"] += 1
-                            else:
-                                stats["build"]["failed"] += 1
-                        elif kind == "test":
-                            stats["test"]["total"] += 1
-                            if es.get("compiled") and es.get("passed_tests"):
-                                stats["test"]["passed"] += 1
-                            else:
-                                stats["test"]["failed"] += 1
-                        elif kind == "prove":
-                            stats["prove"]["total"] += 1
-                            result = es.get("result", "error")
-                            if result == "proved":
-                                stats["prove"]["proved"] += 1
-                            elif result in ("unproved", "proved_incorrectly"):
-                                stats["prove"]["unproved"] += 1
-                            else:
-                                stats["prove"]["error"] += 1
-        except OSError as exc:
-            logger.warning("Cannot read result file %s: %s", result_file, exc)
-    return stats
-
+    return aggregate_eval_results(eval_results_dir, evals)
 
 def rate(block: dict[str, int], numerators: tuple[str, ...]) -> float:
     total = block.get("total", 0)
@@ -274,7 +223,7 @@ def generate_comparison_report(
     base_stats = results.get(base_label, {}).get("stats")
     ft_stats = results.get(fine_tuned_label, {}).get("stats")
 
-    if base_stats and ft_stats:
+    if has_results(base_stats or {}) and has_results(ft_stats or {}):
         lines.append("\nMetric                Base        Fine-tuned   Improvement")
         lines.append("-" * 60)
         for eval_type, numerators in [
@@ -289,7 +238,14 @@ def generate_comparison_report(
                 f"{eval_type.capitalize():15s}  {b_rate:6.1f}%     {ft_rate:6.1f}%      {improvement:+6.1f}%"
             )
     else:
-        lines.append("\nInsufficient data for comparison (need both base and fine-tuned results).")
+        have_base = has_results(base_stats or {})
+        have_ft = has_results(ft_stats or {})
+        if not have_base and not have_ft:
+            lines.append("\nNo ada-eval results found; run `make generate` then this pipeline.")
+        elif not have_ft:
+            lines.append(f"\nNo ada-eval results for the fine-tuned model ({fine_tuned_label}).")
+        else:
+            lines.append(f"\nNo ada-eval results for the base model ({base_label}).")
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with open(output_path, "w") as f:
@@ -301,9 +257,11 @@ def generate_comparison_report(
 
 def main() -> None:
     args = parse_args()
-    if args.verbose:
-        logging.getLogger().setLevel(logging.DEBUG)
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+    # basicConfig first: it would otherwise overwrite an earlier setLevel(DEBUG).
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose else logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+    )
 
     logger.info("Starting evaluation pipeline")
     logger.info("Evals: %s", args.evals)
@@ -321,7 +279,7 @@ def main() -> None:
         logger.warning("Install them via `make prove` (Alire dev workspace build)")
 
     # Step 1: Run evaluations via ada-eval framework on packed generated datasets
-    run_ada_eval(
+    outcomes = run_ada_eval(
         evals=args.evals,
         jobs=args.jobs,
         dataset_filter=args.dataset,
@@ -339,14 +297,11 @@ def main() -> None:
             }
 
     if not results:
-        empty = {
-            "build": {"compiled": 0, "failed": 0, "total": 0},
-            "test": {"passed": 0, "failed": 0, "total": 0},
-            "prove": {"proved": 0, "unproved": 0, "error": 0, "total": 0},
-        }
-        results[args.base_label] = {"stats": json.loads(json.dumps(empty))}
-        results[args.fine_tuned_label] = {"stats": json.loads(json.dumps(empty))}
-        logger.warning("No generated solutions found; wrote placeholder stats only")
+        # Placeholder zeros used to be written and the run exited 0, so a
+        # comparison table of 0.0% against 0.0% looked like a measurement.
+        raise SystemExit(
+            f"no generated solutions found under {GENERATED_DIR}; run `make generate` first"
+        )
 
     # Step 3: Generate comparison report
     report_path = Path("outputs/comparison_report.txt")
@@ -357,6 +312,10 @@ def main() -> None:
     with open(json_results_path, "w") as f:
         json.dump(results, f, indent=2)
 
+    failed = sorted(d for d, r in (outcomes or {}).items() if r.get("status") == "failed")
+    if failed:
+        logger.error("ada-eval failed for dataset(s): %s", ", ".join(failed))
+        raise SystemExit(1)
     logger.info("Evaluation pipeline complete")
 
 
