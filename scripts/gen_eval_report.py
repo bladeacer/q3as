@@ -456,13 +456,21 @@ def render_index(versions: list[dict[str, Any]]) -> str:
         base = ada.get("base_qwen3-8b") or {}
         ft = ada.get("fine_tuned") or {}
         v = entry["version"]
+        report = RESULTS_DIR / f"result-v{v}.md"
+        # Only link a report that exists: the index is built from the data
+        # files, and a data file whose markdown was removed would otherwise
+        # render a dead link.
+        report_cell = (
+            f"[result-v{v}.md](result-v{v}.md)"
+            if report.exists() else f"_(result-v{v}.md missing)_"
+        )
         lines.append(
             f"| v{v} | {entry.get('generated_at', '?')} "
             f"| {base.get('build', 0)} ({_fmt_pct(base.get('build_pct'))}) → "
             f"{ft.get('build', 0)} ({_fmt_pct(ft.get('build_pct'))}) "
             f"| {base.get('test', 0)} ({_fmt_pct(base.get('test_pct'))}) → "
             f"{ft.get('test', 0)} ({_fmt_pct(ft.get('test_pct'))}) "
-            f"| [result-v{v}.md](result-v{v}.md) |"
+            f"| {report_cell} |"
         )
     lines.append("")
 

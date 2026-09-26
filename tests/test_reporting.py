@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -164,11 +165,41 @@ class TestRender:
         assert "| v0.3.0 |" in text and "| v0.1.0 |" in text
         assert "v0.0.9" not in text.split("Last 3")[1].split("\n\n")[0]  # outside the table
 
-    def test_index_links_every_version(self):
-        entries = [{**self._data(), "version": "0.1.0"}, {"version": "0.2.0", "generated_at": "x", "ada_eval": {}}]
+    def test_index_links_only_versions_whose_report_exists(
+        self, tmp_path, monkeypatch
+    ):
+        """A link in the index must resolve to a file that is really there.
+
+        The index is built from the result-data JSONs, so a version whose
+        markdown was deleted used to render a dead link. Reports present get
+        a link; absent ones are called out instead.
+        """
+        monkeypatch.setattr(ger, "RESULTS_DIR", tmp_path)
+        (tmp_path / "result-v0.1.0.md").write_text("# Results v0.1.0\n", encoding="utf-8")
+        entries = [
+            {**self._data(), "version": "0.1.0"},
+            {"version": "0.2.0", "generated_at": "x", "ada_eval": {}},
+        ]
         text = ger.render_index(entries)
+
         assert "[result-v0.1.0.md](result-v0.1.0.md)" in text
-        assert "[result-v0.2.0.md](result-v0.2.0.md)" in text
+        assert "_(result-v0.2.0.md missing)_" in text
+        # Every relative link the index emits must point at a real file.
+        for target in re.findall(r"\]\((result-v[\d.]+\.md)\)", text):
+            assert (tmp_path / target).exists(), f"index links a missing report: {target}"
+
+    def test_every_real_result_file_is_linked_from_the_index(self):
+        """The shipped index must cover each result file on disk, and every
+        link in it must resolve. A withdrawn run may be absent from the index,
+        but a present one may not be unlinked."""
+        index = (ger.RESULTS_DIR / "README.md")
+        if not index.exists():
+            pytest.skip("no results index in this checkout")
+        text = index.read_text(encoding="utf-8")
+        for report in sorted(ger.RESULTS_DIR.glob("result-v*.md")):
+            assert report.name in text, f"{report.name} exists but the index never links it"
+        for target in re.findall(r"\]\((result-v[\d.]+\.md)\)", text):
+            assert (ger.RESULTS_DIR / target).exists(), f"dead link in the index: {target}"
 
 
 class TestRepoVersionsAgree:

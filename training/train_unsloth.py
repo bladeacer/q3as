@@ -38,7 +38,7 @@ os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 os.environ.setdefault("UNSLOTH_RETURN_LOGITS", "1")
 
 import unsloth  # noqa: F401
-from transformers import TrainerCallback
+from transformers import TrainerCallback, set_seed
 
 logger = logging.getLogger("q3as_train")
 
@@ -251,12 +251,7 @@ def main() -> None:
 
     # Seed every RNG up front (transformers covers random/numpy/torch/CUDA);
     # SFTConfig also receives the seed for data-order reproducibility.
-    try:
-        from transformers import set_seed
-
-        set_seed(args.seed)
-    except ImportError:
-        pass
+    set_seed(args.seed)
 
     dataset = load_dataset(args.dataset)
     if not dataset:
@@ -304,6 +299,15 @@ def main() -> None:
 
         bfloat_available = is_bfloat16_supported()
         logger.info("bfloat16 supported: %s", bfloat_available)
+        # The probe used to be logged and then ignored, while the config
+        # hard-coded bf16, so a CPU-only or pre-Ampere machine was configured
+        # for a dtype the trainer cannot use.
+        config["bf16"] = bfloat_available
+        if not bfloat_available:
+            config["fp16"] = True
+            logger.warning(
+                "bfloat16 is unavailable; falling back to fp16 for training."
+            )
 
         # Resolve the base model path. Prefer the local download so training
         # uses the exact same weights the download step verified.

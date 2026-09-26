@@ -79,6 +79,12 @@ def parse_args() -> argparse.Namespace:
         help="Max samples per dataset.",
     )
     parser.add_argument(
+        "--worker-timeout", type=int, default=14400,
+        help="Seconds before a generation worker is killed (0 = no limit). A "
+             "model load plus the benchmark fits well inside 4 hours; the "
+             "bound exists so a wedged worker cannot hang the pipeline.",
+    )
+    parser.add_argument(
         "--max-new-tokens", type=int, default=512,
         help="Max new tokens per sample.",
     )
@@ -108,9 +114,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--verbose", "-v", action="store_true",
         help="Enable debug logging.",
-    )
-    parser.add_argument(
-        "--worker", action="store_true", help=argparse.SUPPRESS,
     )
     return parser.parse_args()
 
@@ -427,7 +430,14 @@ def load_model(model_path: Path, base_model_path: Path):
 
 
 def free_model_memory(model, tokenizer) -> None:
-    """Release a model's GPU and host memory before loading the next one."""
+    """Empty the allocator cache and run a collection before the worker exits.
+
+    It cannot free the caller's own references - `del` on the parameters only
+    drops this function's local names - so this is a best-effort tidy-up, not
+    the mechanism that keeps the dual-model run inside 8 GB. That is the
+    one-process-per-model design documented on _run_worker: each worker exits
+    and its CUDA context goes with it.
+    """
     import torch
 
     del model, tokenizer
@@ -681,7 +691,17 @@ def main() -> None:
         if args.verbose:
             cmd.append("--verbose")
         logger.info("Launching worker for %s: %s", label, model_path)
-        proc = subprocess.run(cmd, check=False, capture_output=True, text=True)
+        try:
+            proc = subprocess.run(
+                cmd, check=False, capture_output=True, text=True,
+                timeout=args.worker_timeout or None,
+            )
+        except subprocess.TimeoutExpired:
+            raise SystemExit(
+                f"generation worker for {label} exceeded "
+                f"{args.worker_timeout}s and was killed; raise --worker-timeout "
+                "or lower --max-samples"
+            ) from None
         sys.stdout.write(proc.stdout)
         if proc.stderr:
             sys.stderr.write(proc.stderr)

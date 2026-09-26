@@ -260,7 +260,7 @@ def sanity_check_light(cache_dir: Path) -> bool:
         return False
 
 
-def sanity_check_deep(cache_dir: Path, model_name: str) -> bool:
+def sanity_check_deep(cache_dir: Path) -> bool:
     """Verify the downloaded model can be loaded on the GPU and generate.
 
     Heavy: loads all weights onto the device and runs a short generation.
@@ -325,8 +325,11 @@ def run_sanity(
     model_name: str,
     deep: bool,
     timeout_s: int,
-) -> bool:
-    """Run the configured sanity check and return pass/fail.
+) -> bool | None:
+    """Run the configured sanity check; return True, False, or None.
+
+    None means inconclusive (the deep check timed out). It used to return True
+    here, so a killed child was reported as "model is ready for fine-tuning".
 
     The deep check runs in a child process with a hard timeout: if CUDA or
     Triton initialization wedges, the child is killed and the result is
@@ -359,7 +362,7 @@ def run_sanity(
             "--sanity-deep --cache-dir %s",
             timeout_s, cache_dir,
         )
-        return True
+        return None
 
     # Surface the child's log lines (they went to its stderr).
     for line in (proc.stderr or "").splitlines():
@@ -379,7 +382,7 @@ def main() -> int:
     if args.sanity_child:
         # Internal mode: run the deep check in this process and report the
         # result through the exit code.
-        passed = sanity_check_deep(args.cache_dir, args.model_name)
+        passed = sanity_check_deep(args.cache_dir)
         return 0 if passed else 1
 
     if args.check_only:
@@ -407,7 +410,10 @@ def main() -> int:
     exit_code = 0
     if args.sanity_check:
         passed = run_sanity(args.cache_dir, args.model_name, args.sanity_deep, args.sanity_timeout)
-        if passed:
+        if passed is None:
+            print("\nSanity check INCONCLUSIVE - it timed out, so readiness is unknown.")
+            print("Training can still proceed; see the warning above for the manual check.")
+        elif passed:
             print("\nSanity check PASSED - model is ready for fine-tuning.")
             print("Run: uv run python training/train_unsloth.py")
         else:

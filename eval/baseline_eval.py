@@ -70,7 +70,16 @@ ADA_EVAL_DIR = source_paths.resolve("ada-eval") or Path("data/raw_repos/_missing
 EVAL_RESULTS_DIR = Path("outputs/eval_results")
 GENERATED_DIR = Path("outputs/generated_solutions")
 DEFAULT_BASE_MODEL = Path("models/qwen3-8b")
-BASE_MODEL_LABEL = "base_qwen3-8b"
+
+
+def base_model_label(base_model: Path) -> str:
+    """Label generate.py gives the base model's generations.
+
+    generate.py names that directory base_<model dir name>, so the label has
+    to be derived the same way: hardcoding "base_qwen3-8b" silently found
+    nothing as soon as --base-model pointed anywhere else.
+    """
+    return f"base_{base_model.name}"
 FINE_TUNED_LABEL = "fine_tuned"
 
 # The tools each ada-eval kind needs. Honoured by --evals, so asking for
@@ -454,7 +463,10 @@ def main() -> int:
         return 1
     logger.info("Indexed %d canonical solutions", len(references))
 
-    labels = [(FINE_TUNED_LABEL, str(args.model)), (BASE_MODEL_LABEL, str(args.base_model))]
+    labels = [
+        (FINE_TUNED_LABEL, str(args.model)),
+        (base_model_label(args.base_model), str(args.base_model)),
+    ]
     per_model: dict[str, Any] = {}
     for label, model_path in labels:
         scored = score_model(label, args.generated_dir, references, args.max_samples)
@@ -530,7 +542,8 @@ def main() -> int:
             print(f"  Standards       : {model.get('standard_distribution', {})}")
         print_stats_block(model["ada_eval"])
 
-    ft, base = per_model[FINE_TUNED_LABEL], per_model[BASE_MODEL_LABEL]
+    ft = per_model[FINE_TUNED_LABEL]
+    base = per_model[base_model_label(args.base_model)]
     if ft.get("samples_scored") and base.get("samples_scored"):
         print(f"\n{'=' * 70}")
         print("COMPARISON (Fine-tuned vs Base)")

@@ -78,8 +78,16 @@ records from ada-eval.
 - `training/train_unsloth.py` - QLoRA training script (Unsloth, 1024-token
   window, single-process dataset tokenization, LoRA adapters on Qwen3-8B).
 - `eval/generate.py` - batch generation for the fine-tuned and base models.
-- `eval/baseline_eval.py` - BLEU/compliance metrics and result aggregation
-  (`outputs/eval_results.json`).
+- `eval/baseline_eval.py` - reference-based scoring: joins the
+  `make generate` output to the ada-eval canonical solutions and reports
+  BLEU-4, exact match, file-set match, and standard compliance per model,
+  plus the ada-eval BUILD/TEST/PROVE tallies (`outputs/eval_results.json`).
+  Exits non-zero when there is nothing to score; it never scores the
+  training corpus.
+- `eval/ada_eval_common.py` - the single build/test/prove tally shared by
+  both eval modules and the report, plus the packed-dataset naming rules.
+  Do not reimplement it: a third divergent copy is what made the published
+  prove counts disagree with the comparison report.
 - `eval/eval_pipeline.py` - BUILD/TEST/PROVE comparison report between base
   and fine-tuned models via ada-eval.
 - `scripts/validate_defects.py` - compiles the dataset's defect pairs with
@@ -125,8 +133,16 @@ records from ada-eval.
   it reads.
 - `Makefile` - entry points for every step; `make help` lists them.
 - `deploy/Modelfile` - Ollama deployment definition for the fine-tuned model.
-- `tests/` - pytest unit tests for the dataset builder and helpers
-  (`make test`).
+- `tests/` - pytest unit tests for the dataset builder, the eval scorers,
+  the Alire toolchain resolver, and the reporting helpers (`make test`).
+- `CHANGELOG.md` - per-version changes, newest first. It shares the
+  repo's versioned-artifact convention with `docs/results/`: the version
+  comes from `alire.toml` via `make bump-version`, and each release links
+  its own `docs/results/result-vX.Y.Z.md` when one exists. Add an entry
+  when behaviour, metrics, or documented claims change - not for every
+  commit. Link a results file only if it is present; a withdrawn run is
+  described in prose instead of linked. Run `make agents-tree` after
+  adding a file, and `make lint` (which checks every markdown link).
 
 ## Ada toolchain through Alire
 
@@ -195,16 +211,15 @@ q3as/
        results/
            README.md
            result-data-v0.1.0.json
-           result-data-v0.2.0.json
+           result-data-v0.3.0.json
            result-v0.1.0.md
-           result-v0.2.0.md
+           result-v0.3.0.md
        architecture.md
        data-provenance.md
        datasets-and-training.md
        evaluation.md
        toolchain-setup.md
    eval/
-       results/
        ada_eval_common.py
        baseline_eval.py
        eval_pipeline.py
@@ -263,6 +278,7 @@ q3as/
    alire-dev.toml
    alire.toml
    ast.gpr
+   CHANGELOG.md
    LICENSE
    Makefile
    pyproject.toml

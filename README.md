@@ -16,6 +16,7 @@ Every generated explanation follows **ASD-STE100 Simplified Technical English**:
 | [Toolchain setup](docs/toolchain-setup.md) | Alire management, vendored index for outdated `alr` |
 | [Evaluation](docs/evaluation.md) | Benchmark, metrics, interpretation, running |
 | [Results index](docs/results/README.md) | Per-version eval summaries and the last-3 comparison table |
+| [Changelog](CHANGELOG.md) | What changed in each version |
 
 ## Project Credits
 
