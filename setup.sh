@@ -142,8 +142,10 @@ setup_alire_index() {
     echo "    WARNING: some crates could not be mirrored; resolve may fail" >&2
   fi
 
-  # Register ahead of the community index so its versions win.
-  if alr index --list 2>/dev/null | grep -q "^${LOCAL_INDEX_NAME}"; then
+  # Register ahead of the community index so its versions win. `alr index
+  # --list` prints a priority number before the name, so match on a word
+  # boundary rather than at the start of the line.
+  if alr index --list 2>/dev/null | grep -qE "(^|[[:space:]])${LOCAL_INDEX_NAME}([[:space:]]|$)"; then
     echo "    index ${LOCAL_INDEX_NAME} already registered"
   else
     alr index --add="file://$LOCAL_INDEX_DIR" --name="$LOCAL_INDEX_NAME" \
@@ -154,16 +156,23 @@ setup_alire_index() {
 }
 
 # Local Python dev headers (no sudo): Triton needs Python.h to compile its
-# CUDA driver shim. Mirrors the Makefile's PY_HDR_ROOT logic.
+# CUDA driver shim. Writes the same cache layout scripts/python_env.sh reads,
+# and uses the same interpreter python_env.sh will resolve against (the venv
+# when it exists, so the headers match what actually runs the training).
 setup_python_headers() {
-  local py_major
-  py_major="$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+  local python py_major
+  if [ -x "$ROOT_DIR/.venv/bin/python" ]; then
+    python="$ROOT_DIR/.venv/bin/python"
+  else
+    python="python3"
+  fi
+  py_major="$("$python" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
   local hdr_root="$HOME/.cache/q3as-python-headers/usr/include"
   if [ -f "$hdr_root/python${py_major}/Python.h" ]; then
     echo "==> Python headers already extracted at $hdr_root"
     return
   fi
-  if python3 -c "import sysconfig,os; sys.exit(0 if os.path.exists(os.path.join(sysconfig.get_paths()['include'], 'Python.h')) else 1)" 2>/dev/null; then
+  if "$python" -c "import sysconfig,os; sys.exit(0 if os.path.exists(os.path.join(sysconfig.get_paths()['include'], 'Python.h')) else 1)" 2>/dev/null; then
     echo "==> System Python headers present - no local extraction needed"
     return
   fi
@@ -171,21 +180,29 @@ setup_python_headers() {
   local deb_dir="$HOME/.cache/q3as-python-headers"
   mkdir -p "$deb_dir"
   if command -v apt-get >/dev/null 2>&1; then
-    apt-get download "python${py_major}-dev" 2>/dev/null || true
-    for deb in python3*-dev*.deb; do
-      [ -e "$deb" ] || continue
-      dpkg-deb -x "$deb" "$deb_dir"
-    done
-    # Dependencies of the dev package (python3.13-dev -> python3-dev chain)
-    apt-get download "python${py_major}" 2>/dev/null || true
-    for deb in python3.*_*_amd64.deb; do
-      [ -e "$deb" ] || continue
-      dpkg-deb -x "$deb" "$deb_dir"
-    done
-    rm -f ./*.deb
+    # Download and unpack inside the cache: `apt-get download` writes to the
+    # current directory, so running it from the caller's directory would drop
+    # .deb files into the repo and glob unrelated ones.
+    #
+    # Both packages are needed and neither resolves the other, because
+    # `apt-get download` fetches only what it is named:
+    #   libpythonX.Y-dev  -> usr/include/pythonX.Y/ (Python.h and the rest)
+    #   pythonX.Y-dev     -> usr/lib/pythonX.Y/config-*/ (pyconfig.h inputs)
+    # pythonX.Y-dev alone ships nothing under usr/include, so without the
+    # libpython package there is no Python.h to find.
+    (
+      cd "$deb_dir" || exit 1
+      apt-get download "libpython${py_major}-dev" "python${py_major}-dev" 2>/dev/null || true
+      shopt -s nullglob
+      debs=("libpython${py_major}-dev"*.deb "python${py_major}"*.deb)
+      for deb in "${debs[@]}"; do
+        dpkg-deb -x "$deb" "$deb_dir"
+      done
+      rm -f "${debs[@]}"
+    )
   fi
   if [ -f "$hdr_root/python${py_major}/Python.h" ]; then
-    echo "    Headers extracted. The Makefile picks them up automatically."
+    echo "    Headers extracted. scripts/python_env.sh picks them up automatically."
   else
     echo "    WARNING: Python.h still not found. Triton may fail to compile." >&2
     echo "    Install python${py_major}-dev manually if training fails." >&2

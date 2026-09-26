@@ -116,6 +116,12 @@ records from ada-eval.
   `.env` from `.env.dev` (never overwrites), registers the vendored Alire
   index when `alr` is outdated, runs `uv sync`, extracts local Python
   headers for Triton.
+- `scripts/python_env.sh` - prints the `CPATH` Triton needs to compile its
+  CUDA driver shim, resolved from the interpreter that will run training (the
+  venv, else `python3`) instead of a hardcoded version. The single place both
+  the `Makefile` (`train`) and `scripts/run_cap_experiment.sh` ask; it
+  warns on stderr when the headers are missing. `setup.sh` writes the cache
+  it reads.
 - `Makefile` - entry points for every step; `make help` lists them.
 - `deploy/Modelfile` - Ollama deployment definition for the fine-tuned model.
 - `tests/` - pytest unit tests for the dataset builder and helpers
@@ -226,6 +232,7 @@ q3as/
        gen_contract_mutations.py
        gen_eval_report.py
        make_probe_splits.py
+       python_env.sh
        run_cap_experiment.sh
        validate_defects.py
    tests/

@@ -1,6 +1,6 @@
 [project]
 name = "q3as"
-version = "1.0.0"
+version = "0.2.0"
 description = "Qwen 3 Ada SPARK (q3as) - Fine-tuning pipeline for the full Ada language spectrum"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -56,7 +56,8 @@ asyncio_mode = "auto"
 
 [tool.ruff]
 line-length = 100
-target-version = "py311"
+# target-version is deliberately unset: ruff infers it from
+# [project] requires-python above, so the two cannot drift apart.
 
 [build-system]
 requires = ["setuptools>=68.0"]

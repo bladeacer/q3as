@@ -34,9 +34,12 @@ EVAL_STEPS="${EVAL_STEPS:-15}"
 CAPS=("$@")
 [ ${#CAPS[@]} -eq 0 ] && CAPS=(1 2 3 5 10 inf)
 
-PY_HDR_ROOT="${HOME}/.cache/q3as-python-headers/usr/include"
-if [ -f "${PY_HDR_ROOT}/python3.13/Python.h" ]; then
-  export CPATH="${PY_HDR_ROOT}/python3.13:${PY_HDR_ROOT}/x86_64-linux-gnu:${PY_HDR_ROOT}"
+# Triton needs Python.h to compile its CUDA driver shim. scripts/python_env.sh
+# resolves the include path for the interpreter this script trains with (the
+# venv, via `uv run` below) and warns on stderr when the headers are missing.
+Q3AS_CPATH="$(bash scripts/python_env.sh)"
+if [ -n "$Q3AS_CPATH" ]; then
+  export CPATH="$Q3AS_CPATH"
 fi
 export HF_HUB_DISABLE_XET=1 HF_DEACTIVATE_ASYNC_LOAD=1 \
        PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True

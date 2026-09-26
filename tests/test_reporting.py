@@ -14,6 +14,19 @@ import bump_version as bv
 import gen_eval_report as ger
 
 
+@pytest.fixture(autouse=True)
+def isolate_extra_version_files(monkeypatch):
+    """Keep set_version away from the repository's own version files.
+
+    EXTRA_VERSION_FILES points at the real pyproject.toml, and set_version
+    rewrites it unconditionally. Without this, any test that calls
+    set_version or bump_version edits the tracked file: `bump_version("major")`
+    bakes 1.0.0 into pyproject.toml on every `make test`. Tests that exercise
+    the extra-file path override this with their own file.
+    """
+    monkeypatch.setattr(bv, "EXTRA_VERSION_FILES", ())
+
+
 @pytest.fixture()
 def manifest_dir(tmp_path: Path) -> Path:
     """Two alire manifests with a version line each."""
@@ -156,3 +169,32 @@ class TestRender:
         text = ger.render_index(entries)
         assert "[result-v0.1.0.md](result-v0.1.0.md)" in text
         assert "[result-v0.2.0.md](result-v0.2.0.md)" in text
+
+
+class TestRepoVersionsAgree:
+    """The real manifests must not drift apart.
+
+    bump_version.py syncs them, but it can only rewrite what it finds: a
+    manifest that is missing (or a pyproject whose version line moved) is
+    silently skipped, and the next release quietly ships mismatched numbers.
+    These assertions run against the repository, not a fixture.
+    """
+
+    def test_all_manifests_carry_the_same_version(self):
+        root = Path(bv.__file__).resolve().parents[1]
+        assert set(bv.MANIFESTS) == {root / name for name in
+                                     ("alire.toml", "alire-dev.toml", "alire-ast.toml")}
+        for manifest in bv.MANIFESTS:
+            assert manifest.exists(), f"manifest missing: {manifest.name}"
+        versions = {m.name: bv.read_version(m) for m in bv.MANIFESTS}
+        assert len(set(versions.values())) == 1, f"manifest versions differ: {versions}"
+
+    def test_pyproject_version_matches_the_manifests(self):
+        root = Path(bv.__file__).resolve().parents[1]
+        pyproject = root / "pyproject.toml"
+        assert bv._VERSION_RE.search(pyproject.read_text(encoding="utf-8")), (
+            "pyproject.toml has no top-level version line for bump_version to sync"
+        )
+        assert bv.read_version(root / "alire.toml") == bv.read_version(pyproject), (
+            "pyproject.toml version differs from the Alire manifests"
+        )

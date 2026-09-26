@@ -24,11 +24,14 @@ SHELL := /bin/bash
 
 .DEFAULT_GOAL := help
 
-# Local Python dev headers (no sudo): python3.13-dev debs extracted to ~/.cache
-# so Triton can compile its CUDA driver shim (needs Python.h).
-PY_HDR_ROOT ?= $(HOME)/.cache/q3as-python-headers/usr/include
-PY_HDRS := $(PY_HDR_ROOT)/python3.13:$(PY_HDR_ROOT)/x86_64-linux-gnu:$(PY_HDR_ROOT)
-EXPORT_HEADERS := $(if $(wildcard $(PY_HDR_ROOT)/python3.13/Python.h),CPATH=$(PY_HDRS),)
+# Local Python dev headers (no sudo): setup.sh extracts the pythonX.Y-dev
+# packages into ~/.cache so Triton can compile its CUDA driver shim (needs
+# Python.h). scripts/python_env.sh resolves the include path from the
+# interpreter that will actually run training, so a different Python keeps
+# working; it reports on stderr when the headers are missing. Recursively
+# expanded, so it only runs for the targets that train.
+PY_CPATH = $(shell bash scripts/python_env.sh)
+EXPORT_HEADERS = $(if $(strip $(PY_CPATH)),CPATH=$(PY_CPATH),)
 
 help: ## Show this help message
 	@echo "q3as - Qwen 3 Ada SPARK - Available targets:"
