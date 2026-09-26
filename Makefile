@@ -1,18 +1,30 @@
 .PHONY: help setup sync download build-dataset parse-data gen-contracts check-integrity check-links train generate eval eval-pipeline eval-report bump-version prove ast-deps ada-env test lint validate-defects agents-tree fetch-sources clean all check-model
 
 # Prerequisite chain for the dataset: parser outputs (docs chunks, AST units,
-# contract turns) must exist before the builder runs. gen-contracts silently
-# keeps a cached file when gnatprove is unavailable, so it cannot break a
-# build; parse-data re-runs cheaply and regenerates any missing parser output.
+# contract turns) must exist before the builder runs. Every stage fingerprints
+# its inputs and skips the rebuild when nothing changed (FORCE=1 overrides), so
+# these targets stay cheap to re-run. gen-contracts also keeps a cached file
+# when gnatprove is unavailable, so it cannot break a build; parse-data
+# re-runs cheaply and regenerates any missing parser output.
 DATASET_EXTRA_TURNS := \
 	data/processed/docs_chunks.jsonl \
 	data/processed/ada_ast_units.jsonl \
 	data/processed/contract_mutations.jsonl
 
-DATASET_WORKERS ?= 1
+# Worker processes for the parsers and the builder. 0 means one per CPU core,
+# which is what every script documents and what they do when the flag is
+# omitted; the old default of 1 left 15 of 16 cores idle. Measured on the full
+# corpus (6514 Ada files, 4337 pairs) on 16 cores: 11m30s at 1 worker, 4m39s at
+# 8, and a 51s extract phase at 16 versus 7m38s at 1. Worker memory is ~90 MiB
+# each and the builder's parent peaks at ~1.7 GiB holding every record, so
+# cores run out before RAM does; set DATASET_WORKERS=1 to force serial.
+DATASET_WORKERS ?= 0
 MAX_NEW_TOKENS ?= 512
 MAX_PROMPT_CHARS ?= 12000
 TRAIN_FLAGS ?= --skip-merged-save
+
+# Rebuild a stage even when its fingerprint matches.
+FORCE_FLAG = $(if $(FORCE),--force,)
 
 .PHONY: $(DATASET_EXTRA_TURNS)
 
@@ -48,7 +60,7 @@ help: ## Show this help message
 	@echo "  make fetch-sources  - Fetch source repos into the archive cache (data/raw_repos)"
 	@echo "  make parse-data     - Run the parser modules into data/processed/ extra JSONL"
 	@echo "                        (doc chunking, libadalang/structural Ada AST extraction)"
-	@echo "  make gen-contracts  - Generate gnatprove-verified contract turns (cached; FORCE=1)"
+	@echo "  make gen-contracts  - Generate gnatprove-verified contract turns (FORCE=1)"
 	@echo "  make build-dataset  - Build the training dataset from Ada source trees"
 	@echo "                        (cache: adacovex, Ada_CRDT, Ada-83-TLALOC, and the"
 	@echo "                        RobertBoettcherSF Ada-Algorithms monorepo) plus the"
@@ -75,6 +87,10 @@ help: ## Show this help message
 	@echo "  make lint           - Run ruff, mypy, the link check, and the AGENTS tree check"
 	@echo "  make agents-tree    - Regenerate the project file tree inside AGENTS.md"
 	@echo "  make clean          - Remove generated outputs and caches"
+	@echo ""
+	@echo "Options: DATASET_WORKERS=<n> parser/build worker processes (default 0 ="
+	@echo "         one per CPU core; 1 = serial. Output is identical for any value),"
+	@echo "         FORCE=1 rebuild a stage even when its inputs are unchanged."
 	@echo ""
 	@echo "Usage: make [target]   (default: help)"
 
@@ -117,6 +133,7 @@ build-dataset: parse-data gen-contracts ## Build the training dataset from cache
 		--guidance-dir data/raw_repos/AminBlg/SimpleEnglish \
 		--guidance-dir data/raw_repos/AdaCore/skills \
 		--workers $(DATASET_WORKERS) \
+		$(FORCE_FLAG) \
 		$(foreach f,$(DATASET_EXTRA_TURNS),--extra-turns $(f))
 
 train: ## Run QLoRA fine-tuning with Unsloth on the local base model (models/qwen3-8b); full stdout captured to training.log
@@ -160,14 +177,14 @@ ast-deps: ## Build and install libadalang.so so the Ada AST parser uses real AST
 	## in the `ast` dependency group needs a shared one. Resolves alire-ast.toml
 	## in the gitignored .alire-ast workspace and builds it there, so the SPARK
 	## toolchain in .alire-dev is untouched. Cached: a no-op once installed.
-	uv run python scripts/build_libadalang.py $(if $(FORCE),--force,)
+	uv run python scripts/build_libadalang.py $(FORCE_FLAG,)
 
 test: ## Run the Python unit tests
 	uv run pytest tests/ -q
 
 lint: ## Run ruff and mypy over the project sources, then check markdown links and the AGENTS tree
 	uv run ruff check data/processing_scripts/ scripts/ eval/ tests/ tools/
-	uv run mypy data/processing_scripts/build_dataset.py data/processing_scripts/parse_docs.py data/processing_scripts/parse_ada_ast.py data/processing_scripts/eval_guard.py data/processing_scripts/code_variants.py eval/ada_eval_common.py eval/baseline_eval.py scripts/alire_env.py scripts/bump_version.py scripts/build_libadalang.py scripts/gen_eval_report.py scripts/gen_agents_tree.py scripts/collect_cap_results.py scripts/make_probe_splits.py tools/check-links.py
+	uv run mypy data/processing_scripts/build_dataset.py data/processing_scripts/parse_docs.py data/processing_scripts/parse_ada_ast.py data/processing_scripts/eval_guard.py data/processing_scripts/code_variants.py data/processing_scripts/stage_state.py data/processing_scripts/progress.py eval/ada_eval_common.py eval/baseline_eval.py scripts/alire_env.py scripts/bump_version.py scripts/build_libadalang.py scripts/gen_eval_report.py scripts/gen_agents_tree.py scripts/collect_cap_results.py scripts/make_probe_splits.py tools/check-links.py
 	uv run python tools/check-links.py
 	uv run python scripts/gen_agents_tree.py --check
 
@@ -175,11 +192,11 @@ validate-defects: ## Compile-check dataset defect pairs with the Alire GNAT
 	uv run python scripts/validate_defects.py --source data/raw_repos/bladeacer/adacovex --source data/raw_repos/bladeacer/Ada_CRDT --source data/raw_repos/AdaCore/ada-eval --source data/raw_repos/RobertBoettcherSF/Ada-Algorithms
 
 parse-data: fetch-sources ## Run the parser modules into data/processed/ extra JSONL
-	uv run python data/processing_scripts/parse_docs.py --output data/processed/docs_chunks.jsonl --workers $(DATASET_WORKERS)
-	uv run python data/processing_scripts/parse_ada_ast.py --output data/processed/ada_ast_units.jsonl --workers $(DATASET_WORKERS)
+	uv run python data/processing_scripts/parse_docs.py --output data/processed/docs_chunks.jsonl --workers $(DATASET_WORKERS) $(FORCE_FLAG)
+	uv run python data/processing_scripts/parse_ada_ast.py --output data/processed/ada_ast_units.jsonl --workers $(DATASET_WORKERS) $(FORCE_FLAG)
 
-gen-contracts: ## Generate gnatprove-verified synthetic contract turns (cached; FORCE=1 to regenerate)
-	uv run python scripts/gen_contract_mutations.py $(if $(FORCE),--force,)
+gen-contracts: ## Generate gnatprove-verified contract turns (skipped when unchanged; FORCE=1)
+	uv run python scripts/gen_contract_mutations.py $(FORCE_FLAG)
 
 check-integrity: ## Fail if any split file contains ada-eval evaluation content
 	uv run python data/processing_scripts/eval_guard.py data/processed/dataset_train.jsonl data/processed/dataset_val.jsonl data/processed/dataset_test.jsonl
@@ -200,5 +217,7 @@ all: check-model build-dataset train generate eval eval-pipeline eval-report ## 
 	@echo "  Eval results: outputs/eval_results/ outputs/eval_results.json"
 
 clean: ## Remove generated outputs and caches
-	rm -rf outputs/ models/ data/processed/dataset.jsonl data/processed/dataset_metadata.json training.log
-	@echo "Cleaned outputs/, models/, generated dataset, and training.log."
+	rm -rf outputs/ models/ data/processed/dataset.jsonl data/processed/dataset_metadata.json \
+		data/processed/dataset_train.jsonl data/processed/dataset_val.jsonl \
+		data/processed/dataset_test.jsonl data/processed/.stages training.log
+	@echo "Cleaned outputs/, models/, generated dataset, stage stamps, and training.log."

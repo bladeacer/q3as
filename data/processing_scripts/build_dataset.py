@@ -60,6 +60,8 @@ from typing import Any
 
 import code_variants
 import eval_guard
+import progress as progress_log
+import stage_state
 
 # --------------------------------------------------------------------------- #
 # Constants
@@ -2411,6 +2413,18 @@ def _ast_structural_signature(messages: list[dict[str, str]]) -> str | None:
     return None
 
 
+def split_file_paths(output_file: Path) -> dict[str, Path]:
+    """The three split files that accompany *output_file*.
+
+    Single definition so the writer and the staleness check in main() cannot
+    drift apart and leave a stamp describing files that are never written.
+    """
+    return {
+        name: output_file.parent / f"dataset_{name}.jsonl"
+        for name in ("train", "val", "test")
+    }
+
+
 def assign_splits(
     groups: list[str],
     seed: int = _RNG_SEED,
@@ -2681,75 +2695,87 @@ def build_dataset(
     })
     tasks: list[dict[str, Any]] = []
     records_by_input_dir: dict[str, int] = {}
-    for input_dir in input_dirs + extra_input_dirs:
-        resolved_input = input_dir.resolve()
-        logger.info("Processing input directory: %s -> %s", input_dir, resolved_input)
+    with progress_log.phase(
+        "discover sources", logger, roots=len(input_dirs) + len(extra_input_dirs),
+    ):
+        for input_dir in input_dirs + extra_input_dirs:
+            resolved_input = input_dir.resolve()
+            logger.info("Processing input directory: %s -> %s", input_dir, resolved_input)
 
-        if not resolved_input.exists():
-            logger.warning("Directory does not exist, skipping: %s", resolved_input)
-            continue
+            if not resolved_input.exists():
+                logger.warning("Directory does not exist, skipping: %s", resolved_input)
+                continue
 
-        discovered = discover_files(resolved_input)
-        if not discovered["ads"] and not discovered["adb"]:
-            logger.warning("No Ada source files found in %s", resolved_input)
+            discovered = discover_files(resolved_input)
+            if not discovered["ads"] and not discovered["adb"]:
+                logger.warning("No Ada source files found in %s", resolved_input)
 
-        pairs = pair_files(discovered)
+            pairs = pair_files(discovered)
 
-        # Resolve one .gpr reference per input directory (as the serial
-        # loop did) so workers do not all re-read the same project file.
-        gpr_content = ""
-        gpr_name = ""
-        if discovered.get("gpr"):
-            for gpr_path in discovered["gpr"][:3]:
-                candidate = read_and_sanitize(gpr_path)
-                if candidate:
-                    gpr_content = candidate
-                    gpr_name = gpr_path.name
-                    break
+            # Resolve one .gpr reference per input directory (as the serial
+            # loop did) so workers do not all re-read the same project file.
+            gpr_content = ""
+            gpr_name = ""
+            if discovered.get("gpr"):
+                for gpr_path in discovered["gpr"][:3]:
+                    candidate = read_and_sanitize(gpr_path)
+                    if candidate:
+                        gpr_content = candidate
+                        gpr_name = gpr_path.name
+                        break
 
-        source = str(resolved_input)
-        dir_pair_count = 0
-        for idx, pair in enumerate(pairs):
-            spec_path = pair["spec"]
-            impl_path = pair["impl"]
-            package = pair["package"]
-            tasks.append({
-                "group": f"pair:{source}:{idx}",
-                "spec": str(spec_path) if isinstance(spec_path, Path) else None,
-                "impl": str(impl_path) if isinstance(impl_path, Path) else None,
-                "package": str(package) if package else None,
-                "source": source,
-                "gpr_content": gpr_content,
-                "gpr_name": gpr_name,
-                "enable_defect_pairs": enable_defect_pairs,
-            })
-            dir_pair_count += 1
-        records_by_input_dir[source] = records_by_input_dir.get(source, 0) + dir_pair_count
+            source = str(resolved_input)
+            dir_pair_count = 0
+            for idx, pair in enumerate(pairs):
+                spec_path = pair["spec"]
+                impl_path = pair["impl"]
+                package = pair["package"]
+                tasks.append({
+                    "group": f"pair:{source}:{idx}",
+                    "spec": str(spec_path) if isinstance(spec_path, Path) else None,
+                    "impl": str(impl_path) if isinstance(impl_path, Path) else None,
+                    "package": str(package) if package else None,
+                    "source": source,
+                    "gpr_content": gpr_content,
+                    "gpr_name": gpr_name,
+                    "enable_defect_pairs": enable_defect_pairs,
+                })
+                dir_pair_count += 1
+            records_by_input_dir[source] = records_by_input_dir.get(source, 0) + dir_pair_count
 
     if workers <= 0:
         workers = os.cpu_count() or 1
     pool = _make_pool(workers, len(tasks))
     imap = pool.imap if pool else None
-    if pool:
-        logger.info("Building %d pairs with %d worker processes", len(tasks), workers)
-        results = list(pool.imap(
-            _process_pair_task, tasks, chunksize=max(1, len(tasks) // (workers * 4)),
-        ))
-    else:
-        results = [_process_pair_task(task) for task in tasks]
+    with progress_log.phase("build pairs", logger, pairs=len(tasks), workers=workers):
+        bar = progress_log.Progress("Pairs", len(tasks), log=logger)
+        results = []
+        if pool:
+            logger.info("Building %d pairs with %d worker processes", len(tasks), workers)
+            for result in pool.imap(
+                _process_pair_task, tasks, chunksize=max(1, len(tasks) // (workers * 4)),
+            ):
+                results.append(result)
+                bar.advance()
+        else:
+            for task in tasks:
+                results.append(_process_pair_task(task))
+                bar.advance()
+        bar.close()
 
-    for group, turns, counts in results:
-        for turn in turns:
-            if _empty_assistant(turn):
-                # Spec-only/impl-only pairs ask for a completion but carry
-                # no answer; training on them teaches empty replies.
-                empty_assistant_dropped += 1
-                if counts.get("code_pair"):
-                    counts["code_pair"] -= 1
-                continue
-            all_grouped.append((group, turn))
-        for key, value in counts.items():
-            turn_counts[key] = turn_counts.get(key, 0) + value
+    with progress_log.phase("merge pair turns", logger, pairs=len(results)):
+        for group, turns, counts in results:
+            for turn in turns:
+                if _empty_assistant(turn):
+                    # Spec-only/impl-only pairs ask for a completion but carry
+                    # no answer; training on them teaches empty replies.
+                    empty_assistant_dropped += 1
+                    if counts.get("code_pair"):
+                        counts["code_pair"] -= 1
+                    continue
+                all_grouped.append((group, turn))
+            for key, value in counts.items():
+                turn_counts[key] = turn_counts.get(key, 0) + value
     if empty_assistant_dropped:
         logger.info(
             "Dropped %d pair turns with empty assistant replies",
@@ -2758,16 +2784,19 @@ def build_dataset(
 
     # Documentation-QA turns from code blocks embedded in course material
     doc_files: list[Path] = []
-    for doc_root in doc_dirs or []:
-        if not doc_root.exists():
-            logger.warning("Documentation source not found, skipping: %s", doc_root)
-            continue
-        for pattern in ("*.rst", "*.md"):
-            doc_files.extend(sorted(doc_root.rglob(pattern)))
+    with progress_log.phase("discover docs", logger, roots=len(doc_dirs or [])):
+        for doc_root in doc_dirs or []:
+            if not doc_root.exists():
+                logger.warning("Documentation source not found, skipping: %s", doc_root)
+                continue
+            for pattern in ("*.rst", "*.md"):
+                doc_files.extend(sorted(doc_root.rglob(pattern)))
     if doc_files:
-        doc_blocks = _collect_doc_blocks(doc_files, imap)
+        with progress_log.phase("doc code blocks", logger, files=len(doc_files)):
+            doc_blocks = _collect_doc_blocks(doc_files, imap)
         logger.info("Extracted %d unique Ada code blocks from documentation", len(doc_blocks))
-        doc_grouped = build_doc_training_turns(doc_blocks, guidance_text)
+        with progress_log.phase("doc QA turns", logger, blocks=len(doc_blocks)):
+            doc_grouped = build_doc_training_turns(doc_blocks, guidance_text)
         all_grouped.extend(doc_grouped)
         turn_counts["doc_qa"] = turn_counts.get("doc_qa", 0) + len(doc_grouped)
 
@@ -2777,7 +2806,8 @@ def build_dataset(
 
     # Toolchain QA turns from the AdaCore skills
     if toolchain_docs:
-        qa_grouped = build_toolchain_qa_turns(toolchain_docs, ste_rules, glossary)
+        with progress_log.phase("toolchain QA turns", logger, docs=len(toolchain_docs)):
+            qa_grouped = build_toolchain_qa_turns(toolchain_docs, ste_rules, glossary)
         all_grouped.extend(qa_grouped)
         turn_counts["toolchain_qa"] = turn_counts.get("toolchain_qa", 0) + len(qa_grouped)
 
@@ -2785,14 +2815,16 @@ def build_dataset(
     # synthetic contract turns). The per-file stats double as provenance:
     # a parser output that is missing or empty shows up in the metadata
     # with ingested=0 instead of vanishing silently.
-    extra_turns_stats = _ingest_extra_turns(extra_turns or [], all_grouped, turn_counts)
+    with progress_log.phase("ingest parser output", logger, files=len(extra_turns or [])):
+        extra_turns_stats = _ingest_extra_turns(extra_turns or [], all_grouped, turn_counts)
 
     # Eval-integrity guard: drop any group whose content matches the ada-eval
     # evaluation suite (verbatim, reformatted, or identifier-renamed). One
     # bad turn poisons its whole group. Runs before dedup and split so no
     # eval-derived record can reach any split file.
     records_before_guard = len(all_grouped)
-    all_grouped, guard_dropped_groups, guard_reasons = eval_guard.contaminated_groups(all_grouped)
+    with progress_log.phase("eval guard", logger, records=records_before_guard):
+        all_grouped, guard_dropped_groups, guard_reasons = eval_guard.contaminated_groups(all_grouped)
     guard_sigs = eval_guard.load_eval_signatures()
     guard_dropped_records = records_before_guard - len(all_grouped)
     if guard_dropped_groups:
@@ -2810,9 +2842,10 @@ def build_dataset(
     # eval_guard is imported at module top; the build_dataset ->
     # eval_guard -> parse_ada_ast -> build_dataset import cycle is benign
     # because all cross-uses are call-time attribute lookups.
-    all_grouped, deduped_count, dedup_detail = dedup_grouped(
-        all_grouped, ast_structural_cap=ast_structural_cap,
-    )
+    with progress_log.phase("dedup", logger, records=len(all_grouped)):
+        all_grouped, deduped_count, dedup_detail = dedup_grouped(
+            all_grouped, ast_structural_cap=ast_structural_cap,
+        )
     if deduped_count:
         logger.info(
             "Removed %d duplicate turns before splitting (%d verbatim, %d AST structural over cap)",
@@ -2827,12 +2860,13 @@ def build_dataset(
     # Messages with code fences are exempt: the fence itself triggers the
     # semicolon/identifier checks, and code is exempt from STE by rule 10.
     violation_count = 0
-    for turn in all_turns:
-        for message in turn["messages"]:
-            if message["role"] != "assistant" or "```" in message["content"]:
-                continue
-            if has_style_violations(message["content"]):
-                violation_count += 1
+    with progress_log.phase("STE self-check", logger, turns=len(all_turns)):
+        for turn in all_turns:
+            for message in turn["messages"]:
+                if message["role"] != "assistant" or "```" in message["content"]:
+                    continue
+                if has_style_violations(message["content"]):
+                    violation_count += 1
     if violation_count:
         logger.warning(
             "%d assistant messages still contain STE style violations "
@@ -2850,23 +2884,24 @@ def build_dataset(
     # Write JSONL output: the main file carries every record with its split
     # tag; the three split files hold the same records pre-filtered.
     output_file.parent.mkdir(parents=True, exist_ok=True)
-    split_paths = {
-        name: output_file.parent / f"dataset_{name}.jsonl"
-        for name in ("train", "val", "test")
-    }
-    with (
-        open(output_file, "w", encoding="utf-8") as f_all,
-        open(split_paths["train"], "w", encoding="utf-8") as f_train,
-        open(split_paths["val"], "w", encoding="utf-8") as f_val,
-        open(split_paths["test"], "w", encoding="utf-8") as f_test,
-    ):
-        handles = {"train": f_train, "val": f_val, "test": f_test}
-        for group, turn in all_grouped:
-            record: dict[str, Any] = dict(turn)
-            record["split"] = split_of[group]
-            line = json.dumps(record, ensure_ascii=False) + "\n"
-            f_all.write(line)
-            handles[split_of[group]].write(line)
+    split_paths = split_file_paths(output_file)
+    with progress_log.phase("write dataset", logger, turns=len(all_grouped), path=str(output_file)):
+        write_bar = progress_log.Progress("Records written", len(all_grouped), log=logger)
+        with (
+            open(output_file, "w", encoding="utf-8") as f_all,
+            open(split_paths["train"], "w", encoding="utf-8") as f_train,
+            open(split_paths["val"], "w", encoding="utf-8") as f_val,
+            open(split_paths["test"], "w", encoding="utf-8") as f_test,
+        ):
+            handles = {"train": f_train, "val": f_val, "test": f_test}
+            for group, turn in all_grouped:
+                record: dict[str, Any] = dict(turn)
+                record["split"] = split_of[group]
+                line = json.dumps(record, ensure_ascii=False) + "\n"
+                f_all.write(line)
+                handles[split_of[group]].write(line)
+                write_bar.advance()
+        write_bar.close()
 
     # Write evaluation methodology alongside the dataset
     meta_path = output_file.parent / "dataset_metadata.json"
@@ -2980,6 +3015,10 @@ def main() -> None:
         "--verbose", "-v", action="store_true",
         help="Enable debug-level logging.",
     )
+    parser.add_argument(
+        "--force", action="store_true",
+        help="Rebuild even when every input is unchanged since the last build.",
+    )
     args = parser.parse_args()
 
     if args.verbose:
@@ -3030,6 +3069,50 @@ def main() -> None:
             )
             if path.exists()
         ]
+
+    # Skip the rebuild when nothing this stage reads has changed. Without this
+    # the target is re-run on every `make all`, which is minutes of work in
+    # front of training for output that is already on disk. --workers is not
+    # part of the fingerprint: the builder documents identical output for any
+    # worker count, so changing DATASET_WORKERS must not invalidate the stamp.
+    code_suffixes = tuple(sorted(ADA_SPEC_EXTENSIONS | PROJECT_EXTENSIONS))
+    doc_suffixes = (".rst", ".md")
+    guidance_suffixes = (".md", ".markdown")
+    # ada-eval supplies the evaluation methodology block. Its expanded
+    # categories are directory names, so they go in as a param: a file-suffix
+    # digest cannot see a new category directory.
+    expanded_dir = ADA_EVAL_DIR / "data" / "base" / "expanded"
+    expanded_categories = (
+        sorted(d.name for d in expanded_dir.iterdir() if d.is_dir())
+        if expanded_dir.is_dir() else []
+    )
+    spec = stage_state.make_spec(
+        name="dataset",
+        outputs=[
+            output_file,
+            *split_file_paths(output_file).values(),
+            output_file.parent / "dataset_metadata.json",
+        ],
+        input_trees=[
+            *((root, code_suffixes) for root in [args.input_dir, *extra_dirs]),
+            *((root, doc_suffixes) for root in doc_dirs),
+            *((root, guidance_suffixes) for root in guidance_dirs),
+            (ADA_EVAL_DIR, (".jsonl", ".toml", ".py")),
+        ],
+        input_files=extra_turns or (),
+        scripts=[Path(__file__).resolve()],
+        params=[
+            ("context", args.context),
+            ("defect_pairs", not args.no_defect_pairs),
+            ("ast_structural_cap", args.ast_structural_cap),
+            ("split_seed", _RNG_SEED),
+            ("eval_expanded_categories", ",".join(expanded_categories)),
+        ],
+    )
+    if spec.skip_if_fresh(force=args.force):
+        print(f"Dataset up to date at {output_file} (use --force to rebuild).")
+        return
+
     count = build_dataset(
         input_dirs=[args.input_dir],
         extra_input_dirs=extra_dirs,
@@ -3044,6 +3127,7 @@ def main() -> None:
         ast_structural_cap=args.ast_structural_cap,
     )
     print(f"Dataset built: {count} training turns -> {output_file}")
+    spec.mark_fresh({"total_turns": count})
 
 
 if __name__ == "__main__":

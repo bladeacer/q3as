@@ -30,6 +30,11 @@ which commands to use. Regenerate the tree below with `make agents-tree`.
    [`alire.toml`](alire.toml), bumped with `make bump-version`), including the
    train/val/test loss table and a training-trend verdict.
 
+Steps 3 and 4 skip themselves when nothing they read has changed (see
+[`stage_state.py`](data/processing_scripts/stage_state.py) below), so a second
+`make all` reaches training in seconds. `FORCE=1` rebuilds anyway. Workers
+default to one per core; `DATASET_WORKERS=1` forces serial.
+
 End-user and developer documentation lives in [`docs/`](docs) (architecture,
 datasets and training, data provenance, toolchain setup, evaluation); README
 links to it. Keep those pages current when behavior changes.
@@ -74,6 +79,17 @@ records from ada-eval.
   ada-eval `data/` tree (normalized and alpha-renamed structural forms)
   and drops any training record matching them; `make check-integrity` fails if a
   split file contains eval content.
+- [`data/processing_scripts/stage_state.py`](data/processing_scripts/stage_state.py)
+  - staleness check for the dataset stages. Each stage declares its input
+  trees (with the suffixes it consumes), input files, scripts, and
+  output-changing parameters; the fingerprint is stored in
+  `data/processed/.stages/<stage>.json` and the stage is skipped when it still
+  matches. Content hashes, not mtimes (the cache is re-extracted from
+  tarballs). `--workers` is never part of a fingerprint. `FORCE=1` overrides.
+- [`data/processing_scripts/progress.py`](data/processing_scripts/progress.py)
+  - `phase()` and `Progress` for the long stages: one log line per named step
+  with its wall time, plus an item count with rate and ETA inside long loops,
+  so a multi-minute build does not look hung.
 - [`data/processing_scripts/`](data/processing_scripts) - dataset helpers live
   beside the builder.
 - [`training/download_model.py`](training/download_model.py) - HF model download
@@ -227,7 +243,9 @@ q3as/
            eval_guard.py
            parse_ada_ast.py
            parse_docs.py
+           progress.py
            source_paths.py
+           stage_state.py
        raw/
    deploy/
        Modelfile
@@ -297,6 +315,7 @@ q3as/
        test_generate.py
        test_parsers.py
        test_reporting.py
+       test_stage_state.py
    tools/
        check-links.py
    training/

@@ -20,8 +20,10 @@ shape the dataset builder ingests (``--extra-turns``), with a ``meta``
 block recording the verification result. The eval guard still applies to
 this file like any other source.
 
-Cached: when the output file exists the tool does nothing (``--force``
-regenerates).
+Cached: the run is skipped when this file, ``alire_env.py``, and ``--limit``
+are unchanged since the last successful build and the output is still in
+place; ``--force`` regenerates. A run that proves nothing does not record a
+stamp, so the next invocation retries instead of trusting an empty file.
 """
 
 from __future__ import annotations
@@ -42,7 +44,10 @@ logger = logging.getLogger(__name__)
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
+sys.path.insert(0, str(ROOT / "data" / "processing_scripts"))
 
+import alire_env
+import stage_state
 from alire_env import alire_env_path, find_tool
 
 OUTPUT = ROOT / "data" / "processed" / "contract_mutations.jsonl"
@@ -354,13 +359,34 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Generate gnatprove-verified contract training turns.")
     parser.add_argument("--output", type=Path, default=OUTPUT)
     parser.add_argument("--limit", type=int, default=30, help="approximate number of instances to verify")
-    parser.add_argument("--force", action="store_true", help="regenerate even when the output exists")
+    parser.add_argument("--force", action="store_true", help="regenerate even when the inputs are unchanged")
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO)
-    if args.output.exists() and not args.force:
-        logger.info("cached output exists: %s (use --force to regenerate)", args.output)
+
+    # The templates and the gnatprove level decide the output, so both are in
+    # the fingerprint: editing a template or changing --limit rebuilds. gnatprove
+    # itself is not hashed (it is a toolchain binary, not a source input), so
+    # use --force after a toolchain upgrade.
+    spec = stage_state.make_spec(
+        name="contract_mutations",
+        outputs=[args.output],
+        scripts=[Path(__file__).resolve(), Path(alire_env.__file__).resolve()],
+        params=[("limit", args.limit), ("templates", len(TEMPLATES))],
+    )
+    if spec.skip_if_fresh(force=args.force):
+        return 0
+
+    # `make gen-contracts` must not break the build when the prover is not
+    # installed, so an unavailable toolchain keeps whatever output exists and
+    # exits 0. This is the same guarantee the old "output exists" cache gave,
+    # but it is now keyed on the toolchain instead of on the output file.
+    if not alire_env.has_tool("gnatprove"):
+        logger.warning(
+            "gnatprove is not available (run `make prove`); keeping %s as is",
+            args.output if args.output.exists() else "no contract output",
+        )
         return 0
 
     records = build_turns(args.limit)
@@ -371,6 +397,12 @@ def main() -> int:
     for record in records:
         kinds[record["meta"]["kind"]] = kinds.get(record["meta"]["kind"], 0) + 1
     logger.info("wrote %d gnatprove-verified turns to %s (%s)", len(records), args.output, kinds)
+    if records:
+        spec.mark_fresh()
+    else:
+        # No verified turns: leave any previous stamp alone so a later run
+        # retries instead of trusting a cached "fresh" marker for an empty file.
+        logger.warning("no verified turns produced; not recording a fresh stamp")
     return 0 if records else 1
 
 

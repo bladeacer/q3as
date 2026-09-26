@@ -42,6 +42,8 @@ if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
 import build_dataset as bd
+import progress as progress_log
+import stage_state
 
 logger = logging.getLogger("q3as_parse_ada_ast")
 
@@ -463,6 +465,10 @@ def main() -> None:
         "--workers", type=int, default=0,
         help="Worker processes (0 = one per CPU core, 1 = serial).",
     )
+    parser.add_argument(
+        "--force", action="store_true",
+        help="Re-extract even when the inputs are unchanged.",
+    )
     parser.add_argument("--verbose", "-v", action="store_true", help="Debug logging.")
     args = parser.parse_args()
 
@@ -478,30 +484,53 @@ def main() -> None:
         import source_paths
 
         input_dirs = source_paths.default_code_dirs() or [Path("../adacovex")]
+
+    # libadalang changes the extraction path, so it belongs in the fingerprint:
+    # installing it (make ast-deps) must re-extract even with unchanged sources.
+    spec = stage_state.make_spec(
+        name="ada_ast_units",
+        outputs=[args.output],
+        input_trees=[(root, (".ads", ".adb")) for root in input_dirs],
+        scripts=[Path(__file__).resolve()],
+        params=[("libadalang", HAS_LIBADALANG)],
+    )
+    if spec.skip_if_fresh(force=args.force):
+        return
+
     tasks: list[tuple[str, str]] = []
-    for root in input_dirs:
-        if not root.exists():
-            logger.warning("Input directory does not exist, skipping: %s", root)
-            continue
-        for pattern, kind in (("*.ads", "ads"), ("*.adb", "adb")):
-            for path in sorted(root.rglob(pattern)):
-                tasks.append((str(path), kind))
+    with progress_log.phase("discover", logger, roots=len(input_dirs)):
+        for root in input_dirs:
+            if not root.exists():
+                logger.warning("Input directory does not exist, skipping: %s", root)
+                continue
+            for pattern, kind in (("*.ads", "ads"), ("*.adb", "adb")):
+                for path in sorted(root.rglob(pattern)):
+                    tasks.append((str(path), kind))
     if not tasks:
         logger.error("No .ads/.adb files found under %s", input_dirs)
         sys.exit(1)
 
     workers = args.workers if args.workers > 0 else (multiprocessing.cpu_count() or 1)
     results: list[dict[str, Any]] = []
-    if workers > 1 and len(tasks) >= 8:
-        try:
-            ctx = multiprocessing.get_context("fork")
-        except ValueError:
-            ctx = None
-        if ctx is not None:
-            with ctx.Pool(processes=min(workers, len(tasks))) as pool:
-                results = list(pool.imap(extract_file_task, tasks, chunksize=4))
-    if not results:
-        results = [extract_file_task(task) for task in tasks]
+    with progress_log.phase(
+        "extract", logger, files=len(tasks), workers=workers,
+    ):
+        bar = progress_log.Progress("Ada files", len(tasks), log=logger)
+        if workers > 1 and len(tasks) >= 8:
+            try:
+                ctx = multiprocessing.get_context("fork")
+            except ValueError:
+                ctx = None
+            if ctx is not None:
+                with ctx.Pool(processes=min(workers, len(tasks))) as pool:
+                    for result in pool.imap(extract_file_task, tasks, chunksize=4):
+                        results.append(result)
+                        bar.advance()
+        if not results:
+            for task in tasks:
+                results.append(extract_file_task(task))
+                bar.advance()
+        bar.close()
 
     specs = [unit for result in results for unit in result["specs"]]
     bodies = [unit for result in results for unit in result["bodies"]]
@@ -511,11 +540,14 @@ def main() -> None:
         len(specs), len(bodies), len(types), len(results),
     )
 
-    records = build_ada_ast_turns(specs, bodies, types)
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    with open(args.output, "w", encoding="utf-8") as f:
-        f.writelines(json.dumps(record, ensure_ascii=False) + "\n" for record in records)
+    with progress_log.phase("turn building", logger, specs=len(specs), bodies=len(bodies)):
+        records = build_ada_ast_turns(specs, bodies, types)
+    with progress_log.phase("write", logger, path=str(args.output)):
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        with open(args.output, "w", encoding="utf-8") as f:
+            f.writelines(json.dumps(record, ensure_ascii=False) + "\n" for record in records)
     logger.info("Wrote %d AST-derived turns to %s", len(records), args.output)
+    spec.mark_fresh()
 
 
 if __name__ == "__main__":

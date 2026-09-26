@@ -40,6 +40,8 @@ if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
 import build_dataset as bd
+import progress as progress_log
+import stage_state
 
 logger = logging.getLogger("q3as_parse_docs")
 
@@ -311,6 +313,10 @@ def main() -> None:
         "--workers", type=int, default=0,
         help="Worker processes (0 = one per CPU core, 1 = serial).",
     )
+    parser.add_argument(
+        "--force", action="store_true",
+        help="Rebuild even when the inputs are unchanged.",
+    )
     parser.add_argument("--verbose", "-v", action="store_true", help="Debug logging.")
     args = parser.parse_args()
 
@@ -324,31 +330,56 @@ def main() -> None:
         import source_paths
 
         input_dirs = source_paths.default_doc_dirs() or [Path("../learn")]
-    tasks = collect_doc_files(input_dirs)
+
+    # Skip the rebuild when the docs, this script, and the section bounds are
+    # all unchanged since the last run. --workers is deliberately not part of
+    # the fingerprint: the chunker is order-independent, so the output does not
+    # depend on it.
+    spec = stage_state.make_spec(
+        name="docs_chunks",
+        outputs=[args.output],
+        input_trees=[(root, (".md", ".rst")) for root in input_dirs],
+        scripts=[Path(__file__).resolve()],
+        params=[("min_chars", args.min_chars), ("max_chars", args.max_chars)],
+    )
+    if spec.skip_if_fresh(force=args.force):
+        return
+
+    with progress_log.phase("discover", logger, roots=len(input_dirs)):
+        tasks = collect_doc_files(input_dirs)
     if not tasks:
         logger.error("No .md/.rst files found under %s", input_dirs)
         sys.exit(1)
 
     workers = args.workers if args.workers > 0 else (multiprocessing.cpu_count() or 1)
     sections: list[dict[str, Any]] = []
-    if workers > 1 and len(tasks) >= 8:
-        try:
-            ctx = multiprocessing.get_context("fork")
-        except ValueError:
-            ctx = None
-        if ctx is not None:
-            with ctx.Pool(processes=min(workers, len(tasks))) as pool:
-                for file_sections in pool.imap(_parse_file_task, tasks, chunksize=4):
-                    sections.extend(file_sections)
-    if not sections:
-        for task in tasks:
-            sections.extend(_parse_file_task(task))
+    with progress_log.phase("parse", logger, files=len(tasks), workers=workers):
+        bar = progress_log.Progress("Doc files", len(tasks), log=logger)
+        if workers > 1 and len(tasks) >= 8:
+            try:
+                ctx = multiprocessing.get_context("fork")
+            except ValueError:
+                ctx = None
+            if ctx is not None:
+                with ctx.Pool(processes=min(workers, len(tasks))) as pool:
+                    for file_sections in pool.imap(_parse_file_task, tasks, chunksize=4):
+                        sections.extend(file_sections)
+                        bar.advance()
+        if not sections:
+            for task in tasks:
+                sections.extend(_parse_file_task(task))
+                bar.advance()
+        bar.close()
 
-    records = build_section_turns(sections, args.min_chars, args.max_chars)
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    with open(args.output, "w", encoding="utf-8") as f:
-        f.writelines(json.dumps(record, ensure_ascii=False) + "\n" for record in records)
+    logger.info("Parsed %d sections from %d files", len(sections), len(tasks))
+    with progress_log.phase("turn building", logger, sections=len(sections)):
+        records = build_section_turns(sections, args.min_chars, args.max_chars)
+    with progress_log.phase("write", logger, path=str(args.output)):
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        with open(args.output, "w", encoding="utf-8") as f:
+            f.writelines(json.dumps(record, ensure_ascii=False) + "\n" for record in records)
     logger.info("Wrote %d doc-section turns to %s", len(records), args.output)
+    spec.mark_fresh()
 
 
 if __name__ == "__main__":

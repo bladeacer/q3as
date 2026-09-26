@@ -78,6 +78,59 @@ from spec-only or impl-only sources) are dropped at build time and at
 training-load time; their count is recorded under
 `empty_assistant_dropped` and per file under `empty_assistant`.
 
+### Rebuild skipping
+
+`parse-data`, `gen-contracts`, and `build-dataset` are `.PHONY` targets, so
+make runs them on every `make all`. Each stage therefore declares what it
+reads in [`stage_state.py`](../data/processing_scripts/stage_state.py): the
+input trees (with the file suffixes the stage actually consumes), single input
+files, the scripts that produce it, and the parameters that change the
+output. After a successful run the fingerprint is written to
+`data/processed/.stages/<stage>.json`, and the next run recomputes it and
+skips the work when it still matches.
+
+Four properties make the "fresh" verdict safe:
+
+- **Content, not timestamps.** Trees are hashed by content. The archive
+  cache is re-extracted from tarballs, so mtimes change when nothing did;
+  content hashing keeps a refetched repo from forcing a rebuild. The whole
+  corpus (about 10,000 files) hashes in roughly half a second.
+- **Scripts are inputs.** Editing `build_dataset.py`, `code_variants.py`,
+  `eval_guard.py`, `source_paths.py`, or a parser invalidates every stage
+  that imports it, so a logic change never keeps stale output.
+- **Missing is not fresh.** A stage is skipped only when every declared
+  output exists, is non-empty, and still has the size recorded when it was
+  written. Deleting or truncating `dataset.jsonl` always rebuilds.
+- **`--workers` is excluded.** The stages produce identical output for any
+  worker count, so changing `DATASET_WORKERS` must not invalidate a build.
+  A test asserts no stage puts it in its fingerprint.
+
+`FORCE=1` (or `--force` on the scripts) rebuilds regardless, which is what to
+use after a toolchain change: `gnatprove` is a binary, not a hashed source
+input, so upgrading the prover does not invalidate `contract_mutations`.
+`make clean` removes the stamps along with the dataset.
+
+Effect on the full pipeline, measured on 16 cores over the whole corpus
+(6,514 Ada files, 4,337 pairs, 73,080 turns):
+
+| Step | Before | After |
+|---|---|---|
+| `make parse-data build-dataset`, nothing changed | 11 min 30 s | 2 s |
+| `parse_ada_ast` extract phase | 7 min 38 s (1 worker) | 1 min 08 s (8) / 51 s (16) |
+| `build_dataset` pair phase | 24 s (1 worker) | 5 s (8) |
+| `DATASET_WORKERS` default | 1 | 0 (one per core) |
+
+Worker memory is about 90 MiB each and the builder's parent peaks near
+1.7 GiB holding every record, so cores run out before RAM does. The phases
+left after parallelising are serial by nature: the eval guard (about 84 s),
+ingesting the parser JSONL (30 s), and dedup (13 s).
+
+[`progress.py`](../data/processing_scripts/progress.py) keeps the wait
+legible. Long stages log a named phase per step (`[extract] starting
+(files=6514, workers=8)` then `[extract] done in 1m08s`) and, inside long
+loops, an item count with a rate and an ETA at a bounded cadence. The build
+no longer prints nothing for minutes, which used to look like a hang.
+
 | Family | Example defect |
 |---|---|
 | `syntax` | Misspelled keyword (`procedur`) |
