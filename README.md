@@ -31,24 +31,32 @@ This project builds on and draws data from the following upstream projects. Lice
 
 Core sources (fetched into the local archive cache `data/raw_repos/<owner>/<repo>` by `make fetch-sources`):
 
-- **[adacovex](https://github.com/bladeacer/adacovex)** - Ada/SPARK coverage/proof/CLI tool; source with contract specifications. *(Apache-2.0)*
-- **[Ada_CRDT](https://github.com/bladeacer/Ada_CRDT)** - Conflict-free replicated data types for Ada/SPARK. *(MIT)*
-- **[Ada-83-TLALOC](https://github.com/ViMoBr/Ada-83-TLALOC)** - Ada 83 compiler and test suite; [the author has given explicit permission to use this code for model training.](https://forum.ada-lang.io/t/fine-tuning-8b-ai-model-on-ada-spark/4746/3 ) *(GPL-3.0-or-later with GCC runtime exception; tests CC-BY-SA-4.0)*
-- **[ada-eval](https://github.com/AdaCore/ada-eval)** - LLM evaluation framework for Ada/SPARK; provides our benchmark (and is treated as eval-proper, never as training data). *(Apache-2.0)*
-- **[AdaCore/learn](https://github.com/AdaCore/learn)** - AdaCore course material; Ada code blocks and sections become documentation-QA turns. *(CC-BY-4.0)*
-- **[AdaCore/training_material](https://github.com/AdaCore/training_material)** - AdaCore training courses (RST); Ada code blocks become documentation-QA turns. *(CC-BY-4.0)*
-- **[agent-sh/ada-spark](https://github.com/agent-sh/ada-spark)** - Agent skill for idiomatic, current Ada/SPARK; embedded into system prompts. *(MIT)*
-- **[AminBlg/SimpleEnglish](https://github.com/AminBlg/SimpleEnglish)** - ASD-STE100-style writing skill; governs all generated explanations. *(MIT)*
-- **[AdaCore/skills](https://github.com/AdaCore/skills)** - Official AdaCore toolchain skills (gnatprove, alire, gnatdoc, gnattest, gnatfuzz); become toolchain QA turns. *(Apache-2.0)*
+- **[bladacer/adacovex](https://github.com/bladeacer/adacovex)**
+  - Ada/SPARK coverage/proof/CLI tool; source with contract specifications. *(Apache-2.0)*
+- **[bladeacer/Ada_CRDT](https://github.com/bladeacer/Ada_CRDT)**
+  - Conflict-free replicated data types for Ada/SPARK. *(MIT)*
+- **[ViMoBr/Ada-83-TLALOC](https://github.com/ViMoBr/Ada-83-TLALOC)**
+  - Ada 83 compiler and test suite; [the author has given explicit permission to use this code for model training.](https://forum.ada-lang.io/t/fine-tuning-8b-ai-model-on-ada-spark/4746/3 ) *(GPL-3.0-or-later with GCC runtime exception; tests CC-BY-SA-4.0)*
+- **[AdaCore/ada-eval](https://github.com/AdaCore/ada-eval)**
+  - LLM evaluation framework for Ada/SPARK; provides our benchmark (and is treated as eval-proper, never as training data) . *(Apache-2.0)*
+- **[AdaCore/learn](https://github.com/AdaCore/learn)**
+  - AdaCore course material; Ada code blocks and sections become documentation-QA turns. *(CC-BY-4.0)*
+- **[AdaCore/training_material](https://github.com/AdaCore/training_material)**
+  - AdaCore training courses (RST); Ada code blocks become documentation-QA turns. *(CC-BY-4.0)*
+- **[agent-sh/ada-spark](https://github.com/agent-sh/ada-spark)**
+  - Agent skill for idiomatic, current Ada/SPARK; embedded into system prompts. *(MIT)*
+- **[AminBlg/SimpleEnglish](https://github.com/AminBlg/SimpleEnglish)**
+  - ASD-STE100-style writing skill; governs all generated explanations. *(MIT)*
+- **[AdaCore/skills](https://github.com/AdaCore/skills)**
+  - Official AdaCore toolchain skills (gnatprove, alire, gnatdoc, gnattest, gnatfuzz); become toolchain QA turns. *(Apache-2.0)*
 
 - **[RobertBoettcherSF/Ada-Algorithms](https://github.com/RobertBoettcherSF/Ada-Algorithms)**
   - A single monorepo of the author's Ada/SPARK algorithm implementations
   (distributed systems, graph algorithms, image processing, compression,
-  SPARK-verified sheets, parsers, and more), organized into category
-  directories. *(MIT, see that repository's `LICENSE`)* - the author
-  has approved training use. That approval is not recorded in the repository:
-  the README carries no LLM-usage disclosure, so keep the provenance note here
-  rather than looking for a citation in the source.
+  SPARK-verified sheets, parsers, and more), organised into category
+  directories. Their code is AI assisted.
+  [The author has given explicit permission to use this code for model training.](https://forum.ada-lang.io/t/fine-tuning-8b-ai-model-on-ada-spark/4746/6)
+  *(MIT)*. 
 
 ## Quick Start
 
