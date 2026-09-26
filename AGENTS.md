@@ -288,6 +288,7 @@ q3as/
    tests/
        test_alire_env.py
        test_build_dataset.py
+       test_check_links.py
        test_code_variants.py
        test_defect_families.py
        test_eval_guard.py

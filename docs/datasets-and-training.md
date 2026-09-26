@@ -237,7 +237,7 @@ table adds the fine-tuned test loss and trend verdict per version.
 
 ```bash
 make test               # unit tests (builders, parsers, guard, injectors)
-make lint               # ruff + mypy over all project sources
+make lint               # ruff + mypy, markdown link check, AGENTS tree check
 make validate-defects   # GNAT-compiles defect pairs, checks claimed messages
 make check-integrity    # fails if any split contains eval content
 ```

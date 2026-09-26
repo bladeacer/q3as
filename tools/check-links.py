@@ -9,7 +9,15 @@ files under the repository root and verifies that:
 - links carrying an ``#anchor`` point at a real GitHub-style heading slug
   in the target markdown file (lowercased, punctuation stripped, spaces
   hyphenated);
+- no file carries a control character, which is what a half-applied
+  find-and-replace leaves behind (a link rewritten to a run of ``\\x01``);
 - external links (http/https/mailto) are not verified.
+
+A link that resolves on this machine can still be a dead link in the
+repository a reader clones: anything git ignores (``outputs/``,
+``data/processed/``, ``models/``, ``.alire-*/``) is absent from the clone,
+so those targets are reported too. The ignore check needs git, and is
+skipped when git is unavailable or this is not a working copy.
 
 Fenced code blocks are stripped before link extraction so code samples
 that happen to contain ``[x](y)``-looking text are not treated as links.
@@ -23,7 +31,9 @@ from __future__ import annotations
 
 import argparse
 import re
+import subprocess
 import sys
+from functools import lru_cache
 from pathlib import Path
 
 ROOT: Path = Path(__file__).resolve().parent.parent
@@ -46,6 +56,54 @@ SKIP_DIRS: tuple[str, ...] = (
 )
 
 LINK_RE = re.compile(r"!?\[[^\]]*\]\(([^)]+)\)")
+# Control characters other than tab: never legitimate in a text file.
+CONTROL_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
+
+
+@lru_cache(maxsize=1)
+def repo_paths() -> tuple[frozenset[str], frozenset[str]] | None:
+    """(tracked, ignored) repository-relative file paths, or None if unknowable.
+
+    ``outputs/`` and friends exist on a built machine, so a plain existence
+    check calls them fine; a reader who clones the repository gets a 404.
+    Ignored means git would not keep the file, which is exactly what a clone
+    lacks. Empty means "not a git working copy": the checks that need this
+    are skipped rather than guessed at.
+    """
+    def run(*args: str) -> set[str]:
+        try:
+            done = subprocess.run(
+                ["git", *args], cwd=ROOT, capture_output=True,
+                text=True, check=True, timeout=60,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return set()
+        return set(done.stdout.split())
+
+    tracked = run("ls-files", "--cached", "--others", "--exclude-standard")
+    if not tracked:
+        return None
+    ignored = run("ls-files", "--others", "--ignored", "--exclude-standard")
+    return frozenset(tracked), frozenset(ignored - tracked)
+
+
+def is_absent_from_clone(rel_target: str, paths: tuple[frozenset[str], ...]) -> bool:
+    """True when *rel_target* would not exist in a fresh clone.
+
+    An ignored file, or a directory whose every file is ignored, is gone for
+    a reader. A directory that also holds tracked files (``data/``, which
+    has both the scripts and the generated splits) still resolves, so it is
+    left alone.
+    """
+    tracked, ignored = paths
+    if rel_target in ignored:
+        return True
+    prefix = f"{rel_target}/"
+    if any(p.startswith(prefix) for p in tracked):
+        return False
+    return any(p.startswith(prefix) for p in ignored)
+
+
 
 
 def slugify(heading: str) -> str:
@@ -123,8 +181,14 @@ def check_file(path: Path, slug_cache: dict[Path, list[str]],
         errors.append(f"{path}: unreadable: {exc}")
         return
 
-    text: str = strip_code_fences(raw)
     rel: Path = path.relative_to(ROOT)
+    for line_no, line in enumerate(raw.splitlines(), start=1):
+        if (hit := CONTROL_RE.search(line)) is not None:
+            errors.append(f"{rel}:{line_no}: control character "
+                          f"U+{ord(hit.group()):04X} (a rewritten link?)")
+
+    ignored = repo_paths()
+    text: str = strip_code_fences(raw)
     for line_no, line in enumerate(text.splitlines(), start=1):
         for target in LINK_RE.findall(line):
             target = target.strip()
@@ -144,6 +208,13 @@ def check_file(path: Path, slug_cache: dict[Path, list[str]],
                 errors.append(f"{rel}:{line_no}: broken link: {target!r} "
                               f"(no such file {resolved})")
                 continue
+            if ignored and resolved.is_relative_to(ROOT):
+                rel_target = resolved.relative_to(ROOT).as_posix()
+                if is_absent_from_clone(rel_target, ignored):
+                    errors.append(f"{rel}:{line_no}: link target is not in the "
+                                  f"repository: {target!r} (git ignores it, so "
+                                  f"a reader who clones gets a 404)")
+                    continue
             if anchor and resolved.suffix == ".md":
                 if resolved not in slug_cache:
                     slug_cache[resolved] = headings_slugs(resolved)

@@ -55,7 +55,10 @@ benchmark, and say in prose why it is absent when the run was withdrawn.
   the file a sentence is about. Only git-tracked paths are linked: generated
   output (`outputs/`, `data/processed/`, `models/`) stays a code span, because
   a link to it would 404.
-- `make lint` checks every relative markdown link and anchor on these pages,
-  so a moved page fails the build until its links are retargeted.
+- `make lint` checks every relative markdown link and anchor on these pages, so
+  a moved page fails the build until its links are retargeted. It also rejects
+  a link to a path git ignores (it resolves on a built machine and 404s for a
+  reader who clones), and it checks that the file tree in `AGENTS.md` is
+  current.
 
 Navigation: [project README](../README.md) · [docs index](README.md) · [changelog index](changelogs/index.md) · [results index](results/README.md)

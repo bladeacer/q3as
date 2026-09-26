@@ -56,7 +56,7 @@ help: ## Show this help message
 	@echo "  make ast-deps       - Build and install libadalang.so for the Ada AST parser"
 	@echo "                        (optional; without it the parser uses its structural scanner)"
 	@echo "  make check-integrity - Fail if any split file contains ada-eval evaluation content"
-	@echo "  make check-links    - Check every relative markdown link/anchor resolves"
+	@echo "  make check-links    - Check every markdown link/anchor resolves, and that no link points at a gitignored path"
 	@echo ""
 	@echo "  make train          - Run 8 GB-safe QLoRA fine-tuning with Unsloth (adapter-only)"
 	@echo "  make generate       - Generate Ada code with bounded memory settings"
@@ -72,7 +72,7 @@ help: ## Show this help message
 	@echo "  make bump-version   - Bump version in the three Alire manifests + pyproject.toml"
 	@echo "                        (VERSION=x.y.z or PART=major|minor|patch)"
 	@echo "  make test           - Run the Python unit tests (pytest)"
-	@echo "  make lint           - Run ruff and mypy over the project sources"
+	@echo "  make lint           - Run ruff, mypy, the link check, and the AGENTS tree check"
 	@echo "  make agents-tree    - Regenerate the project file tree inside AGENTS.md"
 	@echo "  make clean          - Remove generated outputs and caches"
 	@echo ""
@@ -165,10 +165,11 @@ ast-deps: ## Build and install libadalang.so so the Ada AST parser uses real AST
 test: ## Run the Python unit tests
 	uv run pytest tests/ -q
 
-lint: ## Run ruff and mypy over the project sources, then check markdown links
+lint: ## Run ruff and mypy over the project sources, then check markdown links and the AGENTS tree
 	uv run ruff check data/processing_scripts/ scripts/ eval/ tests/ tools/
-	uv run mypy data/processing_scripts/build_dataset.py data/processing_scripts/parse_docs.py data/processing_scripts/parse_ada_ast.py data/processing_scripts/eval_guard.py data/processing_scripts/code_variants.py eval/ada_eval_common.py eval/baseline_eval.py scripts/alire_env.py scripts/bump_version.py scripts/build_libadalang.py scripts/gen_eval_report.py scripts/gen_agents_tree.py scripts/collect_cap_results.py scripts/make_probe_splits.py
+	uv run mypy data/processing_scripts/build_dataset.py data/processing_scripts/parse_docs.py data/processing_scripts/parse_ada_ast.py data/processing_scripts/eval_guard.py data/processing_scripts/code_variants.py eval/ada_eval_common.py eval/baseline_eval.py scripts/alire_env.py scripts/bump_version.py scripts/build_libadalang.py scripts/gen_eval_report.py scripts/gen_agents_tree.py scripts/collect_cap_results.py scripts/make_probe_splits.py tools/check-links.py
 	uv run python tools/check-links.py
+	uv run python scripts/gen_agents_tree.py --check
 
 validate-defects: ## Compile-check dataset defect pairs with the Alire GNAT
 	uv run python scripts/validate_defects.py --source data/raw_repos/bladeacer/adacovex --source data/raw_repos/bladeacer/Ada_CRDT --source data/raw_repos/AdaCore/ada-eval --source data/raw_repos/RobertBoettcherSF/Ada-Algorithms
@@ -183,7 +184,7 @@ gen-contracts: ## Generate gnatprove-verified synthetic contract turns (cached; 
 check-integrity: ## Fail if any split file contains ada-eval evaluation content
 	uv run python data/processing_scripts/eval_guard.py data/processed/dataset_train.jsonl data/processed/dataset_val.jsonl data/processed/dataset_test.jsonl
 
-check-links: ## Check every relative markdown link/anchor resolves
+check-links: ## Check every markdown link/anchor resolves; fail on a link to a path git ignores
 	uv run python tools/check-links.py
 
 agents-tree: ## Regenerate the project file tree section in AGENTS.md

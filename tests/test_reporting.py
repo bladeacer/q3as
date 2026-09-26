@@ -14,6 +14,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import bump_version as bv
 import gen_eval_report as ger
 
+CHANGELOGS_DIR = Path(__file__).resolve().parents[1] / "docs" / "changelogs"
+
 
 @pytest.fixture(autouse=True)
 def isolate_extra_version_files(monkeypatch):
@@ -200,6 +202,77 @@ class TestRender:
             assert report.name in text, f"{report.name} exists but the index never links it"
         for target in re.findall(r"\]\((result-v[\d.]+\.md)\)", text):
             assert (ger.RESULTS_DIR / target).exists(), f"dead link in the index: {target}"
+
+    def test_generated_result_files_match_the_generator(self):
+        """docs/results/ is generated; a hand edit there is silently reverted
+        by the next `make eval-report`. Rendering from the committed data and
+        comparing bytes catches the edit while it is still in the diff."""
+        index = ger.RESULTS_DIR / "README.md"
+        if not index.exists():
+            pytest.skip("no results index in this checkout")
+        entries = []
+        for data_path in sorted(ger.RESULTS_DIR.glob("result-data-v*.json")):
+            entries.append(json.loads(data_path.read_text(encoding="utf-8")))
+        if not entries:
+            pytest.skip("no result data in this checkout")
+        entries.sort(key=lambda e: [int(x) for x in e["version"].split(".")],
+                     reverse=True)
+        assert ger.render_index(entries) == index.read_text(encoding="utf-8"), (
+            "docs/results/README.md differs from gen_eval_report.render_index: "
+            "it was hand-edited, and `make eval-report` will overwrite it"
+        )
+        for data_path in entries:
+            version = data_path["version"]
+            report = ger.RESULTS_DIR / f"result-v{version}.md"
+            if not report.exists():
+                continue
+            assert ger.render_markdown(version, data_path) == report.read_text(
+                encoding="utf-8"
+            ), f"{report.name} differs from the generator output: hand-edited"
+
+
+class TestChangelogIndex:
+    """docs/changelogs/ follows the same convention as docs/results/.
+
+    An entry file that nothing links is invisible: the index is the only way
+    a reader reaches a version, so a new vX.Y.Z.md must appear in it, and a
+    link in it must not dangle.
+    """
+
+    def test_every_changelog_file_is_linked_from_the_index(self):
+        index = CHANGELOGS_DIR / "index.md"
+        if not index.exists():
+            pytest.skip("no changelog index in this checkout")
+        text = index.read_text(encoding="utf-8")
+        for entry in sorted(CHANGELOGS_DIR.glob("v*.md")):
+            assert entry.name in text, (
+                f"{entry.name} exists but docs/changelogs/index.md never links it"
+            )
+
+    def test_index_links_resolve(self):
+        index = CHANGELOGS_DIR / "index.md"
+        if not index.exists():
+            pytest.skip("no changelog index in this checkout")
+        text = index.read_text(encoding="utf-8")
+        for target in re.findall(r"\]\((v[\d.]+\.md)\)", text):
+            assert (CHANGELOGS_DIR / target).exists(), (
+                f"dead link in the changelog index: {target}"
+            )
+
+    def test_current_version_has_an_entry(self):
+        """`make bump-version` moves alire.toml; the release log must follow.
+
+        Without this, a version bump ships with no changelog entry and the
+        index silently stops at the previous release.
+        """
+        if not (CHANGELOGS_DIR / "index.md").exists():
+            pytest.skip("no changelog index in this checkout")
+        root = Path(bv.__file__).resolve().parents[1]
+        version = bv.read_version(root / "alire.toml")
+        entry = CHANGELOGS_DIR / f"v{version}.md"
+        assert entry.exists(), (
+            f"alire.toml is at {version} but docs/changelogs/{entry.name} is missing"
+        )
 
 
 class TestRepoVersionsAgree:

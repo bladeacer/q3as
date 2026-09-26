@@ -22,7 +22,7 @@ Full index, with a reading order: [docs/README.md](docs/README.md).
 | [Toolchain setup](docs/toolchain-setup.md) | Alire management, vendored index for outdated `alr` |
 | [Evaluation](docs/evaluation.md) | Benchmark, metrics, interpretation, running |
 | [Docs index](docs/README.md) | Every documentation page, and how they fit together |
-| [Results index](docs/results/README.md) | Per-version eval summaries and the last-3 comparison table |
+| [Results index](docs/results/README.md) | Per-version eval summaries and a cross-version comparison table |
 | [Changelog index](docs/changelogs/index.md) | What changed in each version, one file per release |
 
 ## Project Credits
