@@ -30,6 +30,8 @@ SKIP_DIRS = {
     "__pycache__", ".alire-dev", "alire", "node_modules",
     ".unsloth", "unsloth_compiled_cache", "_unsloth_temporary_saved_buffers",
     ".agents", ".kilo", ".idea", ".vscode",
+    # Tokenized-split Arrow cache written by training/train_unsloth.py.
+    ".tokenized",
     "raw_repos",
 }
 # Shown as a collapsed one-liner instead of walked, with a per-dir note.

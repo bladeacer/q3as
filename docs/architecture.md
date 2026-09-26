@@ -37,7 +37,7 @@ What each part of q3as does and how the pieces connect.
 | [`scripts/ada_env.sh`](../scripts/ada_env.sh) / [`scripts/alire_env.py`](../scripts/alire_env.py) | Alire toolchain entry points (shell / Python) |
 | [`scripts/build_libadalang.py`](../scripts/build_libadalang.py) | Builds and installs `libadalang.so` for the AST parser (`make ast-deps`) |
 | [`training/download_model.py`](../training/download_model.py) | HF download with terminating sanity checks (deep GPU check runs in a child process with a timeout) |
-| [`training/train_unsloth.py`](../training/train_unsloth.py) | QLoRA training: seed 42, train-split default, eval every 50 steps, early stopping (patience 10), test-split perplexity; writes `training_summary.json` with train/eval loss histories for the report |
+| [`training/train_unsloth.py`](../training/train_unsloth.py) | QLoRA training: seed 42, train-split default, eval every 50 steps on a seeded `--eval-sample` subset, early stopping (patience 10), test-split perplexity on a `--test-sample` subset; streams splits from JSONL into a cached int32-`input_ids` Arrow table to bound host RAM; writes `training_summary.json` with train/eval loss histories and the split counts those losses were measured on |
 | [`eval/generate.py`](../eval/generate.py) | Batch generation for both models; prompts embed the full project tree; replies are parsed into restricted multi-file overlays (target dir only, no project-file overwrites, identical echoes skipped) |
 | [`eval/baseline_eval.py`](../eval/baseline_eval.py) | BLEU/compliance metrics and aggregation |
 | [`eval/eval_pipeline.py`](../eval/eval_pipeline.py) | ada-eval BUILD/TEST/PROVE comparison (see [Evaluation](evaluation.md)) |

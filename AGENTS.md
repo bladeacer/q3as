@@ -97,7 +97,16 @@ records from ada-eval.
   child process with a timeout so the pipeline can never hang).
 - [`training/train_unsloth.py`](training/train_unsloth.py) - QLoRA training
   script (Unsloth, 1024-token window, single-process dataset tokenization, LoRA
-  adapters on Qwen3-8B).
+  adapters on Qwen3-8B). The train split streams from JSONL into an Arrow
+  table of int32 `input_ids` under `data/processed/.tokenized/` (136 MB, and
+  trl's own 4-minute tokenization pass is skipped because the column marks the
+  dataset processed); the eval splits stay text for the chunked eval callback
+  and are sampled by `--eval-sample` / `--test-sample` so a run's evaluation
+  fits `--eval-budget-min`. Table keys cover split content, chat template,
+  tokenizer vocabulary, truncation length, and a pipeline version; tables a run
+  did not touch are pruned. The no-val-file fallback carve keeps records in
+  memory and says so in the summary. It configures its own logger, because
+  importing unsloth makes `logging.basicConfig` a no-op.
 - [`eval/generate.py`](eval/generate.py) - batch generation for the fine-tuned
   and base models.
 - [`eval/baseline_eval.py`](eval/baseline_eval.py) - reference-based scoring:
@@ -255,6 +264,7 @@ q3as/
            v0.1.0.md
            v0.2.0.md
            v0.3.0.md
+           v0.4.0.md
        results/
            README.md
            result-data-v0.1.0.json
@@ -316,8 +326,10 @@ q3as/
        test_parsers.py
        test_reporting.py
        test_stage_state.py
+       test_train_data.py
    tools/
        check-links.py
+   trainer_output/
    training/
        download_model.py
        train_unsloth.py

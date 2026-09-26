@@ -18,6 +18,7 @@ string, and is listed in the [results index](../results/README.md).
 
 | Version | What changed | Results |
 |---|---|---|
+| [0.4.0](v0.4.0.md) | Training RAM and eval time: streamed splits, pre-tokenized Arrow, sampled evaluation | _not run_ |
 | [0.3.0](v0.3.0.md) | Numbers now measure the models; dataset and evaluation cover the whole benchmark | [result-v0.3.0.md](../results/result-v0.3.0.md) |
 | [0.2.0](v0.2.0.md) | Ada-Algorithms monorepo migration, 8 GB OOM fixes, AST structural-cap experiments | _withdrawn_ |
 | [0.1.0](v0.1.0.md) | First versioned evaluation, 19 samples | [result-v0.1.0.md](../results/result-v0.1.0.md) |

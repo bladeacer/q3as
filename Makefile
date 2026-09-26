@@ -219,5 +219,6 @@ all: check-model build-dataset train generate eval eval-pipeline eval-report ## 
 clean: ## Remove generated outputs and caches
 	rm -rf outputs/ models/ data/processed/dataset.jsonl data/processed/dataset_metadata.json \
 		data/processed/dataset_train.jsonl data/processed/dataset_val.jsonl \
-		data/processed/dataset_test.jsonl data/processed/.stages training.log
-	@echo "Cleaned outputs/, models/, generated dataset, stage stamps, and training.log."
+		data/processed/dataset_test.jsonl data/processed/.stages \
+		data/processed/.tokenized training.log
+	@echo "Cleaned outputs/, models/, generated dataset, stage stamps, tokenized-split cache, and training.log."

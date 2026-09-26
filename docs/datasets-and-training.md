@@ -240,6 +240,36 @@ mechanisms keep the splits honest:
   tokenization uses one process, the data loader uses no workers, and
   checkpoints omit optimizer state. The `make` pipeline also uses one
   dataset worker and saves the LoRA adapter without a merged 16-bit export.
+- **Host RAM**: the 423 MB train split is streamed from JSONL into a cached
+  Arrow table (`data/processed/.tokenized/`) one record at a time. The
+  previous loader held three copies of the split at once (parsed records,
+  chat-templated strings, then the Arrow table). Peak anonymous memory fell
+  from 5,206 MB to 1,444 MB, and the run went from 223 MB of swap to none.
+  Note that `VmRSS` still peaks near 5.6 GB during the model load: that is
+  the safetensors files mapped in and read once, so it is reclaimable page
+  cache, not memory pressure. Anonymous memory is the number to watch.
+  The cache key covers the split's content hash, the chat template, the
+  tokenizer's *vocabulary* (hashed, not named, because a different vocabulary
+  can ship under the same model name), the truncation length, and a pipeline
+  version, so any of them changing rebuilds the table instead of reusing a
+  stale one. Tables the run did not touch are pruned afterwards, and
+  `make clean` removes the directory. The fallback carve path (used when no
+  val split file exists) still holds records in memory, because the seeded
+  shuffle indexes into the list; `training_summary.json` records which path a
+  run took under `experiment.split_load`.
+- **Stored format**: the train table holds `input_ids` as int32 rather than
+  rendered text - 136 MB instead of 426 MB for 65,809 records, since a token
+  id cannot exceed a 2^31 vocabulary. An `input_ids` column also marks the
+  dataset as already processed, so trl and Unsloth skip their tokenization
+  pass (4m07s per run, now under a second). This was checked, not assumed:
+  Unsloth swaps the data collator when `input_ids` is pre-supplied, so four
+  steps were run both ways at the same seed. Steps 1-2 were bit-identical;
+  steps 3-4 differed, but a `text` run repeated against itself diverged by the
+  same magnitude, so that is the bf16 non-determinism the caveat below
+  describes. The eval splits stay as text, because the chunked eval callback
+  tokenizes them itself, and they are not handed to `SFTTrainer` at all
+  (`eval_strategy` is `"no"`, so passing them in only made trl tokenize 3,709
+  val records per run for a dataset nothing read).
 - **Splits**: trains on `dataset_train.jsonl` by default; val loss is
   computed every 50 steps (`--eval-steps`); a fallback seeded carve-out
   protects custom single-file datasets.
@@ -249,6 +279,33 @@ mechanisms keep the splits honest:
   avoids materializing logits on GPU (8 GB VRAM constraint), so
   Trainer-managed evaluation stays off. The exported adapter is the
   final state at stop time, not a reloaded best checkpoint.
+- **Evaluation cost**: that callback, not the training steps, sets the wall
+  time of a run. It costs a measured 1.2 ms per token (a forward plus the
+  final `lm_head` over the same tokens), which is 37.1 min for a full pass
+  over the 3,709-example val split and 35.6 min for the test split. Ten
+  evaluations is 6.8 h. The GPU is not the constraint and cannot be made
+  one: it reports 95-100% utilization with its SM clock at 180 MHz of a
+  3090 MHz maximum, drawing 55 W, so it is fed small kernels and idles
+  between them. Batching the eval forwards was measured and rejected: batch 4
+  is 10% faster (1.040 to 0.940 s per example) and takes VRAM to 7.18 GB of
+  8.15 GB.
+- **Sampled evaluation**: `--eval-sample` (default 2000) and `--test-sample`
+  (default 2000) cap what the callback scores, cutting the projection from
+  6.92 h to 3.75 h. Every evaluation point scores the *same* seeded subset in
+  the same order, so the curve compares like with like. `--eval-budget-min`
+  (default 300) is a ceiling, not a control: the run projects its evaluation
+  cost, logs it, and warns when the chosen sizes exceed it, but never
+  silently resizes anything. **Training data is untouched** - all 65,809
+  records are still trained on. `training_summary.json` records `val` next to
+  `val_total` and `test` next to `test_total`, so a reported loss cannot be
+  read as a full-split loss. Losses from this version onward are therefore
+  comparable run-to-run but not to the full-split figures in the v0.3.0
+  result.
+- **Logging**: the module configures its own logger instead of calling
+  `logging.basicConfig`. Importing unsloth installs a root handler and sets
+  the root level to WARNING, which made `basicConfig` a silent no-op and
+  dropped every progress line (split counts, eval loss, early stopping,
+  summary path); `--verbose` now works as documented.
 - **Test metrics**: after training, test-split loss and perplexity are
   computed and written to `training_summary.json`.
 - **Loss histories**: `training_summary.json` carries the full train-loss
