@@ -12,5 +12,6 @@ training.log
 .ruff_cache
 .mypy_cache
 .alire-dev/
+.alire-ast/
 alire/
 config/

@@ -1,0 +1,25 @@
+-- q3as AST toolchain driver project.
+--
+-- The Alire `libadalang` crate builds a static library only, while the
+-- Python bindings (a ctypes wrapper shipped in the release archive) dlopen a
+-- shared libadalang.so. scripts/build_libadalang.py therefore builds this
+-- project twice inside the Alire environment provided by .alire-ast:
+--
+--   1. LIBRARY_TYPE=static-pic, so the whole stack (gnatcoll, GPR2,
+--      langkit_support, libadalang) is available as position-independent
+--      archives that can go into a shared object.
+--   2. LIBRARY_TYPE=static-pic with LIBADALANG_LIBRARY_TYPE=relocatable, so
+--      only libadalang is relinked as lib/relocatable/dev/libadalang.so; every
+--      dependency is reused from step 1.
+--
+-- No source of its own: the project only exists to pull the dependencies in.
+
+with "libadalang";
+
+project Q3as_Ast is
+
+   for Source_Dirs use ();
+   for Object_Dir use "obj";
+   for Exec_Dir use "bin";
+
+end Q3as_Ast;

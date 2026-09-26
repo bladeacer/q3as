@@ -1,0 +1,90 @@
+#!/usr/bin/env python3
+"""Minimal `unzip` replacement built on Python's zipfile module.
+
+Alire needs `unzip` to deploy crate source archives shipped as .zip (for
+example gnatcoll-core, gnatcoll-bindings and adasat, which the libadalang
+toolchain pulls in). Debian's unzip is not installed in every environment and
+alr offers to install missing tools with sudo, which is not available inside
+containers or CI. The build scripts prepend this directory to PATH so alr
+finds an extractor without root.
+
+Supported arguments (the subset alr uses):
+
+    unzip [-o] [-q|-qq] <archive> [-d <dest-dir>]
+
+Permissions and symlinks from the archive are restored, because Ada build
+scripts in these archives must stay executable.
+"""
+
+from __future__ import annotations
+
+import os
+import stat
+import sys
+import zipfile
+
+FLAGS_WITH_VALUE = ("-d", "-x", "-O")
+
+
+def fail(message: str) -> "NoReturn":  # type: ignore[valid-type] # noqa: F821
+    print(f"unzip-shim: {message}", file=sys.stderr)
+    raise SystemExit(2)
+
+
+def parse_args(argv: list[str]) -> tuple[str, str, bool]:
+    """Return (archive, destination, quiet) for the supported argument set."""
+    archive: str | None = None
+    dest = "."
+    quiet = False
+    index = 0
+    while index < len(argv):
+        arg = argv[index]
+        if arg in FLAGS_WITH_VALUE:
+            index += 1
+            if index >= len(argv):
+                fail(f"missing value for {arg}")
+            if arg == "-d":
+                dest = argv[index]
+        elif arg.startswith("-"):
+            # -o (overwrite), -q/-qq (quiet), -n and friends carry no value.
+            if arg.lstrip("-").strip("q") == "":
+                quiet = True
+        elif archive is None:
+            archive = arg
+        else:
+            fail(f"unexpected extra argument: {arg}")
+        index += 1
+    if archive is None:
+        fail("no archive given")
+    return archive, dest, quiet
+
+
+def extract(archive: str, dest: str) -> None:
+    if not zipfile.is_zipfile(archive):
+        fail(f"not a zip archive: {archive}")
+    os.makedirs(dest, exist_ok=True)
+    with zipfile.ZipFile(archive) as zf:
+        for info in zf.infolist():
+            target = zf.extract(info, dest)
+            mode = info.external_attr >> 16
+            if stat.S_ISLNK(mode):
+                link_target = zf.read(info).decode()
+                os.unlink(target)
+                os.symlink(link_target, target)
+            elif mode & 0o7777:
+                os.chmod(target, mode & 0o7777)
+
+
+def main(argv: list[str]) -> int:
+    archive, dest, quiet = parse_args(argv)
+    try:
+        extract(archive, dest)
+    except (OSError, zipfile.BadZipFile) as exc:
+        fail(str(exc))
+    if not quiet:
+        print(f"extracted {archive} -> {dest}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

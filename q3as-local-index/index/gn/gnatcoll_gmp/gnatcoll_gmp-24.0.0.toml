@@ -1,0 +1,43 @@
+# Vendored copy of the community index entry
+# (alire-project/alire-index, branch stable-1.2.1, index/gn/gnatcoll_gmp),
+# with one deliberate change: the `libgmp` dependency is dropped.
+#
+# Upstream declares libgmp as a system external, which makes `alr` shell out
+# to `sudo apt-get install libgmp-dev`. q3as never installs system packages,
+# so the dependency edge is removed here. GMP itself is still needed to
+# compile gnatcoll_gmp's gmp_support.c and to link libadalang.so;
+# scripts/build_libadalang.py unpacks the GMP headers and library into the
+# user cache (same no-sudo approach setup.sh uses for Python headers) and
+# passes the paths to gprbuild. The link is pointed at the *shared* GMP: the
+# distribution's libgmp.a is not built with -fPIC, and the linker rejects it
+# when relinking libadalang as a shared object. Nothing else about the crate
+# changes: the origin archive, the project file, and the gpr externals are
+# upstream's.
+#
+# Do not add this crate to the mirror list in setup.sh: the file is patched,
+# not mirrored.
+
+name = "gnatcoll_gmp"
+version = "24.0.0"
+description = "GNAT Components Collection - GNU Multiple Precision Arithmetic binding"
+website = "https://github.com/adacore/gnatcoll-bindings"
+authors = ["AdaCore"]
+licenses = "GPL-3.0-or-later WITH GCC-exception-3.1"
+maintainers = ["chouteau@adacore.com"]
+maintainers-logins = ["chouteau"]
+project-files = ["gmp/gnatcoll_gmp.gpr"]
+tags = ["gnatcoll", "bindings", "gmp", "arbitrary", "precision", "arithmetic"]
+
+[configuration]
+disabled = true
+
+[gpr-externals]
+GNATCOLL_BUILD_MODE = ["DEBUG", "PROD"]
+LIBRARY_TYPE = ["static", "relocatable", "static-pic"]
+
+[[depends-on]]
+gnatcoll = "~24.0.0"
+
+[origin]
+url="https://github.com/adacore/gnatcoll-bindings/archive/v24.0.0/gnatcoll-bindings-24.0.0.zip"
+hashes=['sha512:e90c5b4d04d607f5628abccea2eb6daf52f7385a320ab2ccd1782c27e2f1aff51ae7e8896041533fd3d22f32679100439331034499fd08f8cda7e21f440508b2']

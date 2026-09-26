@@ -1,7 +1,10 @@
 """Tests for parse_docs.py and parse_ada_ast.py.
 
-The libadalang path is not exercised here (the bindings are optional and
-absent in this environment); the structural scanner that replaces it is.
+The structural scanner is always exercised. The libadalang path is optional
+(it needs libadalang.so from `make ast-deps`), so its tests are skipped when
+the bindings are not importable; when they are present they also pin the
+node attributes the extraction relies on, which are easy to break across
+libadalang versions.
 """
 
 from __future__ import annotations
@@ -10,11 +13,17 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "data" / "processing_scripts"))
 
 import parse_ada_ast as pa
 import parse_docs as pd
 import source_paths as sp
+
+requires_lal = pytest.mark.skipif(
+    not pa.HAS_LIBADALANG, reason="libadalang.so not built (run `make ast-deps`)"
+)
 
 # --------------------------------------------------------------------------- #
 # parse_docs: markdown and rst splitting
@@ -236,3 +245,115 @@ def test_training_sources_exclude_ada_eval(monkeypatch, tmp_path: Path):
         sp.ADA_EVAL,
         sp.ADA_ALGORITHMS,
     ]
+
+
+# --------------------------------------------------------------------------- #
+# libadalang extraction (optional; needs `make ast-deps`)
+# --------------------------------------------------------------------------- #
+
+LAL_SPEC = """\
+package Demo is
+   type Counter is range 1 .. 100;
+   function Bump (C : in out Counter) return Counter
+     with Pre => C < Counter'Last,
+          Post => Bump'Result > C;
+   procedure Reset (C : out Counter);
+end Demo;
+"""
+
+LAL_BODY = """\
+package body Demo is
+   function Bump (C : in out Counter) return Counter is
+   begin
+      C := C + 1;
+      return C;
+   end Bump;
+   procedure Reset (C : out Counter) is
+   begin
+      C := 1;
+   end Reset;
+end Demo;
+"""
+
+
+@requires_lal
+class TestLibadalangExtraction:
+    def test_spec_units_carry_package_kind_and_aspects(self, tmp_path: Path):
+        path = tmp_path / "demo.ads"
+        path.write_text(LAL_SPEC, encoding="utf-8")
+        result = pa._lal_extract_file(str(path))
+
+        assert result["valid"] is True
+        specs = {unit["name"]: unit for unit in result["specs"]}
+        assert set(specs) == {"Bump", "Reset"}
+        assert specs["Bump"]["kind"] == "function"
+        assert specs["Reset"]["kind"] == "procedure"
+        # A package body is not a BasePackageDecl subclass; the package name
+        # must still be recovered from a spec.
+        assert specs["Bump"]["package"] == "Demo"
+        # Aspects drive the contract-writing turns, so they must survive the
+        # trip through the declaration text without the trailing semicolon.
+        assert specs["Bump"]["aspects"] == {
+            "Pre": "C < Counter'Last",
+            "Post": "Bump'Result > C",
+        }
+        assert specs["Reset"]["aspects"] == {}
+        assert {unit["name"] for unit in result["types"]} == {"Counter"}
+
+    def test_bodies_are_separated_from_specs(self, tmp_path: Path):
+        path = tmp_path / "demo.adb"
+        path.write_text(LAL_BODY, encoding="utf-8")
+        result = pa._lal_extract_file(str(path))
+
+        assert result["valid"] is True
+        assert result["specs"] == []
+        assert {unit["name"] for unit in result["bodies"]} == {"Bump", "Reset"}
+        assert result["bodies"][0]["package"] == "Demo"
+
+    def test_syntax_error_marks_the_unit_invalid(self, tmp_path: Path):
+        path = tmp_path / "broken.adb"
+        path.write_text("procedure P is begin null; end\n", encoding="utf-8")
+        result = pa._lal_extract_file(str(path))
+
+        assert result["valid"] is False
+        assert all(not unit["valid"] for unit in result["specs"] + result["bodies"])
+
+    def test_worker_prefers_libadalang_over_the_scanner(self, tmp_path: Path):
+        path = tmp_path / "demo.ads"
+        path.write_text(LAL_SPEC, encoding="utf-8")
+        task_result = pa.extract_file_task((str(path), "ads"))
+
+        assert task_result["specs"], "libadalang path returned nothing"
+        bump = next(unit for unit in task_result["specs"] if unit["name"] == "Bump")
+        assert bump["aspects"]["Post"] == "Bump'Result > C"
+
+    def test_lal_and_scanner_agree_on_subprogram_names(self, tmp_path: Path):
+        """The exact AST and the regex scanner must find the same units."""
+        path = tmp_path / "demo.ads"
+        path.write_text(LAL_SPEC, encoding="utf-8")
+        lal_names = {unit["name"] for unit in pa._lal_extract_file(str(path))["specs"]}
+        scanner_names = {unit["name"] for unit in pa.extract_spec_subprograms(LAL_SPEC)}
+
+        assert lal_names == scanner_names == {"Bump", "Reset"}
+
+    def test_anonymous_access_type_function_is_skipped(self, tmp_path: Path):
+        """An anonymous access type declares an unnamed function.
+
+        It has no name to train on, so the extraction skips it instead of
+        raising (which used to push the whole file onto the scanner).
+        """
+        path = tmp_path / "anon.adb"
+        path.write_text(
+            "procedure P is\n"
+            "   type T is access all Integer'Range;\n"
+            "   function Get (S : access all Integer'Range) return Integer;\n"
+            "begin\n"
+            "   null;\n"
+            "end P;\n",
+            encoding="utf-8",
+        )
+        result = pa._lal_extract_file(str(path))
+
+        assert result["valid"] is True
+        # The named declaration survives; the unnamed one never appears.
+        assert {unit["name"] for unit in result["specs"]} == {"Get"}

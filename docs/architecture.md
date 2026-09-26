@@ -35,6 +35,7 @@ What each part of q3as does and how the pieces connect.
 | `scripts/fetch_repos.py` | Archive-cache fetcher: parallel HTTP tarballs, per-repo metadata (URL, license SPDX), all repos in `CORE_REPOS` (including the Ada-Algorithms monorepo) |
 | `scripts/validate_defects.py` | GNAT-compiles defect pairs; exit code fails any family that "compiles clean" |
 | `scripts/ada_env.sh` / `scripts/alire_env.py` | Alire toolchain entry points (shell / Python) |
+| `scripts/build_libadalang.py` | Builds and installs `libadalang.so` for the AST parser (`make ast-deps`) |
 | `training/download_model.py` | HF download with terminating sanity checks (deep GPU check runs in a child process with a timeout) |
 | `training/train_unsloth.py` | QLoRA training: seed 42, train-split default, eval every 50 steps, early stopping (patience 10), test-split perplexity; writes `training_summary.json` with train/eval loss histories for the report |
 | `eval/generate.py` | Batch generation for both models; prompts embed the full project tree; replies are parsed into restricted multi-file overlays (target dir only, no project-file overwrites, identical echoes skipped) |

@@ -28,6 +28,12 @@ ada-eval = { path = "data/raw_repos/AdaCore/ada-eval", editable = false }
 
 [tool.uv]
 package = false
+# The ast group ships the pure-Python part of the libadalang bindings (the
+# ctypes wrapper that dlopens libadalang.so). The shared library itself is
+# compiled by `make ast-deps`; without it the wrapper import fails and the AST
+# parser falls back to its structural scanner. Keeping the group in the
+# default set means plain `uv sync` and `uv run` do not prune it again.
+default-groups = ["dev", "ast"]
 
 [dependency-groups]
 dev = [
@@ -36,6 +42,12 @@ dev = [
     "ruff>=0.8.0",
     "mypy>=1.11.0",
     "ada-eval",
+]
+ast = [
+    # Pure-Python libadalang bindings from the official release archive (the
+    # same one the Alire `libadalang` crate deploys). No PyPI distribution
+    # exists; the native library is built separately by scripts/build_libadalang.py.
+    "libadalang @ https://github.com/AdaCore/libadalang/releases/download/v24.0.0/libadalang-24.0.0.tar.gz#subdirectory=python",
 ]
 
 [tool.pytest.ini_options]

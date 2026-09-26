@@ -34,6 +34,29 @@ not source-code redistribution) and is covered by the author's explicit
 permission. The RobertBoettcherSF Ada-Algorithms monorepo is MIT with the
 author's green light for training use.
 
+## Toolchain inputs (not training data)
+
+The table above is training data. The Ada toolchain q3as parses and proves
+with is a separate set of external inputs, resolved through Alire rather
+than `scripts/fetch_repos.py`, and none of it is model input:
+
+| Input | Origin | License |
+|---|---|---|
+| `libadalang` crate (24.0.0) | [AdaCore/libadalang](https://github.com/AdaCore/libadalang) release archive, via the vendored `q3as-local-index` | Apache-2.0 WITH LLVM-exception |
+| libadalang Python bindings (24.0.0) | the same release archive, `python/` subdirectory, installed by `uv sync` as the `ast` group | Apache-2.0 WITH LLVM-exception |
+| `gnat`, `gnatcoll*`, `libgpr2`, `langkit_support`, `adasat`, `xmlada` | community Alire index, pulled in by the `libadalang` crate | GPL-3.0-or-later w/ GCC runtime exception (tools only, not redistributed) |
+| GMP | the distribution's `libgmp-dev`, unpacked to the user cache without sudo | LGPL-3.0-only (linked, not redistributed) |
+
+The bindings change what the dataset contains, so it is worth being precise
+about what they are for: `parse_ada_ast.py` uses libadalang for exact
+extraction of specs, bodies, types, and aspect clauses, and falls back to
+its regex scanner when the shared library is absent. The scanner's output
+is not discarded or down-weighted; libadalang simply removes the class of
+mistakes a regex cannot make, and it reports `valid` per unit so
+syntactically broken sources are visible. Neither path can introduce
+eval-proper content: both read the same cached Ada trees, and
+`make check-integrity` still gates the splits.
+
 ## ada-eval is eval-proper
 
 Everything under the cached ada-eval's `data/base/{expanded,compacted}`

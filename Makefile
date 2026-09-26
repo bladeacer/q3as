@@ -1,4 +1,4 @@
-.PHONY: help setup sync download build-dataset parse-data gen-contracts check-integrity check-links train generate eval eval-pipeline eval-report bump-version prove ada-env test lint validate-defects agents-tree fetch-sources clean all check-model
+.PHONY: help setup sync download build-dataset parse-data gen-contracts check-integrity check-links train generate eval eval-pipeline eval-report bump-version prove ast-deps ada-env test lint validate-defects agents-tree fetch-sources clean all check-model
 
 # Prerequisite chain for the dataset: parser outputs (docs chunks, AST units,
 # contract turns) must exist before the builder runs. gen-contracts silently
@@ -41,7 +41,10 @@ help: ## Show this help message
 	@echo "                      (cache: adacovex, Ada_CRDT, Ada-83-TLALOC, and the RobertBoettcherSF Ada-Algorithms monorepo)"
 	@echo "                      plus parser outputs (docs chunks, Ada AST units) when present"
 	@echo "  make fetch-sources - Fetch source repos into the archive cache (data/raw_repos)"
-	@echo "                       libadalang/structural Ada AST extraction into JSONL"
+	@echo "  make parse-data     - Run the parser modules into data/processed/ extra JSONL"
+	@echo "                       (doc chunking, libadalang/structural Ada AST extraction)"
+	@echo "  make ast-deps       - Build and install libadalang.so for the Ada AST parser"
+	@echo "                       (optional; without it the parser uses its structural scanner)"
 	@echo "  make train         - Run 8 GB-safe QLoRA fine-tuning with Unsloth (adapter-only by default)"
 	@echo "  make generate      - Generate Ada code with bounded memory settings"
 	@echo "  make eval          - Run baseline evaluation with BLEU + ada-eval metrics"
@@ -136,12 +139,19 @@ prove: ## Fetch the Alire dev toolchain (gnatprove, gnatdoc, gnatformat)
 ada-env: ## Show the PATH alr exec provides (debug helper)
 	@bash scripts/ada_env.sh printenv PATH | tr ':' '\n' | head -8
 
+ast-deps: ## Build and install libadalang.so so the Ada AST parser uses real ASTs
+	## The Alire `libadalang` crate ships a static library; the ctypes wrapper
+	## in the `ast` dependency group needs a shared one. Resolves alire-ast.toml
+	## in the gitignored .alire-ast workspace and builds it there, so the SPARK
+	## toolchain in .alire-dev is untouched. Cached: a no-op once installed.
+	uv run python scripts/build_libadalang.py $(if $(FORCE),--force,)
+
 test: ## Run the Python unit tests
 	uv run pytest tests/ -q
 
 lint: ## Run ruff and mypy over the project sources, then check markdown links
 	uv run ruff check data/processing_scripts/ scripts/ eval/ tests/ tools/
-	uv run mypy data/processing_scripts/build_dataset.py data/processing_scripts/parse_docs.py data/processing_scripts/parse_ada_ast.py data/processing_scripts/eval_guard.py data/processing_scripts/code_variants.py scripts/alire_env.py scripts/bump_version.py scripts/gen_eval_report.py scripts/gen_agents_tree.py scripts/collect_cap_results.py scripts/make_probe_splits.py
+	uv run mypy data/processing_scripts/build_dataset.py data/processing_scripts/parse_docs.py data/processing_scripts/parse_ada_ast.py data/processing_scripts/eval_guard.py data/processing_scripts/code_variants.py scripts/alire_env.py scripts/bump_version.py scripts/build_libadalang.py scripts/gen_eval_report.py scripts/gen_agents_tree.py scripts/collect_cap_results.py scripts/make_probe_splits.py
 	uv run python tools/check-links.py
 
 validate-defects: ## Compile-check dataset defect pairs with the Alire GNAT

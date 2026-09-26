@@ -27,10 +27,14 @@ ONLY="${1:-all}"
 # them. Refreshed from upstream by setup_alire_index when online.
 LOCAL_INDEX_DIR="$ROOT_DIR/q3as-local-index"
 LOCAL_INDEX_NAME="q3aslocal"
-# Crates mirrored from alire-index stable-1.4.0: crate_name|letter|version
+# Crates mirrored from alire-index stable-1.4.0: crate_name|index_letter|version.
+# The letter is the two-character index directory (gn, li, la, ...); it is part
+# of the upstream path. gnatcoll_gmp is deliberately absent: its entry is
+# patched (the libgmp edge is removed), so it is committed rather than mirrored.
 LOCAL_INDEX_CRATES=(
-  "gnatformat_bin|gnatformat_bin|26.0.0"
-  "gnatprove|gnatprove|16.1.0"
+  "gnatformat_bin|gn|26.0.0"
+  "gnatprove|gn|16.1.0"
+  "libadalang|li|24.0.0"
 )
 INDEX_BRANCH="stable-1.4.0"
 # Fallback when the GitHub API is unreachable: latest alire release tag.
@@ -83,10 +87,10 @@ version_lt() {  # version_lt A B -> true when A < B (semver-ish)
   [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -1)" != "$2" ]
 }
 
-mirror_index_crate() {  # mirror_index_crate <crate> <dir-name> <version>
-  local crate="$1" dir="$2" ver="$3"
-  local url="https://raw.githubusercontent.com/alire-project/alire-index/${INDEX_BRANCH}/index/gn/${dir}/${crate}-${ver}.toml"
-  local dest="$LOCAL_INDEX_DIR/index/gn/${dir}"
+mirror_index_crate() {  # mirror_index_crate <crate> <index-letter> <version>
+  local crate="$1" letter="$2" ver="$3"
+  local url="https://raw.githubusercontent.com/alire-project/alire-index/${INDEX_BRANCH}/index/${letter}/${crate}/${crate}-${ver}.toml"
+  local dest="$LOCAL_INDEX_DIR/index/${letter}/${crate}"
   mkdir -p "$dest"
   if curl -sf -o "$dest/${crate}-${ver}.toml" "$url"; then
     echo "    mirrored  ${crate}-${ver} (from alire-index ${INDEX_BRANCH})"
@@ -120,7 +124,8 @@ setup_alire_index() {
 
   echo "==> alr $installed is older than latest ($latest) - registering vendored index"
   echo "    (old alr cannot read new index branches; the local mirror carries"
-  echo "     the modern binary crates q3as needs, e.g. gnatprove 16.x)"
+  echo "     the modern binary crates q3as needs, e.g. gnatprove 16.x, and the"
+  echo "     libadalang 24.x the AST parser needs)"
 
   # Refresh the mirror from upstream; keep the committed copies offline.
   local failed=0
@@ -130,8 +135,8 @@ setup_alire_index() {
     echo "version = \"1.2.1\"" > "$index_toml"
   fi
   for entry in "${LOCAL_INDEX_CRATES[@]}"; do
-    IFS='|' read -r crate dir ver <<<"$entry"
-    mirror_index_crate "$crate" "$dir" "$ver" || failed=1
+    IFS='|' read -r crate letter ver <<<"$entry"
+    mirror_index_crate "$crate" "$letter" "$ver" || failed=1
   done
   if [ "$failed" -ne 0 ]; then
     echo "    WARNING: some crates could not be mirrored; resolve may fail" >&2

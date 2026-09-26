@@ -35,7 +35,7 @@ import re
 import sys
 import zlib
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 _SCRIPTS_DIR = Path(__file__).resolve().parent
 if str(_SCRIPTS_DIR) not in sys.path:
@@ -91,7 +91,7 @@ def _extract_aspects(aspect_text: str) -> dict[str, str]:
     for i, match in enumerate(matches):
         start = match.end()
         end = matches[i + 1].start() if i + 1 < len(matches) else len(aspect_text)
-        expr = aspect_text[start:end].strip().rstrip(",").strip()
+        expr = aspect_text[start:end].strip().rstrip(",").rstrip(";").strip()
         if expr:
             aspects[match.group("name")] = expr
     return aspects
@@ -216,7 +216,7 @@ def pair_subprograms(
 # --------------------------------------------------------------------------- #
 
 
-def _lal_extract_file(path_str: str) -> dict[str, Any]:  # pragma: no cover
+def _lal_extract_file(path_str: str) -> dict[str, Any]:
     """Extract units via libadalang. Requires the lal Python bindings."""
     assert lal is not None
     ctx = lal.AnalysisContext()
@@ -227,26 +227,39 @@ def _lal_extract_file(path_str: str) -> dict[str, Any]:  # pragma: no cover
     types: list[dict[str, Any]] = []
 
     def package_of_node(node: Any) -> str:
-        for ancestor in node.parents:
-            if isinstance(ancestor, lal.BasePackageDecl):
-                name_node = ancestor.f_name
-                return name_node.text
+        # A package body is not a BasePackageDecl subclass, so both kinds of
+        # enclosing unit are matched explicitly.
+        for ancestor in node.parents():
+            if isinstance(ancestor, (lal.BasePackageDecl, lal.PackageBody)):
+                # A package decl carries f_package_name; other units only
+                # have f_end_name. Either names the package.
+                name_node = getattr(ancestor, "f_package_name", None) or getattr(
+                    ancestor, "f_end_name", None
+                )
+                return name_node.text if name_node is not None else ""
         return ""
 
-    for node in unit.root.findall(lal.SubpSpec):
+    # findall widens its result to AdaNode in the generated stubs; the cast
+    # restores the node type it was asked to find.
+    for node in cast("list[lal.SubpSpec]", unit.root.findall(lal.SubpSpec)):
         name_node = node.f_subp_name
+        if name_node is None:
+            # An anonymous access type declares an unnamed dereference
+            # function ("access function (Index : Positive) return T").
+            # There is no name to train on and the text is a fragment of the
+            # type declaration, so both paths skip it.
+            continue
         name = name_node.text
         parent = node.parent
         is_body = isinstance(parent, lal.SubpBody)
-        aspects: dict[str, str] = {}
-        aspects_node = getattr(node, "f_aspects", None)
-        if aspects_node is not None:
-            for assoc in aspects_node.f_aspects:
-                aspects[str(assoc.f_id.text)] = str(assoc.f_expr.text)
+        decl_text = parent.text.strip() if parent is not None else ""
+        # The aspect clause lives on the declaration, not the spec. Reuse the
+        # scanner's parser so both paths produce the same {name: expr} map.
+        aspects = _extract_aspects(decl_text)
         entry = {
             "name": name,
             "kind": "function" if "function" in str(node.f_subp_kind.text).lower() else "procedure",
-            "text": node.parent.source_text.strip() if parent is not None else "",
+            "text": decl_text,
             "aspects": aspects,
             "package": package_of_node(node),
             "valid": valid,
@@ -254,9 +267,16 @@ def _lal_extract_file(path_str: str) -> dict[str, Any]:  # pragma: no cover
         }
         (bodies if is_body else specs).append(entry)
 
-    for node in unit.root.findall(lal.TypeDecl):
-        text_snippet = node.source_text.strip()
-        types.append({"name": node.f_name.text, "text": text_snippet, "package": "", "file": path_str})
+    for type_node in cast("list[lal.TypeDecl]", unit.root.findall(lal.TypeDecl)):
+        type_name = type_node.f_name
+        types.append(
+            {
+                "name": type_name.text if type_name is not None else "",
+                "text": type_node.text.strip(),
+                "package": package_of_node(type_node),
+                "file": path_str,
+            }
+        )
 
     return {"specs": specs, "bodies": bodies, "types": types, "valid": valid}
 
@@ -284,7 +304,7 @@ def extract_file_task(task: tuple[str, str]) -> dict[str, Any]:
 
     if HAS_LIBADALANG:
         try:
-            return _lal_extract_file(path_str)  # pragma: no cover
+            return _lal_extract_file(path_str)
         except Exception as exc:  # noqa: BLE001  (fall back to the scanner)
             logger.warning("libadalang failed on %s (%s); using the scanner", path_str, exc)
 

@@ -2,12 +2,13 @@
 """bump_version.py - single-source version for q3as.
 
 The version lives in ``alire.toml`` and is mirrored into ``alire-dev.toml``
-(both manifests must carry the same version: the publishing manifest and
-the dev manifest describe the same crate). ``pyproject.toml`` carries the
-same version for the Python tooling and is synced best-effort when it
-exists and has a version line. This module reads the current version for
-other tooling (eval reports use it to name result files) and bumps the
-files together.
+(the publishing manifest and the dev manifest describe the same crate) and
+into ``alire-ast.toml`` (the manifest that resolves libadalang for the
+dataset AST parser). All three must carry the same version.
+``pyproject.toml`` carries the same version for the Python tooling and is
+synced best-effort when it exists and has a version line. This module reads
+the current version for other tooling (eval reports use it to name result
+files) and bumps the files together.
 
 Usage:
     python scripts/bump_version.py get
@@ -25,7 +26,10 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-MANIFESTS = (ROOT / "alire.toml", ROOT / "alire-dev.toml")
+# All three manifests describe the same q3as release: the publishing manifest,
+# the dev manifest (SPARK toolchain) and the AST manifest (libadalang). They
+# must never drift apart.
+MANIFESTS = (ROOT / "alire.toml", ROOT / "alire-dev.toml", ROOT / "alire-ast.toml")
 # Other files carrying the crate version, synced best-effort: a missing
 # file or a missing version line is skipped, never an error.
 EXTRA_VERSION_FILES = (ROOT / "pyproject.toml",)

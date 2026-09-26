@@ -13,7 +13,8 @@ which commands to use. Regenerate the tree below with `make agents-tree`.
    (HTTP tarballs, no git, cached; core sources plus the RobertBoettcherSF
    `Ada-Algorithms` monorepo).
 3. `make parse-data` runs the parser modules (doc chunking, AST extraction)
-   into `data/processed/*.jsonl`.
+   into `data/processed/*.jsonl`. AST extraction uses libadalang when
+   `make ast-deps` has installed it, and the structural scanner otherwise.
 4. `make build-dataset` walks the cached Ada source trees, ingests
    the parser outputs, and emits `data/processed/dataset.jsonl` plus the
    train/val/test split files (chat-format turns: code, doc-QA, defect
@@ -91,11 +92,23 @@ records from ada-eval.
   environment (`alr exec`); all Ada tool invocations go through it.
 - `scripts/alire_env.py` - Python side of the same: `find_tool("gnatprove")`
   resolves binaries through the Alire environment for subprocess calls.
+- `scripts/build_libadalang.py` - builds and installs the shared
+  `libadalang.so` that the AST parser's ctypes wrapper dlopens
+  (`make ast-deps`). Resolves `alire-ast.toml` in the gitignored
+  `.alire-ast/` workspace and builds `ast.gpr` there, so the SPARK
+  toolchain in `.alire-dev/` is untouched. Optional: without it
+  `parse_ada_ast.py` uses its structural scanner.
+- `scripts/toolshims/unzip` - a Python `unzip` stand-in that `build_libadalang.py`
+  puts on PATH, because the libadalang chain ships `.zip` source archives and
+  `alr` would otherwise offer to install `unzip` with sudo.
 - `scripts/gen_agents_tree.py` - rewrites the file tree section below.
-- `alire.toml` / `alire-dev.toml` - publishing and dev manifests. Dev-only
-  toolchain deps (gnatprove, gnatformat) live in the dev manifest.
+- `alire.toml` / `alire-dev.toml` / `alire-ast.toml` - publishing, dev, and
+  AST manifests. Dev-only toolchain deps (gnatprove, gnatformat) live in the
+  dev manifest; `libadalang` lives in the AST manifest because only the
+  dataset parser needs it. `make bump-version` keeps all three in step.
 - `q3as-local-index/` - vendored Alire index (mirrors the crates q3as needs
-  from the community index branch `stable-1.4.0`). setup.sh registers it
+  from the community index branch `stable-1.4.0`, plus a patched
+  `gnatcoll_gmp` and the pinned `libadalang`). setup.sh registers it
   ahead of the community index when the installed `alr` is older than the
   latest release, so modern binary crates (gnatprove 16.x, gnatformat 26.x)
   install on old distro alr packages (e.g. alr 1.2.1 on Debian).
@@ -123,6 +136,12 @@ workspace and runs `alr update` there; the real manifests are never modified
 by tooling. On old alr the vendored `q3as-local-index/` (registered by
 `setup.sh`) supplies the modern binary crates the pinned `stable-1.2.1`
 community index lacks.
+
+The AST parser has a second, independent Alire workspace:
+`make ast-deps` copies `alire-ast.toml` into `.alire-ast/` and resolves
+`libadalang` there, so touching the parser toolchain never disturbs the
+prover. It stays optional: without it `parse_ada_ast.py` logs
+`libadalang available: False` and uses its structural scanner.
 
 ## Conventions
 
@@ -183,15 +202,23 @@ q3as/
    q3as-local-index/
        index/
            gn/
+               gnatcoll_gmp/
+                   gnatcoll_gmp-24.0.0.toml
                gnatformat_bin/
                    gnatformat_bin-26.0.0.toml
                gnatprove/
                    gnatprove-16.1.0.toml
+           li/
+               libadalang/
+                   libadalang-24.0.0.toml
            index.toml
    scripts/
+       toolshims/
+           unzip
        ada_env.sh
        alire_env.py
        build_cap_variants.sh
+       build_libadalang.py
        bump_version.py
        collect_cap_results.py
        fetch_repos.py
@@ -218,8 +245,10 @@ q3as/
    .env.dev
    .gitignore
    AGENTS.md
+   alire-ast.toml
    alire-dev.toml
    alire.toml
+   ast.gpr
    LICENSE
    Makefile
    pyproject.toml

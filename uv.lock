@@ -1101,6 +1101,12 @@ wheels = [
 ]
 
 [[package]]
+name = "libadalang"
+version = "0.1"
+source = { url = "https://github.com/AdaCore/libadalang/releases/download/v24.0.0/libadalang-24.0.0.tar.gz", subdirectory = "python" }
+sdist = { hash = "sha256:67806f730e310dd67ed9edb848b0016a45c869b62075d0569d7739250ccde05a" }
+
+[[package]]
 name = "librt"
 version = "0.15.0"
 source = { registry = "https://pypi.org/simple" }
@@ -2481,6 +2487,9 @@ dependencies = [
 ]
 
 [package.dev-dependencies]
+ast = [
+    { name = "libadalang" },
+]
 dev = [
     { name = "ada-eval" },
     { name = "mypy" },
@@ -2506,6 +2515,7 @@ requires-dist = [
 ]
 
 [package.metadata.requires-dev]
+ast = [{ name = "libadalang", url = "https://github.com/AdaCore/libadalang/releases/download/v24.0.0/libadalang-24.0.0.tar.gz", subdirectory = "python" }]
 dev = [
     { name = "ada-eval", directory = "data/raw_repos/AdaCore/ada-eval" },
     { name = "mypy", specifier = ">=1.11.0" },

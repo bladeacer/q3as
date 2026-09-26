@@ -1,0 +1,40 @@
+# Development manifest for the optional libadalang AST extraction.
+#
+# data/processing_scripts/parse_ada_ast.py prefers libadalang over its
+# structural scanner. The Alire `libadalang` crate ships the Ada library and
+# the release archive also carries the pure-Python ctypes bindings, but the
+# Python part is not a crate, so q3as drives the build itself:
+# scripts/build_libadalang.py (make ast-deps) resolves this manifest in the
+# gitignored .alire-ast/ workspace, compiles libadalang.so as a relocatable
+# library with that toolchain, and drops it into the uv environment.
+#
+# Kept apart from alire-dev.toml on purpose: the SPARK toolchain (gnatprove,
+# gnatformat) is needed by the eval pipeline, while this one is only needed by
+# the dataset parser and pulls in a full gnatcoll/GPR2 source build.
+#
+# Version notes:
+# - libadalang 24.x is the newest line that builds with GNAT 13; 25.x requires
+#   GNAT >= 14, which the pinned gnat_native toolchain does not provide.
+#   (gnat_native 13.2.1 is also the newest compiler on the stable-1.2.1 index
+#   branch an old alr can read, so the two constraints agree.)
+# - libgmp is never installed: the vendored q3as-local-index carries a
+#   gnatcoll_gmp entry without that dependency, and the GMP headers are
+#   unpacked into the user cache by scripts/build_libadalang.py. The link must
+#   also resolve to the *shared* GMP, because the distribution's libgmp.a is
+#   not built with -fPIC and cannot go inside a shared object.
+
+name = "q3asast"
+description = "Qwen 3 Ada SPARK AST extraction toolchain (libadalang)"
+version = "0.2.0"
+project-files = []
+
+authors = ["bladeacer"]
+maintainers = ["bladeacer <wg.nick.exe@gmail.com>"]
+maintainers-logins = ["bladeacer"]
+licenses = "Apache-2.0"
+website = "https://github.com/bladeacer/q3as"
+
+tags = ["ada", "ast", "libadalang", "fine-tuning"]
+
+[[depends-on]]
+libadalang = "^24.0.0"
