@@ -62,8 +62,13 @@ logger = logging.getLogger("q3as_stage_state")
 STAMP_VERSION = 2
 
 _MODULE_DIR = Path(__file__).resolve().parent
-_SCRIPTS_DIR = _MODULE_DIR.parents[1] / "scripts"
-_ROOT = _MODULE_DIR.parents[2]
+# The repository root. _MODULE_DIR is <root>/data/processing_scripts, so the
+# root is parents[1]; parents[2] is the *parent of the repository*, which put
+# every stamp in <parent>/data/processed/.stages, outside the checkout, where
+# `make clean` (which removes <root>/data/processed/.stages) could not reach it
+# and where a sibling checkout shared it.
+_ROOT = _MODULE_DIR.parents[1]
+_SCRIPTS_DIR = _ROOT / "scripts"
 
 
 def _stamp_dir() -> Path:
@@ -123,10 +128,17 @@ def _hash_file(hasher: hashlib._Hash, path: Path) -> bool:
 
 
 def _iter_tree_files(root: Path, suffixes: Sequence[str]) -> Iterator[Path]:
-    """Files under *root* whose name ends with one of *suffixes*, sorted."""
+    """Files under *root* whose name ends with one of *suffixes*, sorted.
+
+    Suffixes are walked in sorted order so the digest of a tree depends on the
+    *set* of suffixes and not on the order the caller listed them in, which is
+    what makes a stamp verifiable from its own recorded entry: digest_tree
+    records the sorted list, and hashing in that same order is what the
+    recorded digest describes.
+    """
     seen: set[Path] = set()
     matches: list[Path] = []
-    for suffix in suffixes:
+    for suffix in sorted(suffixes):
         matches.extend(root.rglob(f"*{suffix}"))
     for path in matches:
         if path in seen:
@@ -145,6 +157,11 @@ def digest_tree(root: Path, suffixes: Sequence[str]) -> dict[str, Any]:
 
     A missing directory digests to a recorded absence rather than an empty
     digest, so a source repo that appears later invalidates the stamp.
+
+    The digest covers the file set, so re-hashing the entry this function
+    returns reproduces the digest exactly: that is what makes a stamp checkable
+    without rerunning the stage, and it is the test that pins the sorted walk in
+    ``_iter_tree_files``.
     """
     hasher = hashlib.sha256()
     if not root.is_dir():

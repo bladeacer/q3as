@@ -156,6 +156,90 @@ class TestParseGeneratedFiles:
 
 
 # --------------------------------------------------------------------------- #
+# plan_batches
+# --------------------------------------------------------------------------- #
+
+
+class TestPlanBatches:
+    def test_empty_input(self):
+        assert gen.plan_batches([], 512, 0, 100_000) == []
+
+    def test_no_budget_falls_back_to_singletons(self):
+        # budget <= 0 means "could not measure VRAM": one prompt per call.
+        assert gen.plan_batches([10, 20, 30], 5, 0, 0) == [[0], [1], [2]]
+
+    def test_explicit_cap_wins_over_budget(self):
+        # Budget would allow far more, but max_batch_size clamps it.
+        assert gen.plan_batches([100, 100, 100, 100], 10, 2, 10_000_000) == [[0, 1], [2, 3]]
+
+    def test_covered_indices_and_prompt_order_preserved(self):
+        # Lengths deliberately unsorted: the plan must still return every
+        # index exactly once so results stay in prompt order.
+        lengths = [900, 10, 500, 20]
+        batches = gen.plan_batches(lengths, 5, 0, 10_000_000)
+        flat = [i for b in batches for i in b]
+        assert sorted(flat) == list(range(len(lengths)))
+        assert len(flat) == len(set(flat))
+
+    def test_batches_respect_token_budget(self):
+        # 3 prompts of 1000 tokens + 100 new tokens = 3300 <= 4000 budget.
+        batches = gen.plan_batches([1000, 1000, 1000], 100, 0, 4000)
+        assert [len(b) for b in batches] == [3]
+
+    def test_long_prompt_splits_the_budget(self):
+        # 2 prompts of 2000+100 = 4200 > 4000, so only one fits at a time.
+        batches = gen.plan_batches([2000, 2000], 100, 0, 4000)
+        assert [len(b) for b in batches] == [1, 1]
+
+    def test_shortest_first_to_limit_padding(self):
+        # Sorted by length, so the long prompt never pads a short one.
+        batches = gen.plan_batches([2000, 10, 10], 100, 0, 2200)
+        assert [len(b) for b in batches] == [2, 1]
+        assert batches[0] == [1, 2]
+        assert batches[1] == [0]
+
+
+class TestKvBytesPerToken:
+    def test_grouped_query_attention_shrinks_the_cache(self):
+        cfg = types.SimpleNamespace(
+            num_hidden_layers=36,
+            hidden_size=4096,
+            num_attention_heads=32,
+            num_key_value_heads=8,
+            head_dim=128,
+        )
+        # 36 layers * 2 (K,V) * 8 kv heads * 128 head_dim * 2 bytes.
+        assert gen._kv_bytes_per_token(cfg) == 36 * 2 * 8 * 128 * 2
+
+    def test_head_dim_derived_when_absent(self):
+        cfg = types.SimpleNamespace(
+            num_hidden_layers=2,
+            hidden_size=512,
+            num_attention_heads=8,
+            num_key_value_heads=2,
+        )
+        assert gen._kv_bytes_per_token(cfg) == 2 * 2 * 2 * 64 * 2
+
+    def test_incomplete_config_is_unknown(self):
+        assert gen._kv_bytes_per_token(types.SimpleNamespace()) == 0
+        assert gen._kv_bytes_per_token(None) == 0
+
+
+class TestIsOutOfMemory:
+    def test_recognises_cuda_oom(self):
+        assert gen._is_out_of_memory(RuntimeError("CUDA out of memory. Tried to allocate"))
+
+    def test_recognises_by_class_name(self):
+        class OutOfMemoryError(Exception):
+            pass
+
+        assert gen._is_out_of_memory(OutOfMemoryError("no detail given"))
+
+    def test_ordinary_error_is_not_oom(self):
+        assert not gen._is_out_of_memory(ValueError("bad prompt"))
+
+
+# --------------------------------------------------------------------------- #
 # _safe_source_path
 # --------------------------------------------------------------------------- #
 

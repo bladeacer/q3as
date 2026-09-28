@@ -66,6 +66,48 @@ def _produce(spec) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# stage_state: where the stamps live and what they record
+# --------------------------------------------------------------------------- #
+
+
+def test_stamps_live_inside_the_repository(monkeypatch):
+    """The stamps must be where `make clean` looks for them.
+
+    They were written to ``<parent-of-repo>/data/processed/.stages`` because the
+    root was resolved one level too high, which put them outside the checkout,
+    out of reach of `make clean`, and in a directory a sibling checkout shares.
+    """
+    monkeypatch.delenv("Q3AS_STAGE_DIR", raising=False)
+    assert stage_state._ROOT == stage_state._MODULE_DIR.parents[1]
+    assert (stage_state._ROOT / "Makefile").is_file(), "_ROOT is not the repo root"
+    assert stage_state._stamp_dir() == stage_state._ROOT / "data" / "processed" / ".stages"
+
+
+def test_tree_digest_ignores_the_order_of_the_suffixes(tmp_path, tree):
+    """The digest covers the file set, so listing the suffixes in another order
+    must not produce a different one (it used to, and every stage rebuilt)."""
+    first = stage_state.digest_tree(tree, [".md", ".ads"])
+    second = stage_state.digest_tree(tree, [".ads", ".md"])
+    assert first["digest"] == second["digest"]
+    assert first["suffixes"] == [".ads", ".md"] == second["suffixes"]
+
+
+def test_a_stamp_reproduces_itself_from_its_own_fingerprint(tmp_path, tree):
+    """Re-hashing a stamp's recorded tree entry must give back its digest.
+
+    That is how a stamp is verified without rerunning the stage, and it only
+    holds while digest_tree records the same suffix order it hashes in.
+    """
+    spec = _spec(tmp_path, tree)
+    _produce(spec)
+    stamp = json.loads(spec.stamp_path.read_text(encoding="utf-8"))
+    for entry in stamp["fingerprint"]["trees"]:
+        again = stage_state.digest_tree(Path(entry["path"]), entry["suffixes"])
+        assert again["digest"] == entry["digest"], entry["path"]
+        assert again["files"] == entry["files"]
+
+
+# --------------------------------------------------------------------------- #
 # stage_state: the skip verdict
 # --------------------------------------------------------------------------- #
 

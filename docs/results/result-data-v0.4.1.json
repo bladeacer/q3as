@@ -1,0 +1,835 @@
+{
+  "version": "0.4.1",
+  "generated_at": "2026-09-28 14:44 UTC",
+  "ada_eval": {
+    "base_qwen3-8b": {
+      "samples": 19,
+      "build": 8,
+      "build_pct": 42.1,
+      "test": 5,
+      "test_pct": 26.3,
+      "proved": 0,
+      "unproved": 8,
+      "prove_errors": 11,
+      "proved_checks": {
+        "VC_OVERFLOW_CHECK": 4,
+        "SUBPROGRAM_TERMINATION": 3,
+        "VC_POSTCONDITION": 2,
+        "VC_INDEX_CHECK": 2,
+        "UNINITIALIZED": 1,
+        "VC_PRECONDITION": 1
+      },
+      "unproved_checks": {
+        "VC_OVERFLOW_CHECK": 7,
+        "SUBPROGRAM_TERMINATION": 2,
+        "VC_POSTCONDITION": 1,
+        "VC_FP_OVERFLOW_CHECK": 1,
+        "VC_INDEX_CHECK": 1,
+        "VC_RANGE_CHECK": 1,
+        "VC_RAISE": 1,
+        "VC_PRECONDITION": 1
+      },
+      "datasets": {
+        "spark_spark_custom": {
+          "samples": 2,
+          "build": 2,
+          "test": 2
+        },
+        "spark_spark_human_eval_silver": {
+          "samples": 4,
+          "build": 2,
+          "test": 0
+        },
+        "spark_spark_learn": {
+          "samples": 13,
+          "build": 4,
+          "test": 3
+        }
+      }
+    },
+    "fine_tuned": {
+      "samples": 19,
+      "build": 16,
+      "build_pct": 84.2,
+      "test": 11,
+      "test_pct": 57.9,
+      "proved": 0,
+      "unproved": 16,
+      "prove_errors": 3,
+      "proved_checks": {
+        "SUBPROGRAM_TERMINATION": 8,
+        "VC_INDEX_CHECK": 7,
+        "VC_OVERFLOW_CHECK": 7,
+        "VC_RANGE_CHECK": 4,
+        "VC_PRECONDITION": 2,
+        "UNINITIALIZED": 2,
+        "GLOBAL_WRONG": 1
+      },
+      "unproved_checks": {
+        "VC_OVERFLOW_CHECK": 8,
+        "UNINITIALIZED": 4,
+        "VC_POSTCONDITION": 3,
+        "VC_RAISE": 2,
+        "DEPENDS_MISSING": 2,
+        "SUBPROGRAM_TERMINATION": 1,
+        "VC_FP_OVERFLOW_CHECK": 1,
+        "VC_PRECONDITION": 1
+      },
+      "datasets": {
+        "spark_spark_custom": {
+          "samples": 2,
+          "build": 2,
+          "test": 2
+        },
+        "spark_spark_human_eval_silver": {
+          "samples": 4,
+          "build": 2,
+          "test": 0
+        },
+        "spark_spark_learn": {
+          "samples": 13,
+          "build": 12,
+          "test": 9
+        }
+      }
+    }
+  },
+  "baseline": {
+    "bleu": 0.8141155632992533,
+    "compliance": 0.2807017543859649,
+    "per_model": {
+      "fine_tuned": {
+        "label": "fine_tuned",
+        "samples_generated": 19,
+        "samples_scored": 19,
+        "samples_unmatched": 0,
+        "reference_total": 19,
+        "per_sample": [
+          {
+            "dataset": "spark_custom",
+            "name": "char_count_1",
+            "primary_file": "src/string_utils.ads",
+            "standard": "Ada 83",
+            "bleu": 1.0,
+            "exact_match": true,
+            "file_set_match": true,
+            "compliance": 0.3333333333333333
+          },
+          {
+            "dataset": "spark_custom",
+            "name": "char_count_2",
+            "primary_file": "src/string_utils.ads",
+            "standard": "Ada 2012",
+            "bleu": 0.7331908461363057,
+            "exact_match": false,
+            "file_set_match": true,
+            "compliance": 0.3333333333333333
+          },
+          {
+            "dataset": "spark_human_eval_silver",
+            "name": "HumanEval_0_has_close_elements_naive",
+            "primary_file": "src/placeholder.ads",
+            "standard": "Ada 83",
+            "bleu": 1.0,
+            "exact_match": true,
+            "file_set_match": true,
+            "compliance": 0.3333333333333333
+          },
+          {
+            "dataset": "spark_human_eval_silver",
+            "name": "HumanEval_0_has_close_elements_spec",
+            "primary_file": "src/placeholder.ads",
+            "standard": "Ada 83",
+            "bleu": 1.0,
+            "exact_match": true,
+            "file_set_match": true,
+            "compliance": 0.3333333333333333
+          },
+          {
+            "dataset": "spark_human_eval_silver",
+            "name": "HumanEval_2_truncate_number",
+            "primary_file": "src/placeholder.ads",
+            "standard": "Ada 2012",
+            "bleu": 0.8090983818946478,
+            "exact_match": false,
+            "file_set_match": false,
+            "compliance": 0.3333333333333333
+          },
+          {
+            "dataset": "spark_human_eval_silver",
+            "name": "HumanEval_3_below_zero",
+            "primary_file": "src/placeholder.ads",
+            "standard": "Ada 83",
+            "bleu": 1.0,
+            "exact_match": true,
+            "file_set_match": true,
+            "compliance": 0.3333333333333333
+          },
+          {
+            "dataset": "spark_learn",
+            "name": "absolute_value",
+            "primary_file": "src/integer_utils.ads",
+            "standard": "Ada 2012",
+            "bleu": 0.5989637504829511,
+            "exact_match": false,
+            "file_set_match": true,
+            "compliance": 0.0
+          },
+          {
+            "dataset": "spark_learn",
+            "name": "in_out_init",
+            "primary_file": "src/show_permutation.ads",
+            "standard": "Ada 2012",
+            "bleu": 0.9588185089507728,
+            "exact_match": false,
+            "file_set_match": true,
+            "compliance": 0.3333333333333333
+          },
+          {
+            "dataset": "spark_learn",
+            "name": "ineffective_statements_1",
+            "primary_file": "src/show_ineffective_statements.ads",
+            "standard": "Ada 83",
+            "bleu": 1.0,
+            "exact_match": true,
+            "file_set_match": true,
+            "compliance": 0.3333333333333333
+          },
+          {
+            "dataset": "spark_learn",
+            "name": "ineffective_statements_2",
+            "primary_file": "src/show_ineffective_statements.ads",
+            "standard": "Ada 83",
+            "bleu": 1.0,
+            "exact_match": true,
+            "file_set_match": true,
+            "compliance": 0.3333333333333333
+          },
+          {
+            "dataset": "spark_learn",
+            "name": "max_array",
+            "primary_file": "src/array_utils.ads",
+            "standard": "Ada 2012",
+            "bleu": 1.0,
+            "exact_match": true,
+            "file_set_match": true,
+            "compliance": 0.3333333333333333
+          },
+          {
+            "dataset": "spark_learn",
+            "name": "search_array_1",
+            "primary_file": "src/search_array.ads",
+            "standard": "Ada 83",
+            "bleu": 0.7979672442445006,
+            "exact_match": false,
+            "file_set_match": true,
+            "compliance": 0.3333333333333333
+          },
+          {
+            "dataset": "spark_learn",
+            "name": "search_array_2",
+            "primary_file": "src/search_array.ads",
+            "standard": "Ada 83",
+            "bleu": 0.8472162946515189,
+            "exact_match": false,
+            "file_set_match": true,
+            "compliance": 0.6666666666666666
+          },
+          {
+            "dataset": "spark_learn",
+            "name": "search_array_3",
+            "primary_file": "src/search_array.ads",
+            "standard": "Ada 2012",
+            "bleu": 0.8727727879294042,
+            "exact_match": false,
+            "file_set_match": true,
+            "compliance": 0.0
+          },
+          {
+            "dataset": "spark_learn",
+            "name": "show_modularity",
+            "primary_file": "src/integer_utils.ads",
+            "standard": "Ada 2012",
+            "bleu": 0.3696275572595812,
+            "exact_match": false,
+            "file_set_match": true,
+            "compliance": 0.3333333333333333
+          },
+          {
+            "dataset": "spark_learn",
+            "name": "show_post_condition_violation",
+            "primary_file": "src/integer_utils.ads",
+            "standard": "Ada 2012",
+            "bleu": 0.625100885399233,
+            "exact_match": false,
+            "file_set_match": true,
+            "compliance": 0.3333333333333333
+          },
+          {
+            "dataset": "spark_learn",
+            "name": "show_runtime_errors",
+            "primary_file": "src/array_utils.ads",
+            "standard": "Ada 2012",
+            "bleu": 0.1181028367566371,
+            "exact_match": false,
+            "file_set_match": true,
+            "compliance": 0.0
+          },
+          {
+            "dataset": "spark_learn",
+            "name": "show_uninitialized",
+            "primary_file": "src/array_utils.ads",
+            "standard": "Ada 83",
+            "bleu": 1.0,
+            "exact_match": true,
+            "file_set_match": true,
+            "compliance": 0.3333333333333333
+          },
+          {
+            "dataset": "spark_learn",
+            "name": "swap_depends",
+            "primary_file": "src/show_swap.ads",
+            "standard": "Ada 2012",
+            "bleu": 0.7373366089802601,
+            "exact_match": false,
+            "file_set_match": true,
+            "compliance": 0.0
+          }
+        ],
+        "bleu": 0.8141155632992533,
+        "exact_match_rate": 0.42105263157894735,
+        "file_set_match_rate": 0.9473684210526315,
+        "compliance": 0.2807017543859649,
+        "standard_distribution": {
+          "Ada 83": 9,
+          "Ada 2012": 10
+        },
+        "model": "outputs/q3as",
+        "ada_eval": {
+          "build": {
+            "compiled": 15,
+            "failed": 4,
+            "total": 19
+          },
+          "test": {
+            "passed": 11,
+            "failed": 8,
+            "total": 19
+          },
+          "prove": {
+            "proved": 0,
+            "unproved": 17,
+            "error": 2,
+            "total": 19
+          }
+        }
+      },
+      "base_qwen3-8b": {
+        "label": "base_qwen3-8b",
+        "samples_generated": 19,
+        "samples_scored": 19,
+        "samples_unmatched": 0,
+        "reference_total": 19,
+        "per_sample": [
+          {
+            "dataset": "spark_custom",
+            "name": "char_count_1",
+            "primary_file": "src/string_utils.ads",
+            "standard": "Ada 83",
+            "bleu": 0.649987468483276,
+            "exact_match": false,
+            "file_set_match": true,
+            "compliance": 0.3333333333333333
+          },
+          {
+            "dataset": "spark_custom",
+            "name": "char_count_2",
+            "primary_file": "src/string_utils.ads",
+            "standard": "Ada 2012",
+            "bleu": 0.7331908461363057,
+            "exact_match": false,
+            "file_set_match": true,
+            "compliance": 0.3333333333333333
+          },
+          {
+            "dataset": "spark_human_eval_silver",
+            "name": "HumanEval_0_has_close_elements_naive",
+            "primary_file": "src/placeholder.ads",
+            "standard": "Ada 83",
+            "bleu": 1.0,
+            "exact_match": true,
+            "file_set_match": true,
+            "compliance": 0.3333333333333333
+          },
+          {
+            "dataset": "spark_human_eval_silver",
+            "name": "HumanEval_0_has_close_elements_spec",
+            "primary_file": "src/placeholder.ads",
+            "standard": "Ada 83",
+            "bleu": 1.0,
+            "exact_match": true,
+            "file_set_match": true,
+            "compliance": 0.3333333333333333
+          },
+          {
+            "dataset": "spark_human_eval_silver",
+            "name": "HumanEval_2_truncate_number",
+            "primary_file": "src/placeholder.ads",
+            "standard": "Ada 2012",
+            "bleu": 0.8398502470783612,
+            "exact_match": false,
+            "file_set_match": false,
+            "compliance": 0.3333333333333333
+          },
+          {
+            "dataset": "spark_human_eval_silver",
+            "name": "HumanEval_3_below_zero",
+            "primary_file": "src/placeholder.ads",
+            "standard": "Ada 83",
+            "bleu": 1.0,
+            "exact_match": true,
+            "file_set_match": true,
+            "compliance": 0.3333333333333333
+          },
+          {
+            "dataset": "spark_learn",
+            "name": "absolute_value",
+            "primary_file": "src/integer_utils.ads",
+            "standard": "Ada 2012",
+            "bleu": 0.5989637504829511,
+            "exact_match": false,
+            "file_set_match": true,
+            "compliance": 0.0
+          },
+          {
+            "dataset": "spark_learn",
+            "name": "in_out_init",
+            "primary_file": "src/show_permutation.ads",
+            "standard": "Ada 2012",
+            "bleu": 0.802923119266074,
+            "exact_match": false,
+            "file_set_match": true,
+            "compliance": 0.6666666666666666
+          },
+          {
+            "dataset": "spark_learn",
+            "name": "ineffective_statements_1",
+            "primary_file": "src/show_ineffective_statements.ads",
+            "standard": "Ada 83",
+            "bleu": 1.0,
+            "exact_match": true,
+            "file_set_match": true,
+            "compliance": 0.3333333333333333
+          },
+          {
+            "dataset": "spark_learn",
+            "name": "ineffective_statements_2",
+            "primary_file": "src/show_ineffective_statements.ads",
+            "standard": "Ada 83",
+            "bleu": 1.0,
+            "exact_match": true,
+            "file_set_match": true,
+            "compliance": 0.3333333333333333
+          },
+          {
+            "dataset": "spark_learn",
+            "name": "max_array",
+            "primary_file": "src/array_utils.ads",
+            "standard": "Ada 2012",
+            "bleu": 0.8723507053779249,
+            "exact_match": false,
+            "file_set_match": true,
+            "compliance": 0.3333333333333333
+          },
+          {
+            "dataset": "spark_learn",
+            "name": "search_array_1",
+            "primary_file": "src/search_array.ads",
+            "standard": "Ada 83",
+            "bleu": 0.8233085987573486,
+            "exact_match": false,
+            "file_set_match": true,
+            "compliance": 0.3333333333333333
+          },
+          {
+            "dataset": "spark_learn",
+            "name": "search_array_2",
+            "primary_file": "src/search_array.ads",
+            "standard": "Ada 83",
+            "bleu": 0.7917751337718577,
+            "exact_match": false,
+            "file_set_match": true,
+            "compliance": 0.6666666666666666
+          },
+          {
+            "dataset": "spark_learn",
+            "name": "search_array_3",
+            "primary_file": "src/search_array.ads",
+            "standard": "Ada 2012",
+            "bleu": 0.8800793394035735,
+            "exact_match": false,
+            "file_set_match": true,
+            "compliance": 0.0
+          },
+          {
+            "dataset": "spark_learn",
+            "name": "show_modularity",
+            "primary_file": "src/integer_utils.ads",
+            "standard": "Ada 2012",
+            "bleu": 0.3696275572595812,
+            "exact_match": false,
+            "file_set_match": true,
+            "compliance": 0.3333333333333333
+          },
+          {
+            "dataset": "spark_learn",
+            "name": "show_post_condition_violation",
+            "primary_file": "src/integer_utils.ads",
+            "standard": "Ada 2012",
+            "bleu": 0.625100885399233,
+            "exact_match": false,
+            "file_set_match": true,
+            "compliance": 0.3333333333333333
+          },
+          {
+            "dataset": "spark_learn",
+            "name": "show_runtime_errors",
+            "primary_file": "src/array_utils.ads",
+            "standard": "Ada 2012",
+            "bleu": 0.32798219197721035,
+            "exact_match": false,
+            "file_set_match": true,
+            "compliance": 0.6666666666666666
+          },
+          {
+            "dataset": "spark_learn",
+            "name": "show_uninitialized",
+            "primary_file": "src/array_utils.ads",
+            "standard": "Ada 83",
+            "bleu": 0.6374991557991926,
+            "exact_match": false,
+            "file_set_match": true,
+            "compliance": 0.3333333333333333
+          },
+          {
+            "dataset": "spark_learn",
+            "name": "swap_depends",
+            "primary_file": "src/show_swap.ads",
+            "standard": "Ada 2012",
+            "bleu": 0.6748203876137614,
+            "exact_match": false,
+            "file_set_match": true,
+            "compliance": 0.3333333333333333
+          }
+        ],
+        "bleu": 0.7698662835161395,
+        "exact_match_rate": 0.2631578947368421,
+        "file_set_match_rate": 0.9473684210526315,
+        "compliance": 0.3508771929824561,
+        "standard_distribution": {
+          "Ada 83": 9,
+          "Ada 2012": 10
+        },
+        "model": "models/qwen3-8b",
+        "ada_eval": {
+          "build": {
+            "compiled": 8,
+            "failed": 11,
+            "total": 19
+          },
+          "test": {
+            "passed": 5,
+            "failed": 14,
+            "total": 19
+          },
+          "prove": {
+            "proved": 0,
+            "unproved": 8,
+            "error": 11,
+            "total": 19
+          }
+        }
+      }
+    },
+    "generated": {
+      "root": "outputs/generated_solutions",
+      "reference_total": 19,
+      "samples": {
+        "fine_tuned": 19,
+        "base_qwen3-8b": 19
+      }
+    },
+    "timestamp": "2026-09-28T14:42:09+00:00"
+  },
+  "pipeline_report_note": "======================================================================\nQ3AS EVALUATION REPORT: BASE vs FINE-TUNED MODEL\n======================================================================\n--- base_qwen3-8b ---\n  Compilation: 8/19 passed (42.1%)\n  Unit Tests:  5/19 passed (26.3%)",
+  "training": {
+    "base_model": "models/qwen3-8b",
+    "steps": 500,
+    "train_loss": {
+      "first": 2.4647598266601562,
+      "last": 0.3425669572353363
+    },
+    "val_loss": {
+      "first": 0.3699834784511336,
+      "last": 0.21273118298980923,
+      "best": 0.21273118298980923
+    },
+    "test_loss": 0.22422608156104085,
+    "perplexity": {
+      "train_last": 1.409,
+      "val_best": 1.237,
+      "test": 1.251
+    },
+    "train_loss_history": [
+      {
+        "step": 10,
+        "loss": 2.4647598266601562
+      },
+      {
+        "step": 20,
+        "loss": 1.6825851440429687
+      },
+      {
+        "step": 30,
+        "loss": 0.8551853179931641
+      },
+      {
+        "step": 40,
+        "loss": 0.45244741439819336
+      },
+      {
+        "step": 50,
+        "loss": 0.3611209154129028
+      },
+      {
+        "step": 60,
+        "loss": 0.33200650215148925
+      },
+      {
+        "step": 70,
+        "loss": 0.3283958673477173
+      },
+      {
+        "step": 80,
+        "loss": 0.3072574377059937
+      },
+      {
+        "step": 90,
+        "loss": 0.32341651916503905
+      },
+      {
+        "step": 100,
+        "loss": 0.329646897315979
+      },
+      {
+        "step": 110,
+        "loss": 0.27405972480773927
+      },
+      {
+        "step": 120,
+        "loss": 0.29503986835479734
+      },
+      {
+        "step": 130,
+        "loss": 0.2685384750366211
+      },
+      {
+        "step": 140,
+        "loss": 0.2978452444076538
+      },
+      {
+        "step": 150,
+        "loss": 0.28162012100219724
+      },
+      {
+        "step": 160,
+        "loss": 0.2579479455947876
+      },
+      {
+        "step": 170,
+        "loss": 0.21341090202331542
+      },
+      {
+        "step": 180,
+        "loss": 0.17930601835250853
+      },
+      {
+        "step": 190,
+        "loss": 0.2099609136581421
+      },
+      {
+        "step": 200,
+        "loss": 0.3109429359436035
+      },
+      {
+        "step": 210,
+        "loss": 0.2743836879730225
+      },
+      {
+        "step": 220,
+        "loss": 0.24604735374450684
+      },
+      {
+        "step": 230,
+        "loss": 0.21650290489196777
+      },
+      {
+        "step": 240,
+        "loss": 0.23202881813049317
+      },
+      {
+        "step": 250,
+        "loss": 0.24210014343261718
+      },
+      {
+        "step": 260,
+        "loss": 0.2553420543670654
+      },
+      {
+        "step": 270,
+        "loss": 0.3059128999710083
+      },
+      {
+        "step": 280,
+        "loss": 0.21480560302734375
+      },
+      {
+        "step": 290,
+        "loss": 0.22253258228302003
+      },
+      {
+        "step": 300,
+        "loss": 0.18814849853515625
+      },
+      {
+        "step": 310,
+        "loss": 0.24731695652008057
+      },
+      {
+        "step": 320,
+        "loss": 0.2099383592605591
+      },
+      {
+        "step": 330,
+        "loss": 0.19701448678970337
+      },
+      {
+        "step": 340,
+        "loss": 0.2756814479827881
+      },
+      {
+        "step": 350,
+        "loss": 0.2534677982330322
+      },
+      {
+        "step": 360,
+        "loss": 0.25046234130859374
+      },
+      {
+        "step": 370,
+        "loss": 0.22470359802246093
+      },
+      {
+        "step": 380,
+        "loss": 0.15841422080993653
+      },
+      {
+        "step": 390,
+        "loss": 0.2624788761138916
+      },
+      {
+        "step": 400,
+        "loss": 0.3125921249389648
+      },
+      {
+        "step": 410,
+        "loss": 0.23348777294158934
+      },
+      {
+        "step": 420,
+        "loss": 0.20765788555145265
+      },
+      {
+        "step": 430,
+        "loss": 0.17863805294036866
+      },
+      {
+        "step": 440,
+        "loss": 0.26904988288879395
+      },
+      {
+        "step": 450,
+        "loss": 0.2910668611526489
+      },
+      {
+        "step": 460,
+        "loss": 0.25180208683013916
+      },
+      {
+        "step": 470,
+        "loss": 0.2873882293701172
+      },
+      {
+        "step": 480,
+        "loss": 0.19688563346862792
+      },
+      {
+        "step": 490,
+        "loss": 0.2004997730255127
+      },
+      {
+        "step": 500,
+        "loss": 0.19650293588638307
+      }
+    ],
+    "eval_loss_history": [
+      {
+        "step": 50,
+        "eval_loss": 0.3699834784511336
+      },
+      {
+        "step": 100,
+        "eval_loss": 0.28274327802818805
+      },
+      {
+        "step": 150,
+        "eval_loss": 0.24869580779085793
+      },
+      {
+        "step": 200,
+        "eval_loss": 0.23193030865279735
+      },
+      {
+        "step": 250,
+        "eval_loss": 0.22329849829803278
+      },
+      {
+        "step": 300,
+        "eval_loss": 0.21825940082633594
+      },
+      {
+        "step": 350,
+        "eval_loss": 0.2154964504256555
+      },
+      {
+        "step": 400,
+        "eval_loss": 0.21395109009304847
+      },
+      {
+        "step": 450,
+        "eval_loss": 0.2128846409637736
+      },
+      {
+        "step": 500,
+        "eval_loss": 0.21273118298980923
+      }
+    ],
+    "trend": {
+      "verdict": "healthy",
+      "findings": [
+        "validation loss 0.3700 at step 50 to 0.2127 at step 500; best 0.2127 at step 500",
+        "total validation-loss improvement 43%"
+      ]
+    }
+  }
+}

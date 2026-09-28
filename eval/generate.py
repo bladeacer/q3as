@@ -57,6 +57,12 @@ if str(_PROCESSING_SCRIPTS_DIR) not in sys.path:
 # a 7 GB host RAM / 8 GB VRAM box they are truncated before tokenization.
 MAX_PROMPT_CHARS = 12000
 
+# Share of the VRAM free after the 4-bit weights are resident that a batch's
+# KV cache may claim. The rest covers attention activations, the logits, and
+# allocator fragmentation; generation is latency-bound, so leaving headroom
+# here costs speed but a wrong guess OOMs the worker after 4 minutes of setup.
+KV_BUDGET_FRACTION = 0.5
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -91,6 +97,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--max-prompt-chars", type=int, default=MAX_PROMPT_CHARS,
         help="Maximum prompt characters sent to the model.",
+    )
+    parser.add_argument(
+        "--batch-size", type=int, default=0,
+        help="Max prompts decoded per generate() call (0 = size from the free "
+             "VRAM, which is what most hosts want). Several prompts share one "
+             "pass over the weights, so this cuts wall time sharply; the batch "
+             "is halved and retried if it turns out not to fit.",
     )
     parser.add_argument(
         "--temperature", type=float, default=0.7,
@@ -129,6 +142,7 @@ def _worker_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-samples", type=int, default=20)
     parser.add_argument("--max-new-tokens", type=int, default=512)
     parser.add_argument("--max-prompt-chars", type=int, default=MAX_PROMPT_CHARS)
+    parser.add_argument("--batch-size", type=int, default=0)
     parser.add_argument("--temperature", type=float, default=0.7)
     parser.add_argument("--enable-thinking", action="store_true", default=False)
     parser.add_argument("--seed", type=int, default=42)
@@ -484,6 +498,177 @@ def _load_system_prompt(path: Path) -> str | None:
         return None
 
 
+def _kv_bytes_per_token(config: Any) -> int:
+    """Bytes of KV cache one context token costs for this model.
+
+    Grouped-query attention is what keeps this small (8 KV heads rather than
+    32 query heads), which is the only reason a multi-prompt batch fits
+    beside a 4-bit 8B model on an 8 GB card.
+    """
+    num_layers = int(getattr(config, "num_hidden_layers", 0) or 0)
+    hidden = int(getattr(config, "hidden_size", 0) or 0)
+    heads = int(getattr(config, "num_attention_heads", 0) or 0)
+    kv_heads = int(getattr(config, "num_key_value_heads", 0) or heads)
+    head_dim = int(getattr(config, "head_dim", 0) or (hidden // heads if heads else 0))
+    if not (num_layers and kv_heads and head_dim):
+        return 0
+    # Keys and values, at 2 bytes per element for a bf16/fp16 cache.
+    return num_layers * 2 * kv_heads * head_dim * 2
+
+
+def kv_token_budget(model: Any) -> int:
+    """Total context tokens a batch may occupy in the free VRAM.
+
+    Returns 0 when the budget cannot be measured, which callers treat as
+    "batch one prompt at a time" rather than guessing.
+    """
+    per_token = _kv_bytes_per_token(getattr(model, "config", None))
+    if not per_token:
+        return 0
+    try:
+        import torch
+
+        if not torch.cuda.is_available():
+            return 0
+        free_bytes, _total = torch.cuda.mem_get_info()
+    except Exception:  # noqa: BLE001  (budget is best-effort; single is safe)
+        return 0
+    return int(free_bytes * KV_BUDGET_FRACTION) // per_token
+
+
+def plan_batches(
+    lengths: list[int],
+    max_new_tokens: int,
+    max_batch_size: int,
+    token_budget: int,
+) -> list[list[int]]:
+    """Group prompt indices into batches, each within the VRAM budget.
+
+    *lengths* are per-prompt token counts in prompt order. Prompts are
+    visited shortest-first so a batch pads only similar lengths together,
+    then every index is mapped back to its original position, so the
+    caller's ordering and RNG-for-temperature=0 are unaffected.
+
+    Returns a list of index batches, or one singleton per prompt when no
+    budget could be measured.
+    """
+    n = len(lengths)
+    if n == 0:
+        return []
+    cap = max_batch_size if max_batch_size > 0 else n
+    if token_budget <= 0:
+        cap = 1
+    order = sorted(range(n), key=lambda i: lengths[i])
+    batches: list[list[int]] = []
+    current: list[int] = []
+    for idx in order:
+        width = lengths[idx] + max_new_tokens
+        if current and (
+            len(current) + 1 > cap or (len(current) + 1) * width > token_budget
+        ):
+            batches.append(current)
+            current = []
+        current.append(idx)
+    if current:
+        batches.append(current)
+    return batches
+
+
+def _decode_batch(
+    model: Any,
+    tokenizer: Any,
+    token_ids: list[list[int]],
+    max_new_tokens: int,
+    temperature: float,
+    pad_token_id: int,
+) -> list[str]:
+    """Run one padded batch through generate and return the replies in order."""
+    import torch
+
+    width = max(len(ids) for ids in token_ids)
+    input_ids = torch.full((len(token_ids), width), pad_token_id, dtype=torch.long)
+    attention_mask = torch.zeros((len(token_ids), width), dtype=torch.long)
+    for row, ids in enumerate(token_ids):
+        # Left padding: with the tokenizer already set to padding_side="left"
+        # every sequence ends at the same column, so the new tokens all start
+        # at `width` and the attention mask hides the pad from attention.
+        input_ids[row, width - len(ids):] = torch.tensor(ids, dtype=torch.long)
+        attention_mask[row, width - len(ids):] = 1
+    input_ids = input_ids.to(model.device)
+    attention_mask = attention_mask.to(model.device)
+    with torch.no_grad():
+        output = model.generate(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            do_sample=temperature > 0,
+            pad_token_id=pad_token_id,
+        )
+    return [
+        tokenizer.decode(output[row][width:], skip_special_tokens=True).strip()
+        for row in range(len(token_ids))
+    ]
+
+
+def _is_out_of_memory(exc: BaseException) -> bool:
+    """True for the CUDA/host allocation failures worth retrying smaller."""
+    name = type(exc).__name__
+    if name in {"OutOfMemoryError", "OutOfMemoryException"}:
+        return True
+    return "out of memory" in str(exc).lower()
+
+
+def _generate_rows(
+    model: Any,
+    tokenizer: Any,
+    token_ids: list[list[int]],
+    max_new_tokens: int,
+    temperature: float,
+    pad_token_id: int,
+    results: list[str],
+    batch: list[int],
+) -> None:
+    """Fill results[batch[i]] for one batch, splitting and retrying on OOM.
+
+    The memory estimate in plan_batches is an estimate; a batch that still
+    does not fit is halved and re-run rather than losing every sample in it.
+    """
+    import torch
+
+    try:
+        texts = _decode_batch(
+            model, tokenizer, [token_ids[i] for i in batch],
+            max_new_tokens, temperature, pad_token_id,
+        )
+    except Exception as exc:  # noqa: BLE001
+        if len(batch) > 1 and _is_out_of_memory(exc):
+            logger.warning(
+                "Batch of %d out of memory, retrying in halves", len(batch)
+            )
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            mid = len(batch) // 2
+            _generate_rows(
+                model, tokenizer, token_ids, max_new_tokens, temperature,
+                pad_token_id, results, batch[:mid],
+            )
+            _generate_rows(
+                model, tokenizer, token_ids, max_new_tokens, temperature,
+                pad_token_id, results, batch[mid:],
+            )
+            return
+        if not _is_out_of_memory(exc):
+            logger.error("Generation failed: %s", exc)
+        else:
+            logger.error("Generation ran out of memory on a single prompt: %s", exc)
+        for i in batch:
+            results[i] = ""
+        return
+    for i, text in zip(batch, texts):
+        results[i] = text
+
+
 def generate_batch(
     model,
     tokenizer,
@@ -493,10 +678,19 @@ def generate_batch(
     enable_thinking: bool = False,
     system_prompt: str | None = None,
     max_prompt_chars: int = MAX_PROMPT_CHARS,
+    max_batch_size: int = 0,
 ) -> list[str]:
-    """Generate code for a batch of prompts using the model's chat template."""
+    """Generate code for prompts using the model's chat template.
+
+    Prompts are tokenized up front, then grouped into batches sized from the
+    VRAM the 4-bit weights left free. Decoding a batch of prompts together
+    costs barely more than decoding one (the weights are read from VRAM once
+    per step either way), so a box whose GPU sits near-idle during generation
+    gets most of its capacity back. Replies are returned in prompt order.
+    """
     import torch
-    results: list[str] = []
+
+    token_ids: list[list[int]] = []
     for prompt in prompts:
         try:
             # Cap prompt size: huge prompts blow up KV-cache and host memory
@@ -512,26 +706,41 @@ def generate_batch(
                 add_generation_prompt=True,
                 enable_thinking=enable_thinking,
             )
-            inputs = tokenizer(text, return_tensors="pt").to(model.device)
-            with torch.no_grad():
-                output = model.generate(
-                    **inputs,
-                    max_new_tokens=max_new_tokens,
-                    temperature=temperature,
-                    do_sample=temperature > 0,
-                    pad_token_id=tokenizer.pad_token_id or tokenizer.eos_token_id,
-                )
-            generated = tokenizer.decode(
-                output[0][inputs["input_ids"].shape[1]:],
-                skip_special_tokens=True,
-            )
-            # Return the raw reply; parse_generated_files maps it to project
-            # files later (multi-file entries, single block, or raw text).
-            results.append(generated.strip())
+            token_ids.append(tokenizer(text)["input_ids"])
         except Exception as exc:  # noqa: BLE001  (keep generating remaining prompts)
-            logger.error("Generation failed: %s", exc)
-            results.append("")
+            logger.error("Tokenization failed: %s", exc)
+            token_ids.append([])
+
+    results: list[str] = [""] * len(prompts)
+    pad_token_id = tokenizer.pad_token_id or tokenizer.eos_token_id
+    budget = kv_token_budget(model)
+    batches = plan_batches(
+        [len(ids) for ids in token_ids], max_new_tokens, max_batch_size, budget,
+    )
+    live = [b for b in batches if any(token_ids[i] for i in b)]
+    for i in range(len(prompts)):
+        if not token_ids[i]:
+            logger.error("Skipping prompt %d: it produced no input tokens", i)
+    if batches:
+        logger.info(
+            "Generation: %d prompts in %d batches (largest %d, ~%d token budget)",
+            len(prompts), len(batches), max(len(b) for b in batches), budget,
+        )
+
+    for done, batch in enumerate(live, start=1):
+        start = time.perf_counter()
+        _generate_rows(
+            model, tokenizer, token_ids, max_new_tokens, temperature,
+            pad_token_id, results, batch,
+        )
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        logger.info(
+            "  batch %d/%d: %d prompt(s) in %.1fs",
+            done, len(live), len(batch), time.perf_counter() - start,
+        )
     return results
+
 
 
 def run_generation_for_model(
@@ -563,6 +772,7 @@ def run_generation_for_model(
             args.max_new_tokens, args.temperature, args.enable_thinking,
             system_prompt=args.system_prompt,
             max_prompt_chars=getattr(args, "max_prompt_chars", MAX_PROMPT_CHARS),
+            max_batch_size=getattr(args, "batch_size", 0),
         )
         elapsed_ms = int((time.perf_counter() - start) * 1000)
 
@@ -679,6 +889,7 @@ def main() -> None:
             "--max-samples", str(args.max_samples),
             "--max-new-tokens", str(args.max_new_tokens),
             "--max-prompt-chars", str(args.max_prompt_chars),
+            "--batch-size", str(getattr(args, "batch_size", 0)),
             "--temperature", str(args.temperature),
         ]
         if args.dataset:
