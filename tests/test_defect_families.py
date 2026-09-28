@@ -382,6 +382,100 @@ class TestDedupGrouped:
         assert dropped == 0
         assert len(deduped) == 2
 
+    def test_defect_families_are_capped_per_defect_not_per_code_shape(self):
+        # Regression: a defect turn's first fence is its corrected code, the
+        # same code the original record answers with, so one cap bucket held
+        # both. Plain copies filled it and 1,291 code shapes lost whole defect
+        # families. Two families on the same code must each get a budget.
+        body = (
+            "-- pad\n"
+            "   Tmp : Integer := 0;\n"
+            "   Tmp := Tmp + 1;\n"
+            "   Tmp := Tmp + 2;\n"
+            "   if Tmp > 0 then\n      X := Tmp + Y;\n   end if;\n"
+        )
+        code = f"procedure Op (X : in out Integer; Y : Integer) is\n{body}end Op;"
+
+        def defect_turn(diagnosis: str, msg: str, index: int) -> dict:
+            user = f"Find the defect.\n\n```ada\nprocedure Op{index} is begin null; end;\n```"
+            answer = (
+                f"The code has this defect. {diagnosis}\n\n"
+                f"The compiler reports: `{msg}`\n\n"
+                f"Corrected code:\n\n```ada\n{code.replace('Tmp', f'Cnt{index}')}\n```"
+            )
+            return {"messages": [
+                {"role": "user", "content": user},
+                {"role": "assistant", "content": answer},
+            ]}
+
+        # One family repeated past the cap, plus a single turn of a second
+        # family on the same code: the second must survive.
+        grouped = [
+            (f"ast:{i}", defect_turn(
+                "A name is misspelled, so the compiler cannot find it.",
+                'error: "Cnt" is undefined', i,
+            ))
+            for i in range(12)
+        ]
+        grouped.append(("ast:syntax", defect_turn(
+            "A declaration appears after begin, which mixes declarations with statements.",
+            "error: declarations mixed with statements", 99,
+        )))
+        deduped, _dropped, detail = bd.dedup_grouped(grouped, ast_structural_cap=10)
+        assert detail["ast_structural_capped"] == 2, "only the 11th and 12th repeats"
+        assert len(deduped) == 11
+        answers = [t["messages"][-1]["content"] for _g, t in deduped]
+        assert any("declarations mixed with statements" in a for a in answers), (
+            "the other family on the same code was thinned away"
+        )
+
+    def test_defect_turn_does_not_collide_with_the_record_it_corrects(self):
+        # The plain record and the defect turn that corrects it share the
+        # corrected code, so their keys must still differ.
+        body = (
+            "-- pad\n"
+            "   Tmp : Integer := 0;\n"
+            "   Tmp := Tmp + 1;\n"
+            "   Tmp := Tmp + 2;\n"
+            "   if Tmp > 0 then\n      X := Tmp + Y;\n   end if;\n"
+        )
+        code = f"procedure Op (X : in out Integer; Y : Integer) is\n{body}end Op;"
+        plain = {"messages": [
+            {"role": "user", "content": "Provide the body."},
+            {"role": "assistant", "content": f"```ada\n{code}\n```"},
+        ]}
+        defect = {"messages": [
+            {"role": "user", "content": "Find the defect.\n\n```ada\nprocedure Op; end Op;\n```"},
+            {"role": "assistant", "content": (
+                "The code has this defect. The name is misspelled.\n\n"
+                "The compiler reports: `error: \"X\" is undefined`\n\n"
+                f"Corrected code:\n\n```ada\n{code}\n```"
+            )},
+        ]}
+        sigs = {bd._ast_structural_signature(t["messages"]) for t in (plain, defect)}
+        assert len(sigs) == 2 and None not in sigs
+
+    def test_non_defect_turns_still_key_on_code_alone(self):
+        # The defect key must not leak into records that merely mention one.
+        body = (
+            "-- pad\n"
+            "   Tmp : Integer := 0;\n"
+            "   Tmp := Tmp + 1;\n"
+            "   Tmp := Tmp + 2;\n"
+            "   if Tmp > 0 then\n      X := Tmp + Y;\n   end if;\n"
+        )
+        code_a = f"procedure Op (X : in out Integer; Y : Integer) is\n{body}end Op;"
+        code_b = code_a.replace("Tmp", "Counter").replace("Op", "Operate")
+
+        def turn(code: str) -> dict:
+            return {"messages": [
+                {"role": "user", "content": "Provide the body."},
+                {"role": "assistant", "content": f"```ada\n{code}\n```"},
+            ]}
+
+        sigs = {bd._ast_structural_signature(turn(c)["messages"]) for c in (code_a, code_b)}
+        assert len(sigs) == 1 and None not in sigs
+
     def test_empty_input(self):
         assert bd.dedup_grouped([]) == ([], 0, {"exact": 0, "ast_structural_capped": 0})
 

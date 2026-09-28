@@ -90,6 +90,21 @@ def test_changed_input_content_forces_rebuild(tmp_path, tree):
     assert spec.skip_if_fresh() is False
 
 
+def test_refetched_identical_content_stays_fresh(tmp_path, tree):
+    """A re-fetch rewrites every file with a new mtime and a new
+    `.q3as-source.json` timestamp. Neither may count as a change, or every
+    upstream check would cost a full dataset rebuild. This is what makes
+    `make update-sources` cheap when a commit moved but the content did not."""
+    spec = _spec(tmp_path, tree)
+    _produce(spec)
+    # Re-extract the same tarball: same bytes, new mtimes, and the fetcher's
+    # metadata file (which carries no declared suffix) rewritten too.
+    (tree / "unit.ads").write_text(
+        "package P is\n   procedure Go;\nend P;\n", encoding="utf-8")
+    _write(tree / ".q3as-source.json", json.dumps({"commit": "abc123", "fetched_at": "later"}))
+    assert spec.skip_if_fresh() is True
+
+
 def test_new_input_file_forces_rebuild(tmp_path, tree):
     spec = _spec(tmp_path, tree)
     _produce(spec)

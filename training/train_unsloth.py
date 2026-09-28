@@ -98,7 +98,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lr", type=float, default=2e-4, help="Learning rate.")
     parser.add_argument("--batch-size", type=int, default=1, help="Per-device batch size (8 GB VRAM: keep at 1).")
     parser.add_argument("--gradient-accumulation", type=int, default=8, help="Gradient accumulation steps (effective batch = batch-size x this).")
-    parser.add_argument("--max-steps", type=int, default=500, help="Maximum training steps.")
+    parser.add_argument(
+        "--max-steps", type=int, default=500,
+        help="Maximum training steps. One epoch over 65,809 records at 8 "
+        "records per step is 8,226 steps, so the default 500 is 0.06 of an "
+        "epoch: at ~14 s per step on this card, two full epochs is about 64 h. "
+        "Raise it for a long run, which now resumes from the last checkpoint.",
+    )
     parser.add_argument("--save-steps", type=int, default=100, help="Save a checkpoint every N steps.")
     parser.add_argument(
         "--max-seq-length", type=int, default=1024,
@@ -502,6 +508,20 @@ def project_eval_minutes(
     return (n_evals * n_val + n_test) * per_example_s / 60.0
 
 
+def records_per_step(config: dict[str, Any]) -> int:
+    """Records one optimizer step consumes."""
+    return max(
+        1,
+        int(config["per_device_train_batch_size"])
+        * int(config["gradient_accumulation_steps"]),
+    )
+
+
+def steps_per_epoch(n_records: int, config: dict[str, Any]) -> int:
+    """Optimizer steps one pass over *n_records* takes."""
+    return max(1, math.ceil(max(n_records, 0) / records_per_step(config)))
+
+
 # What a checkpoint has to carry to be resumable. The adapter weights are not
 # enough: transformers restores the optimizer moments, the position of the LR
 # schedule, and the dataloader and RNG cursor only when these are on disk, and
@@ -877,6 +897,16 @@ def main() -> None:
         logger.info(
             "Splits ready: train=%d (all records) val=%d/%d test=%d/%d (%s load)",
             train_count, val_count, val_total, test_count, test_total, split_load,
+        )
+        # Epoch count is the question every training budget starts from, and it
+        # is not visible in a step count. 500 steps looks like a run; at 8
+        # records per step it is 4,000 records, 6% of one pass over the split.
+        per_epoch = steps_per_epoch(train_count, config)
+        logger.info(
+            "Step budget: %d step(s) of %d per epoch over %d record(s) = "
+            "%.2f epoch(s), %d record(s) per step",
+            int(config["max_steps"]), per_epoch, train_count,
+            int(config["max_steps"]) / per_epoch, records_per_step(config),
         )
 
         # -----------------------------------------------------------------

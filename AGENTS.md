@@ -35,6 +35,12 @@ Steps 3 and 4 skip themselves when nothing they read has changed (see
 `make all` reaches training in seconds. `FORCE=1` rebuilds anyway. Workers
 default to one per core; `DATASET_WORKERS=1` forces serial.
 
+Upstream sources move: each cache entry records the commit it was fetched at,
+`make check-sources` compares those with the current heads (no download, non-zero
+exit when anything moved), and `make update-sources` re-fetches only what moved
+and rebuilds the dataset. Editing `scripts/fetch_repos.py` invalidates the
+dataset stages once, because it is an input to them.
+
 End-user and developer documentation lives in [`docs/`](docs) (architecture,
 datasets and training, data provenance, toolchain setup, evaluation); README
 links to it. Keep those pages current when behavior changes.
@@ -68,8 +74,11 @@ records from ada-eval.
   (seventeen families), distills agent-skill guidance into system prompts,
   dedups (verbatim plus a cap of `AST_STRUCTURAL_CAP = 10` on alpha-renamed
   AST-record shapes, chosen by a controlled cap-tuning experiment, see
-  docs/datasets-and-training.md), drops empty-assistant records, and writes
-  JSONL plus metadata with per-source provenance.
+  docs/datasets-and-training.md; a defect turn is capped per defect, not per
+  code shape, so a family is not thinned away by plain copies of the code it
+  corrects; prose turns have no signature and are never capped), drops
+  empty-assistant records, and writes JSONL plus metadata with per-source
+  provenance.
 - [`data/processing_scripts/source_paths.py`](data/processing_scripts/source_paths.py)
   - resolves every source repo to its cache directory
   (`data/raw_repos/<owner>/<repo>`, with the legacy sibling location as
@@ -133,7 +142,12 @@ records from ada-eval.
   messages. Exit code is the contract: any "compiles clean" defect is a failure.
 - [`scripts/fetch_repos.py`](scripts/fetch_repos.py) - archive-cache fetcher
   (HTTP tarballs, parallel, cached; every repo in `CORE_REPOS` including the
-  Ada-Algorithms monorepo). `make fetch-sources` runs it.
+  Ada-Algorithms monorepo). Each cache entry records the upstream commit it
+  came from, so `--check` can report what moved (exit 1 when something did) and
+  `--update` can re-fetch only that. A head it cannot read is `unknown`, never
+  "changed", so a failed check cannot destroy a good cache. `make fetch-sources`
+  runs the default (reuse), `make check-sources` and `make update-sources` the
+  two comparison modes.
 - [`scripts/ada_env.sh`](scripts/ada_env.sh) - runs any command inside the Alire
   toolchain environment (`alr exec`); all Ada tool invocations go through it.
 - [`scripts/alire_env.py`](scripts/alire_env.py) - Python side of the same:

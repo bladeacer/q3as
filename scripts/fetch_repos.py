@@ -14,6 +14,12 @@ Why archives instead of clones:
 - one HTTP GET per repo, parallelizable and restartable,
 - the cache is content-addressed by repo identity, not by git state.
 
+Because there is no ``.git``, the commit a cache entry came from is recorded in
+its metadata file. ``--check`` compares that commit with the upstream head and
+reports what moved; ``--update`` re-fetches only those. The dataset stages
+fingerprint the cache by content, so a refreshed tree rebuilds them on the next
+``make build-dataset`` without anything else having to know a commit exists.
+
 Sources come from two places, all combinable:
 
 - ``--repo URL``            an explicit repository (any repo not in CORE_REPOS).
@@ -25,10 +31,16 @@ includes the RobertBoettcherSF ``Ada-Algorithms`` monorepo.
 Usage:
     python3 scripts/fetch_repos.py                     # core (default)
     python3 scripts/fetch_repos.py --list              # cache status
+    python3 scripts/fetch_repos.py --check             # what moved upstream
+    python3 scripts/fetch_repos.py --update            # re-fetch what moved
     python3 scripts/fetch_repos.py --refresh core      # re-fetch core
     python3 scripts/fetch_repos.py --refresh all       # re-fetch everything
 
 Exit code: 0 when every requested repository is in the cache, 1 otherwise.
+``--check`` exits 1 when at least one cached repository is behind upstream, so
+it can gate a scheduled rebuild. A repository whose head cannot be read (API
+quota, network) is reported as unknown and never re-fetched: a failed check
+must not destroy a good cache.
 """
 
 from __future__ import annotations
@@ -139,6 +151,35 @@ def _api_json(repo_url: str) -> dict | None:
     return payload if isinstance(payload, dict) else None
 
 
+def head_commit(owner: str, repo: str, branch: str) -> str | None:
+    """The upstream head commit of *branch*, or None when it cannot be read.
+
+    ``/git/ref/heads/<branch>`` is the cheap form of the question (one small
+    JSON object). None is a real answer here, not an error: the caller must not
+    re-fetch a cache entry because a check could not run.
+    """
+    url = f"https://api.github.com/repos/{owner}/{repo}/git/ref/heads/{branch}"
+    try:
+        payload = json.loads(_http_get(url, timeout=15, retries=1))
+    except (ValueError, urllib.error.URLError, OSError, TimeoutError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    obj = payload.get("object")
+    if isinstance(obj, dict) and isinstance(obj.get("sha"), str):
+        return obj["sha"]
+    return None
+
+
+def default_branch(owner: str, repo: str) -> str | None:
+    """The repository's default branch name, or None when unknown."""
+    payload = _api_json(f"https://github.com/{owner}/{repo}")
+    if payload is None:
+        return None
+    branch = payload.get("default_branch")
+    return branch if isinstance(branch, str) and branch else None
+
+
 # --------------------------------------------------------------------------- #
 # Cache
 # --------------------------------------------------------------------------- #
@@ -167,7 +208,10 @@ def is_cached(request: RepoRequest) -> bool:
     return meta.get("url", "").rstrip("/") == request.url.rstrip("/")
 
 
-def write_meta(directory: Path, request: RepoRequest, license_spdx: str | None, description: str | None) -> None:
+def write_meta(
+    directory: Path, request: RepoRequest, license_spdx: str | None,
+    description: str | None, commit: str | None = None, branch: str | None = None,
+) -> None:
     from datetime import UTC, datetime
 
     meta = {
@@ -176,6 +220,11 @@ def write_meta(directory: Path, request: RepoRequest, license_spdx: str | None, 
         "fetched_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "license_spdx": license_spdx,
         "description": description,
+        # Which upstream commit this tree is. --check and --update compare it
+        # with the current head. None on a fetch whose API lookup failed, which
+        # is treated as "unknown", never as "changed".
+        "default_branch": branch,
+        "commit": commit,
     }
     (directory / META_FILE).write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
 
@@ -227,19 +276,30 @@ def fetch_repo(request: RepoRequest) -> FetchResult:
     api = _api_json(request.url)
     license_spdx = None
     description = None
+    branch = None
     if api:
         license_spdx = ((api.get("license") or {}).get("spdx_id")) or None
         description = api.get("description")
+        branch = api.get("default_branch")
+    # Record the commit the tarball is the head of, so a later --check can say
+    # whether this cache entry is still current. The tarball URL follows the
+    # default branch, so the head of that branch is what was just downloaded.
+    commit = head_commit(request.owner, request.repo, branch) if branch else None
 
     try:
         if directory.exists():
             shutil.rmtree(directory)
         directory.parent.mkdir(parents=True, exist_ok=True)
         _extract_tarball(archive, directory)
-        write_meta(directory, request, license_spdx, description)
+        write_meta(directory, request, license_spdx, description, commit, branch)
     except (tarfile.TarError, OSError) as exc:
         return FetchResult(request, "failed", str(exc))
-    return FetchResult(request, "fetched", f"license={license_spdx or 'unknown'}")
+    detail = f"license={license_spdx or 'unknown'}"
+    if commit:
+        detail += f" commit={commit[:12]}"
+    else:
+        detail += " commit=unknown"
+    return FetchResult(request, "fetched", detail)
 
 
 def fetch_all(requests: list[RepoRequest], jobs: int = 8) -> list[FetchResult]:
@@ -301,7 +361,7 @@ def build_requests(
 
 
 def list_cache() -> int:
-    """Print every cached repository with its recorded license."""
+    """Print every cached repository with its recorded license and commit."""
     if not CACHE_DIR.exists():
         print(f"Cache is empty: {CACHE_DIR} does not exist yet.")
         return 0
@@ -320,9 +380,115 @@ def list_cache() -> int:
                 print(f"  {owner_dir.name}/{repo_dir.name}: NO META (re-fetch needed)")
                 continue
             license_spdx = meta.get("license_spdx") or "?"
-            print(f"  {owner_dir.name}/{repo_dir.name}: {license_spdx} ({meta.get('fetched_at', '?')})")
+            commit = str(meta.get("commit") or "unknown")[:12]
+            print(
+                f"  {owner_dir.name}/{repo_dir.name}: {license_spdx} "
+                f"({meta.get('fetched_at', '?')}, commit {commit})"
+            )
     print(f"{total} cached repositories, {missing_meta} without metadata.")
     return 0
+
+
+# --------------------------------------------------------------------------- #
+# Upstream check: which cached repositories moved
+# --------------------------------------------------------------------------- #
+
+# status values a check can report per repository.
+CHECK_CURRENT = "current"
+CHECK_STALE = "moved"
+CHECK_UNTRACKED = "untracked"  # cached before commits were recorded
+CHECK_UNKNOWN = "unknown"      # upstream head could not be read
+CHECK_ABSENT = "absent"        # in the request list, not in the cache
+
+
+@dataclass(frozen=True)
+class CheckResult:
+    """One repository's cache-vs-upstream comparison."""
+
+    name: str
+    status: str
+    cached_commit: str
+    head_commit: str
+
+
+def _cached_commit(meta: dict | None, request: RepoRequest) -> str | None:
+    """The commit recorded for a cache entry, or None when unrecorded."""
+    if not meta:
+        return None
+    recorded = meta.get("commit")
+    if isinstance(recorded, str) and recorded:
+        return recorded
+    # An entry fetched before commits were recorded. Say so rather than
+    # treating the absence as a match.
+    return None
+
+
+def check_repo(request: RepoRequest) -> CheckResult:
+    """Compare one cached repository against its upstream head."""
+    name = f"{request.owner}/{request.repo}"
+    meta = load_meta(target_dir(request))
+    cached = _cached_commit(meta, request)
+    if meta is None:
+        return CheckResult(name, CHECK_ABSENT, "", "")
+    branch = meta.get("default_branch") or default_branch(request.owner, request.repo)
+    head = head_commit(request.owner, request.repo, branch) if branch else None
+    if head is None:
+        # A failed check must never look like a change: reporting it as
+        # current would hide a real update, reporting it as moved would
+        # re-fetch on every network hiccup. Neither is useful, so say unknown.
+        return CheckResult(name, CHECK_UNKNOWN, cached or "", "")
+    if cached is None:
+        return CheckResult(name, CHECK_UNTRACKED, "", head)
+    status = CHECK_CURRENT if cached == head else CHECK_STALE
+    return CheckResult(name, status, cached, head)
+
+
+def check_cache(requests: list[RepoRequest], jobs: int = 8) -> list[CheckResult]:
+    """Check every request in parallel, preserving input order."""
+    if not requests:
+        return []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max(jobs, 1)) as pool:
+        return list(pool.map(check_repo, requests))
+
+
+def report_check(results: list[CheckResult]) -> int:
+    """Print the check table; return the number of repositories behind."""
+    width = max((len(r.name) for r in results), default=10)
+    print(f"{'repository':<{width}}  status      cached        upstream")
+    for r in results:
+        print(
+            f"{r.name:<{width}}  {r.status:<11} {r.cached_commit[:12]:<12} {r.head_commit[:12]}"
+        )
+    behind = [r for r in results if r.status == CHECK_STALE]
+    untracked = [r for r in results if r.status == CHECK_UNTRACKED]
+    unknown = [r for r in results if r.status == CHECK_UNKNOWN]
+    print()
+    if behind:
+        print(
+            f"{len(behind)} repository(ies) moved upstream: "
+            + ", ".join(r.name for r in behind)
+        )
+    elif untracked:
+        print(
+            f"No cached repository is known to be behind, but "
+            f"{len(untracked)} cannot be compared: they were fetched before "
+            "commits were recorded."
+        )
+    else:
+        print("Every cached repository is at its upstream commit.")
+    if untracked:
+        print(
+            f"{len(untracked)} cached before commits were recorded (not fetched from git): "
+            + ", ".join(r.name for r in untracked)
+            + ". Re-fetch with --update to start tracking them."
+        )
+    if unknown:
+        print(
+            f"{len(unknown)} upstream head(s) could not be read "
+            f"(API quota or network): " + ", ".join(r.name for r in unknown)
+            + ". Treated as up to date, not as changed."
+        )
+    return len(behind) + len(untracked)
 
 
 # --------------------------------------------------------------------------- #
@@ -335,6 +501,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--repo", action="append", default=[], help="Extra repository URL. Repeatable.")
     parser.add_argument("--from-manifest", type=Path, help="File with one repository URL per line.")
     parser.add_argument("--refresh", choices=["core", "all"], help="Re-fetch even when cached.")
+    parser.add_argument("--check", action="store_true", help="Report which cached repositories moved upstream, then exit.")
+    parser.add_argument("--update", action="store_true", help="Re-fetch only the repositories whose commit moved.")
     parser.add_argument("--jobs", type=int, default=8, help="Parallel downloads (default 8).")
     parser.add_argument("--list", action="store_true", help="Print cache status and exit.")
     parser.add_argument("-v", "--verbose", action="store_true")
@@ -349,6 +517,28 @@ def main(argv: list[str] | None = None) -> int:
         return list_cache()
 
     requests = build_requests(args.repo, args.from_manifest, args.refresh)
+
+    if args.check or args.update:
+        checked = check_cache(requests, jobs=args.jobs)
+        behind = report_check(checked)
+        if args.check:
+            return 1 if behind else 0
+        stale = {r.name for r in checked if r.status in (CHECK_STALE, CHECK_UNTRACKED)}
+        if not stale:
+            print("Nothing to re-fetch.")
+            return 0
+        requests = [r for r in requests if f"{r.owner}/{r.repo}" in stale]
+        if any(r.status == CHECK_UNTRACKED for r in checked):
+            # An untracked entry has no commit to compare, so it is not known
+            # to be current. Re-fetching it is the only way to start tracking
+            # it; say so, because it is the one case that touches a cache that
+            # may be perfectly fine.
+            logger.warning(
+                "Re-fetching %d cache entr(ies) with no recorded commit; "
+                "their content may be unchanged.",
+                sum(1 for r in checked if r.status == CHECK_UNTRACKED),
+            )
+
     logger.info("Fetching %d repositories (%d jobs)", len(requests), args.jobs)
     results = fetch_all(requests, jobs=args.jobs)
 
@@ -363,7 +553,14 @@ def main(argv: list[str] | None = None) -> int:
             "the dataset build skips them with a warning.",
             file=sys.stderr,
         )
-    print(f"Core sources fetched; {len(results) - len(failures)}/{len(results)} repositories are in the cache at {CACHE_DIR}.")
+    refetched = sum(1 for r in results if r.status == "fetched")
+    if args.update:
+        print(
+            f"Re-fetched {refetched} of {len(results)} repositories that moved upstream. "
+            "Rebuild the dataset to pick the new sources up ('make update-sources' does both)."
+        )
+    else:
+        print(f"Core sources fetched; {len(results) - len(failures)}/{len(results)} repositories are in the cache at {CACHE_DIR}.")
     return 0
 
 

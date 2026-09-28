@@ -2362,13 +2362,15 @@ def dedup_grouped(
        signal, so extras are dropped.
 
     What is deliberately preserved: the dataset's intentional
-    natural-language and code variety. Correct-variant turns
-    (``code_variants.variant_turns``) rename or reorder a *specific*
-    snippet and keep the surrounding prose, so each variant has a distinct
-    structural signature and distinct wording - it survives dedup. The
-    paraphrase turns (plain vs STE doc answers, prose vs diagnosis) differ
-    in their assistant text and never collide. Only verbatim repeats and
-    beyond-cap structural clones of AST code are removed.
+    natural-language and code variety. Prose turns (doc QA, doc sections,
+    toolchain QA) carry no Ada fence, so they have no structural signature at
+    all and are never capped; measured on the shipped corpus, 5,344 of 5,346
+    survived. The correct-variant turns that reorder statements keep their own
+    signature. Defect turns are capped per defect rather than per code shape
+    (see ``_ast_structural_signature``), so a family is not thinned away by
+    plain copies of the code it corrects. What remains removed is genuinely
+    repeated: byte-identical records, alpha-renamed twins of a code record, and
+    repeat diagnoses of the same defect on the same code.
 
     Returns (deduplicated list, dropped count, breakdown by family with
     the keys ``exact`` and ``ast_structural_capped``).
@@ -2402,15 +2404,50 @@ def _ast_structural_signature(messages: list[dict[str, str]]) -> str | None:
     The user prompt (question phrasing, spec shown) may legitimately repeat
     across records. Code shorter than ``eval_guard.MIN_STRUCTURAL_LEN``
     tokens carries too little shape to cluster on and is never capped.
+
+    A defect turn's first fence is its *corrected* code, which is the same
+    code the original record answers with, so an unkeyed signature puts the
+    defect turn in the same bucket as that record. Measured on the shipped
+    corpus, the bucket filled up with plain copies and a single evaluation
+    point: 8,157 defect turns were cut by the cap, 74 (family, shape)
+    combinations lost every copy they had, and 1,291 code shapes lost at
+    least one of the seventeen families outright, so the model never saw
+    (say) a syntax error in that shape at all. The defect is therefore part
+    of the key, which caps repeats of one diagnosis and leaves the families
+    to compete on their own.
     """
     for message in messages:
         if message.get("role") != "assistant":
             continue
-        for block in _FENCE_BLOCK_RE.findall(str(message.get("content", ""))):
+        content = str(message.get("content", ""))
+        defect = _defect_identity(content)
+        for block in _FENCE_BLOCK_RE.findall(content):
             structural = eval_guard.structural_text(block)
             if len(structural) >= eval_guard.MIN_STRUCTURAL_LEN:
-                return structural
+                if defect is None:
+                    return structural
+                return f"defect\0{defect}\0{structural}"
     return None
+
+
+# Opening sentence of every defect turn's assistant reply (build_defect_turns).
+_DEFECT_PREFIX = "The code has this defect."
+
+
+def _defect_identity(assistant: str) -> str | None:
+    """Which defect a defect turn teaches, independent of its code, or None.
+
+    The prose before the first fence is the diagnosis and the claimed
+    compiler message, both family-specific and both free of the code that
+    follows. Turns that are not defect turns, and turns whose prose is too
+    short to identify, return None and keep the plain code-only key.
+    """
+    if not assistant.startswith(_DEFECT_PREFIX):
+        return None
+    prose = assistant.split("```", 1)[0].strip()
+    if len(prose) < len(_DEFECT_PREFIX):
+        return None
+    return prose
 
 
 def split_file_paths(output_file: Path) -> dict[str, Path]:

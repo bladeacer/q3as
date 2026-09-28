@@ -10,9 +10,36 @@ All sources are fetched into a local archive cache by
 The cache lives at `data/raw_repos/<owner>/<repo>/` (gitignored), holds HTTP
 tarballs (no git metadata), and is content-addressed by repository identity: a
 re-run re-fetches nothing already on disk. Per-repository metadata
-(`.q3as-source.json`) records the URL, fetch time, and the license SPDX when the
-GitHub API answers. The legacy `../<repo>` sibling layout still resolves as a
-fallback, but nothing creates it anymore.
+(`.q3as-source.json`) records the URL, fetch time, the license SPDX when the
+GitHub API answers, and the commit of the default branch the tarball is the
+head of. The legacy `../<repo>` sibling layout still resolves as a fallback,
+but nothing creates it anymore.
+
+## Keeping the sources current
+
+The cache is a tarball snapshot, not a clone, so nothing pulls on its own.
+Because each entry records the commit it came from, the snapshot can be
+compared with upstream:
+
+| Command | What it does |
+|---|---|
+| `make fetch-sources` | Reuse the cache. No network, no rebuild. This is what the pipeline calls. |
+| `make check-sources` | Ask GitHub for each repository's head commit and print cached vs upstream. Downloads nothing. Exits non-zero when anything moved, so it can gate a scheduled run. |
+| `make update-sources` | Re-fetch only the repositories whose commit moved, then rebuild the dataset from the refreshed cache and print the `make check-integrity` reminder. |
+
+There is no separate "rebuild" step to remember: the dataset stages fingerprint
+their input trees by content, so a refreshed repository changes the digest and
+`make build-dataset` re-parses and rebuilds. A repository whose head cannot be
+read (API quota, network) is reported as `unknown` and is **not** re-fetched, so
+a failed check never destroys a good cache. Entries fetched before commits were
+recorded show as `untracked`; `--update` re-fetches them once so they start
+being tracked, and says so, because that is the one case where a cache that may
+be perfectly fine is touched.
+
+When a source changes, review it before rebuilding: a new upstream revision can
+add license-relevant material, or add code whose text collides with the
+evaluation suite (the guard drops it, but the drop is worth reading in the
+build log rather than taking on faith).
 
 | Source | Cache path | Used for | License |
 |---|---|---|---|
@@ -108,11 +135,10 @@ build (see below) still drops a similar volume.
 
 Current shipped dataset (AST_STRUCTURAL_CAP = 10), as recorded in
 `data/processed/dataset_metadata.json` at build time:
-
-- 73,080 turns; group-aware splits 65,809 train / 3,709 val / 3,562 test,
+- 77,758 turns; group-aware splits 69,982 train / 3,834 val / 3,942 test,
 - eval guard: 479 blocked signatures (255 exact, 176 structural, plus
   prompts), 695 contaminated groups dropped,
-- dedup before split: 58,058 duplicates removed (21,410 verbatim, 36,648
+- dedup before split: 53,380 duplicates removed (24,091 verbatim, 29,289
   AST-structural over the cap),
 - 2,413 empty-assistant records dropped (mostly spec-only units from the Ada-
   Algorithms monorepo).

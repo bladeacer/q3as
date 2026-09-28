@@ -1,4 +1,4 @@
-.PHONY: help setup sync download build-dataset parse-data gen-contracts check-integrity check-links train generate eval eval-pipeline eval-report bump-version prove ast-deps ada-env test lint validate-defects agents-tree fetch-sources clean all check-model
+.PHONY: help setup sync download build-dataset parse-data gen-contracts check-integrity check-links train generate eval eval-pipeline eval-report bump-version prove ast-deps ada-env test lint validate-defects agents-tree fetch-sources check-sources update-sources clean clean-model all check-model
 
 # Prerequisite chain for the dataset: parser outputs (docs chunks, AST units,
 # contract turns) must exist before the builder runs. Every stage fingerprints
@@ -58,6 +58,10 @@ help: ## Show this help message
 	@echo "  make check-model    - Download the model only when it is missing"
 	@echo ""
 	@echo "  make fetch-sources  - Fetch source repos into the archive cache (data/raw_repos)"
+	@echo "  make check-sources  - Compare each cached repo's commit with upstream"
+	@echo "                        (no download; exits non-zero when any moved)"
+	@echo "  make update-sources - Re-fetch the repos whose commit moved, then rebuild"
+	@echo "                        the dataset from the refreshed sources"
 	@echo "  make parse-data     - Run the parser modules into data/processed/ extra JSONL"
 	@echo "                        (doc chunking, libadalang/structural Ada AST extraction)"
 	@echo "  make gen-contracts  - Generate gnatprove-verified contract turns (FORCE=1)"
@@ -88,7 +92,8 @@ help: ## Show this help message
 	@echo "  make test           - Run the Python unit tests (pytest)"
 	@echo "  make lint           - Run ruff, mypy, the link check, and the AGENTS tree check"
 	@echo "  make agents-tree    - Regenerate the project file tree inside AGENTS.md"
-	@echo "  make clean          - Remove generated outputs and caches"
+	@echo "  make clean          - Remove generated outputs and caches (keeps models/)"
+	@echo "  make clean-model    - Also remove the downloaded base model (16 GB)"
 	@echo ""
 	@echo "Options: DATASET_WORKERS=<n> parser/build worker processes (default 0 ="
 	@echo "         one per CPU core; 1 = serial. Output is identical for any value),"
@@ -104,6 +109,16 @@ setup: ## One-shot bootstrap: fetch source repos into the cache, .env, uv sync, 
 
 fetch-sources: ## Fetch source repos into the archive cache (data/raw_repos); no-op when cached
 	uv run python scripts/fetch_repos.py
+
+check-sources: ## Report which cached source repos moved upstream (no download)
+	uv run python scripts/fetch_repos.py --check
+
+update-sources: fetch-sources ## Re-fetch the repos whose commit moved, then rebuild the dataset
+	uv run python scripts/fetch_repos.py --update
+	$(MAKE) build-dataset
+	@echo ""
+	@echo "Sources refreshed and the dataset rebuilt from them. Run"
+	@echo "'make check-integrity' to confirm no evaluation content slipped in."
 
 download: ## Download and sanity-check the Qwen3-8B model
 	HF_HUB_DISABLE_XET=1 uv run python training/download_model.py --model-name Qwen/Qwen3-8B --cache-dir models/qwen3-8b
@@ -218,9 +233,15 @@ all: check-model build-dataset train generate eval eval-pipeline eval-report ## 
 	@echo "  Generated solutions: outputs/generated_solutions/"
 	@echo "  Eval results: outputs/eval_results/ outputs/eval_results.json"
 
-clean: ## Remove generated outputs and caches
-	rm -rf outputs/ models/ data/processed/dataset.jsonl data/processed/dataset_metadata.json \
+clean: ## Remove generated outputs and caches (keeps the downloaded model)
+	rm -rf outputs/ data/processed/dataset.jsonl data/processed/dataset_metadata.json \
 		data/processed/dataset_train.jsonl data/processed/dataset_val.jsonl \
 		data/processed/dataset_test.jsonl data/processed/.stages \
 		data/processed/.tokenized training.log
-	@echo "Cleaned outputs/, models/, generated dataset, stage stamps, tokenized-split cache, and training.log."
+	@echo "Cleaned outputs/, generated dataset, stage stamps, tokenized-split cache, and training.log."
+	@echo "models/qwen3-8b is kept: it is a 16 GB download that make check-model"
+	@echo "skips. Use 'make clean-model' to remove it as well."
+
+clean-model: clean ## Also remove the downloaded base model (16 GB)
+	rm -rf models/
+	@echo "Removed models/."

@@ -108,10 +108,12 @@ Four properties make the "fresh" verdict safe:
 `FORCE=1` (or `--force` on the scripts) rebuilds regardless, which is what to
 use after a toolchain change: `gnatprove` is a binary, not a hashed source
 input, so upgrading the prover does not invalidate `contract_mutations`.
-`make clean` removes the stamps along with the dataset.
+`make clean` removes the stamps along with the dataset, and keeps the
+downloaded model in `models/` (16 GB that `make check-model` would otherwise
+re-fetch; `make clean-model` removes it).
 
 Effect on the full pipeline, measured on 16 cores over the whole corpus
-(6,514 Ada files, 4,337 pairs, 73,080 turns):
+(6,514 Ada files, 4,337 pairs, 77,758 turns):
 
 | Step | Before | After |
 |---|---|---|
@@ -224,6 +226,40 @@ mechanisms keep the splits honest:
    committed; see
    [`scripts/collect_cap_results.py`](../scripts/collect_cap_results.py).
    Per-cap summaries live in `outputs/capexp{,_big}/run_cap*/`.
+
+   **What the cap removed, measured by kind.** The cap experiment scored loss,
+   not coverage, so the shipped corpus was audited afterwards (the same
+   instrumented build the metadata comes from, classifying every turn and every
+   drop). Prose turns are untouched: doc QA, doc sections, and toolchain QA
+   carry no Ada fence, so they have no structural signature and only
+   byte-identical records are ever dropped (5,344 of 5,346 survived). Defect
+   turns were not: a defect turn's first fence is its *corrected* code, which is
+   the same code its original record answers with, so an unkeyed signature put
+   both in one bucket. Plain copies filled the bucket, and across the 24,279
+   defect turns the AST parser drives, the cap cut 7,982 of them, 74 (family,
+   code shape) combinations lost every copy they had, and 1,291 code shapes lost
+   at least one of the seventeen families outright. Per-family survival was as
+   low as 29% (`old_misuse`) and 33% (`contract`).
+
+   The defect is now part of the cap key
+   (`_ast_structural_signature`), so the cap thins repeats of one diagnosis on
+   one code shape and leaves the families to compete on their own:
+
+   | | before | after |
+   |---|---:|---:|
+   | defect turns kept | 9,802 | 12,728 |
+   | defect turns cut by the cap | 7,982 | 3,169 |
+   | (family, shape) combinations cut before the cap was full | 74 | 0 |
+   | (family, shape) combinations removed by the cap | 103 | 3 |
+   | `contract` / `mismatch` / `syntax` survival | 33% / 41% / 46% | 42% / 62% / 54% |
+   | total turns | 73,080 | 77,758 |
+
+   The cap value itself is unchanged, and the experiment above still stands for
+   the plain-code records it was run on. Three regression cases in
+   [`tests/test_defect_families.py`](../tests/test_defect_families.py) pin the
+   new keying: two families on one code shape each get a budget, a defect turn
+   does not collide with the record it corrects, and a non-defect turn still
+   keys on code alone.
 3. **Eval guard** - ada-eval benchmark content is dropped before splitting
    (see [Data provenance](data-provenance.md)).
 
@@ -326,6 +362,35 @@ mechanisms keep the splits honest:
   `train_seconds` covers only the segment that this process ran. `--no-resume`
   skips the lookup, and raising `--max-steps` turns a finished run into a
   resumable one.
+- **Step budget and epochs**: one pass over the 65,809 train records is 8,226
+  optimizer steps at 8 records per step (batch 1 x 8 accumulation), so the
+  default `--max-steps 500` is **0.06 of one epoch**. The startup log says so
+  (`Step budget: 500 step(s) of 8226 per epoch`). At the measured 13-21 s per
+  step on this card, an epoch is 30-48 h, so the usual advice to train 2-3
+  epochs is a 60-140 h job here. It is a legitimate target, not a comfortable
+  one: what the 500-step runs actually show is an under-trained model (train
+  loss was still falling at step 90, 2.405 at step 10 to 0.359 at step 90,
+  with a val loss of 0.3615 at step 50). Raise `--max-steps` for a long run,
+  which now resumes from the last checkpoint, and let `--early-stopping-patience`
+  decide when to stop.
+- **Sequence packing**: not applicable here, and not for want of trying. The
+  reason packing is normally wanted is padding: with
+  `per_device_train_batch_size=1` there is no padding at all, so there is
+  nothing to reclaim. The reason it is also wanted, throughput, does not apply
+  either: the forward is compute-bound, not launch-bound (batching the eval
+  4-wide was measured at 1.12x for 7.05 GB of 8.15 GB, and 8-wide OOMs), and a
+  4096-token window multiplies activation memory on a card that already peaks
+  near 7.5 GB. Unsloth's packing additionally needs the Flash Attention varlen
+  path, which this box does not have ("Your Flash Attention 2 installation seems
+  to be broken. Using Xformers instead"), so boundaries could not be masked
+  correctly. The 1024 window covers the mean record (511 tokens); the tail is
+  truncated, and `--max-seq-length` is the knob.
+- **Validation loss tracking**: every `--eval-steps` (default 50) on a seeded
+  subset, with a per-pass rate and ETA, the measured cost per example, the
+  evaluation time still to come, and a trend verdict in the versioned report.
+  The val split is in-distribution (same generators as training), so a low val
+  loss is a syntax-fluency signal, not a reasoning signal: read it for the
+  plateau, and read the ada-eval BUILD/TEST/PROVE tallies for the model.
 - **Logging**: the module configures its own logger instead of calling
   `logging.basicConfig`. Importing unsloth installs a root handler and sets
   the root level to WARNING, which made `basicConfig` a silent no-op and
