@@ -16,6 +16,13 @@ now streamed from JSONL into Arrow one record at a time, and the resulting
 Arrow table is cached under data/processed/.tokenized so a rerun does not
 re-tokenize.
 
+A 500-step run is over two hours on this card, so a run that dies half way
+continues from its last checkpoint by default: the adapter weights, the
+optimizer state, the LR schedule, and the data cursor all come back, and the
+eval points already scored stay in the loss curve. See
+:func:`find_resume_checkpoint` for what makes a checkpoint eligible and
+--no-resume to opt out.
+
 Usage:
     uv run python training/train_unsloth.py
     uv run python training/train_unsloth.py --dataset data/processed/dataset.jsonl --lr 2e-4
@@ -41,6 +48,11 @@ from typing import Any
 _PROCESSING_SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "data" / "processing_scripts"
 if str(_PROCESSING_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_PROCESSING_SCRIPTS_DIR))
+
+# The chunked eval scores hundreds of examples one at a time, which takes
+# minutes per pass. Progress gives that loop the item count, rate, and ETA the
+# dataset stages already log, so an evaluation point never reads as a hang.
+from progress import Progress
 
 # digest_file is the repo's content-hash helper, reused so the Arrow cache key
 # is computed the same way the dataset stages compute their fingerprints.
@@ -125,22 +137,31 @@ def parse_args() -> argparse.Namespace:
         "written. Intended for short experiment runs.",
     )
     parser.add_argument(
-        "--eval-sample", type=int, default=2000,
+        "--eval-sample", type=int, default=256,
         help="Examples drawn from the val split for each during-training "
-        "early-stopping evaluation. 0 uses the whole split. The default keeps "
-        "a 500-step run inside --eval-budget-min; a full val pass costs about "
-        "37 min on this hardware, so 10 of them would be 6.2 h.",
+        "early-stopping evaluation. 0 uses the whole split. A pass costs "
+        "about 0.6 s per example on this hardware, so a full pass over the "
+        "3,709-example split is 37 min and the 10 evaluation points of a "
+        "500-step run would be 6.2 h. The default scores 256 of them, which "
+        "is about 3 min per point.",
     )
     parser.add_argument(
-        "--test-sample", type=int, default=2000,
+        "--test-sample", type=int, default=512,
         help="Examples drawn from the held-out test split for the final "
-        "metrics. 0 uses the whole split.",
+        "metrics. 0 uses the whole split. Scored once, so it defaults to "
+        "twice the per-point sample: about 5 min for the reported number.",
     )
     parser.add_argument(
         "--eval-budget-min", type=float, default=300.0,
         help="Soft ceiling in minutes for the whole run's evaluation. Only "
         "used to project the cost up front and warn when the chosen sample "
         "sizes exceed it; it never silently changes them.",
+    )
+    parser.add_argument(
+        "--no-resume", action="store_true",
+        help="Ignore any checkpoint in --output-dir and train from the base "
+        "model. By default an interrupted run continues from its last "
+        "checkpoint (weights, optimizer, LR schedule, and data cursor).",
     )
     parser.add_argument("--seed", type=int, default=42, help="Random seed.")
     parser.add_argument("--verbose", "-v", action="store_true", help="Enable debug logging.")
@@ -481,6 +502,77 @@ def project_eval_minutes(
     return (n_evals * n_val + n_test) * per_example_s / 60.0
 
 
+# What a checkpoint has to carry to be resumable. The adapter weights are not
+# enough: transformers restores the optimizer moments, the position of the LR
+# schedule, and the dataloader and RNG cursor only when these are on disk, and
+# a run that silently restarts the optimizer on top of trained weights is worse
+# than one that starts over. A checkpoint written with save_only_model holds the
+# weights alone, so it is rejected rather than half-resumed.
+RESUME_REQUIRED_FILES = ("trainer_state.json", "scheduler.pt", "optimizer.pt")
+
+
+def checkpoint_step(path: Path) -> int | None:
+    """The optimizer step a checkpoint was written at, or None if unreadable."""
+    try:
+        state = json.loads((Path(path) / "trainer_state.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        logger.warning("Cannot read the trainer state in %s (%s)", path, exc)
+        return None
+    try:
+        return int(state.get("global_step", 0))
+    except (AttributeError, TypeError, ValueError):
+        logger.warning("Trainer state in %s has no usable global_step", path)
+        return None
+
+
+def find_resume_checkpoint(output_dir: str | Path, max_steps: int) -> Path | None:
+    """The last checkpoint in *output_dir* to continue from, else None.
+
+    Nothing to resume is the common case and is not a problem: a directory
+    without a checkpoint, or one whose checkpoint already reached the step
+    budget, means the previous run finished and this one should start over.
+    Each rejection says why, so "training started from scratch" is never a
+    surprise.
+    """
+    from transformers.trainer_utils import get_last_checkpoint
+
+    output_dir = Path(output_dir)
+    if not output_dir.is_dir():
+        return None
+    last = get_last_checkpoint(str(output_dir))
+    if last is None:
+        return None
+    path = Path(last)
+    missing = [name for name in RESUME_REQUIRED_FILES if not (path / name).is_file()]
+    if missing:
+        logger.warning(
+            "Checkpoint %s is missing %s, so it cannot be resumed; training "
+            "starts from the base model. Optimizer and scheduler state is "
+            "what makes a checkpoint resumable (save_only_model must be off).",
+            path, ", ".join(missing),
+        )
+        return None
+    step = checkpoint_step(path)
+    if step is None:
+        logger.warning("Training starts from the base model: %s is unreadable.", path)
+        return None
+    if step <= 0 or step >= max_steps:
+        logger.info(
+            "Checkpoint %s is at step %d of %d, so there is nothing to resume; "
+            "training starts from the base model. Raise --max-steps to continue "
+            "from it, or --no-resume to skip this lookup.",
+            path, step, max_steps,
+        )
+        return None
+    logger.info(
+        "Resuming from %s at step %d of %d: the weights, optimizer, LR "
+        "schedule, and data cursor continue where the previous run stopped, "
+        "leaving %d step(s) to train.",
+        path, step, max_steps, max_steps - step,
+    )
+    return path
+
+
 def setup_training_environment(args: argparse.Namespace, has_val: bool) -> dict[str, Any]:
     """Configure training hyperparameters for 8 GB VRAM QLoRA training.
 
@@ -523,7 +615,12 @@ def setup_training_environment(args: argparse.Namespace, has_val: bool) -> dict[
         "save_strategy": "steps",
         "save_steps": args.save_steps,
         "save_total_limit": 3,
-        "save_only_model": True,
+        # The optimizer, scheduler, and RNG state are what
+        # find_resume_checkpoint insists on, and what make an interrupted run
+        # resumable at all. They cost 45 MB per checkpoint next to the 87 MB
+        # of adapter weights, so three retained checkpoints go from 260 MB to
+        # 400 MB.
+        "save_only_model": False,
         "fp16": False,
         "bf16": True,
         "gradient_checkpointing": True,
@@ -797,10 +894,23 @@ def main() -> None:
         # the early-stop rule on this curve, replacing both Trainer-managed
         # evaluation and transformers.EarlyStoppingCallback.
         # -----------------------------------------------------------------
-        _eval_ctx: dict[str, Any] = {"model": model, "tokenizer": tokenizer}
+        _eval_ctx: dict[str, Any] = {
+            "model": model, "tokenizer": tokenizer, "sec_per_example": None,
+        }
 
-        def _chunked_eval_loss(dataset: Dataset, chunk: int = 64) -> float | None:
-            """Mean token-level NLL over *dataset*, computed in chunks."""
+        def _chunked_eval_loss(
+            dataset: Any, label: str = "val", chunk: int = 64,
+        ) -> float | None:
+            """Mean token-level NLL over *dataset*, computed in chunks.
+
+            A pass takes minutes, so it reports an item count with a rate and
+            an ETA as it goes. It used to log nothing at all until it finished,
+            which is indistinguishable from a hang: the progress bar stops at
+            the step before an evaluation point and the next line appears
+            minutes later. The measured per-example cost is kept in
+            ``_eval_ctx`` so the callers can project the evaluation time that
+            is still ahead of them.
+            """
             import torch
 
             mdl = _eval_ctx["model"]
@@ -808,6 +918,8 @@ def main() -> None:
             mdl.eval()
             total_nll = 0.0
             total_tokens = 0
+            n_examples = len(dataset)
+            progress = Progress(f"{label} eval", n_examples, log=logger)
             with torch.no_grad():
                 for example in dataset:
                     ids = tok(
@@ -815,6 +927,7 @@ def main() -> None:
                         truncation=True, max_length=config["max_seq_length"],
                     ).input_ids.to(mdl.device)
                     if ids.shape[1] < 2:
+                        progress.advance()
                         continue
                     causal = mdl.get_base_model()  # Qwen3ForCausalLM (fast)
                     hidden = causal.model(input_ids=ids).last_hidden_state[0]  # [seq, hidden]
@@ -830,7 +943,16 @@ def main() -> None:
                         total_tokens += int(targets.numel())
                         del logits, targets, loss_sum
                     del hidden, ids
+                    progress.advance()
+            progress.close()
             mdl.train()
+            if n_examples:
+                _eval_ctx["sec_per_example"] = progress.elapsed / n_examples
+                logger.info(
+                    "%s pass: %d examples, %d tokens, %.2f s per example",
+                    label, n_examples, total_tokens,
+                    _eval_ctx["sec_per_example"],
+                )
             return total_nll / total_tokens if total_tokens else None
 
         class EvalEarlyStoppingCallback(TrainerCallback):
@@ -848,6 +970,27 @@ def main() -> None:
                 self.threshold = threshold
                 self.history: list[dict[str, float]] = []
 
+            def on_train_begin(self, args: Any, state: Any, control: Any, **kwargs: Any) -> Any:
+                _ = args, kwargs
+                # Every eval point is also appended to the trainer state's
+                # log_history, which is written into each checkpoint. A resumed
+                # run therefore inherits the points the interrupted one already
+                # scored: early stopping keeps the same best, and the curve in
+                # training_summary.json stays whole instead of starting halfway.
+                restored = [
+                    {"step": int(e["step"]), "eval_loss": float(e["eval_loss"])}
+                    for e in getattr(state, "log_history", [])
+                    if isinstance(e, dict) and "eval_loss" in e and "step" in e
+                ]
+                if restored:
+                    self.history = restored
+                    logger.info(
+                        "Carried %d earlier eval point(s) over from the "
+                        "checkpoint (best %.4f)", len(restored),
+                        min(p["eval_loss"] for p in restored),
+                    )
+                return control
+
             def on_step_end(
                 self, args: Any, state: Any, control: Any, **kwargs: Any
             ) -> Any:
@@ -856,15 +999,28 @@ def main() -> None:
                     return control
                 if state.global_step % max(int(training_args.eval_steps or 1), 1) != 0:
                     return control
-                loss = _chunked_eval_loss(eval_dataset)
+                loss = _chunked_eval_loss(eval_dataset, label="val")
                 if loss is None:
                     return control
-                self.history.append({"step": int(state.global_step), "eval_loss": loss})
+                point = {"step": int(state.global_step), "eval_loss": loss}
+                self.history.append(point)
+                # log_history is restored on resume (see on_train_begin), so the
+                # point has to live in both places.
+                state.log_history.append(dict(point))
                 best = min(p["eval_loss"] for p in self.history)
                 state.best_metric = best
+                # Project the evaluation time left from the cost this pass just
+                # measured, so the wait between points is a number rather than
+                # a guess (and so a slow pass is visible as one).
+                per_example = _eval_ctx["sec_per_example"] or 0.0
+                points_left = max(0, n_evals - len(self.history))
                 logger.info(
-                    "eval_loss at step %d: %.4f (best %.4f)",
-                    state.global_step, loss, best,
+                    "eval_loss at step %d: %.4f (best %.4f); %.2f s per "
+                    "example, ~%.0f min of evaluation still to come (%d more "
+                    "point(s), then the test pass)",
+                    state.global_step, loss, best, per_example,
+                    (points_left * val_count + test_count) * per_example / 60.0,
+                    points_left,
                 )
                 recent = self.history[-(self.patience + 1):]
                 if len(recent) > self.patience and all(
@@ -908,9 +1064,17 @@ def main() -> None:
             callbacks=callbacks,
         )
 
+        # Continue an interrupted run from its last checkpoint. A 500-step run
+        # is over two hours on this card, so a lost terminal or a power cut
+        # should cost the steps since the last save, not the whole run.
+        resume_from = (
+            None if args.no_resume
+            else find_resume_checkpoint(config["output_dir"], config["max_steps"])
+        )
+
         logger.info("Starting training...")
         train_start = time.monotonic()
-        trainer.train()
+        trainer.train(resume_from_checkpoint=resume_from)
         train_seconds = time.monotonic() - train_start
         # Whether early stopping fired (before trainer is deleted below).
         # The Trainer sets should_training_stop on normal completion as
@@ -956,7 +1120,7 @@ def main() -> None:
         test_metrics: dict[str, float] | None = None
         if test_dataset is not None:
             logger.info("Evaluating the held-out test split (%d examples)...", test_count)
-            test_loss = _chunked_eval_loss(test_dataset)
+            test_loss = _chunked_eval_loss(test_dataset, label="test")
             test_metrics = {}
             if test_loss is not None:
                 test_metrics["test_eval_loss"] = test_loss
@@ -1013,6 +1177,11 @@ def main() -> None:
                 "skip_merged_save": args.skip_merged_save,
                 "split_load": split_load,
                 "tokenized_cache": str(TOKENIZED_CACHE_DIR),
+                # None for a run that trained from the base model, the
+                # checkpoint it continued from otherwise. The loss histories
+                # below then span the interrupted run and this one, while
+                # train_seconds covers only this segment.
+                "resumed_from": str(resume_from) if resume_from else None,
             },
             "dataset_examples": train_count,
             "train_loss_final": train_loss_final,

@@ -288,10 +288,19 @@ mechanisms keep the splits honest:
   3090 MHz maximum, drawing 55 W, so it is fed small kernels and idles
   between them. Batching the eval forwards was measured and rejected: batch 4
   is 10% faster (1.040 to 0.940 s per example) and takes VRAM to 7.18 GB of
-  8.15 GB.
-- **Sampled evaluation**: `--eval-sample` (default 2000) and `--test-sample`
-  (default 2000) cap what the callback scores, cutting the projection from
-  6.92 h to 3.75 h. Every evaluation point scores the *same* seeded subset in
+  8.15 GB. Re-measured on the shipped defaults it costs 0.63 s per example,
+  so one 256-example point is 2m41s.
+- **Evaluation progress**: a pass used to log nothing until it finished, so a
+  run that reached an evaluation point printed no line for 20 minutes and read
+  as a hang. Every pass now logs an item count with a rate and an ETA (the
+  `Progress` counter in
+  [`data/processing_scripts/progress.py`](../data/processing_scripts/progress.py)),
+  and the eval-loss line reports the measured cost per example plus the
+  evaluation time still to come.
+- **Sampled evaluation**: `--eval-sample` (default 256) and `--test-sample`
+  (default 512) cap what the callback scores, cutting the projection from
+  6.92 h to 31 min. The test split is scored once, so it draws twice the
+  per-point sample. Every evaluation point scores the *same* seeded subset in
   the same order, so the curve compares like with like. `--eval-budget-min`
   (default 300) is a ceiling, not a control: the run projects its evaluation
   cost, logs it, and warns when the chosen sizes exceed it, but never
@@ -301,6 +310,22 @@ mechanisms keep the splits honest:
   read as a full-split loss. Losses from this version onward are therefore
   comparable run-to-run but not to the full-split figures in the v0.3.0
   result.
+- **Resuming**: a 500-step run is over two hours on this card, so an
+  interrupted one continues from its last checkpoint by default. The
+  optimizer, scheduler, and RNG state are saved with every checkpoint
+  (`save_only_model` is off, 45 MB more per checkpoint) because the weights
+  alone would restart the optimizer and the LR schedule on top of trained
+  weights. [`find_resume_checkpoint`](../training/train_unsloth.py) picks the
+  highest-numbered checkpoint in `--output-dir` and only when it is below the
+  step budget and carries that state; a missing piece is reported and the run
+  starts from the base model rather than resuming blind. Every eval point is
+  also written to the trainer state's `log_history`, which each checkpoint
+  carries, so a resumed run inherits the points the interrupted one scored:
+  early stopping keeps the same best and `eval_loss_history` stays whole.
+  `training_summary.json` records `experiment.resumed_from`, and its
+  `train_seconds` covers only the segment that this process ran. `--no-resume`
+  skips the lookup, and raising `--max-steps` turns a finished run into a
+  resumable one.
 - **Logging**: the module configures its own logger instead of calling
   `logging.basicConfig`. Importing unsloth installs a root handler and sets
   the root level to WARNING, which made `basicConfig` a silent no-op and

@@ -102,11 +102,18 @@ records from ada-eval.
   trl's own 4-minute tokenization pass is skipped because the column marks the
   dataset processed); the eval splits stay text for the chunked eval callback
   and are sampled by `--eval-sample` / `--test-sample` so a run's evaluation
-  fits `--eval-budget-min`. Table keys cover split content, chat template,
-  tokenizer vocabulary, truncation length, and a pipeline version; tables a run
-  did not touch are pruned. The no-val-file fallback carve keeps records in
-  memory and says so in the summary. It configures its own logger, because
-  importing unsloth makes `logging.basicConfig` a no-op.
+  fits `--eval-budget-min`.   Each eval pass logs an item count with a rate and
+  an ETA (a multi-minute pass that logs nothing reads as a hang) and the
+  eval-loss line projects the evaluation time still to come. A run interrupted
+  halfway continues from its last checkpoint by default (`--no-resume` opts
+  out): checkpoints keep the optimizer, scheduler, and RNG state, and the eval
+  points already scored ride along in the trainer state, so early stopping and
+  the loss curve survive the interruption. Table keys cover split content,
+  chat template, tokenizer vocabulary, truncation length, and a pipeline
+  version; tables a run did not touch are pruned. The no-val-file
+  fallback carve keeps records in memory and says so in the summary. It
+  configures its own logger, because importing unsloth makes
+  `logging.basicConfig` a no-op.
 - [`eval/generate.py`](eval/generate.py) - batch generation for the fine-tuned
   and base models.
 - [`eval/baseline_eval.py`](eval/baseline_eval.py) - reference-based scoring:
@@ -265,6 +272,7 @@ q3as/
            v0.2.0.md
            v0.3.0.md
            v0.4.0.md
+           v0.4.1.md
        results/
            README.md
            result-data-v0.1.0.json

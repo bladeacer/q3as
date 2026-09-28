@@ -14,6 +14,7 @@ patched transformers, neither of which a unit test should need.
 from __future__ import annotations
 
 import json
+import math
 import sys
 import types
 from pathlib import Path
@@ -26,6 +27,12 @@ if "unsloth" not in sys.modules:
     sys.modules["unsloth"] = types.ModuleType("unsloth")
 
 import train_unsloth as tr
+
+
+def _args(monkeypatch) -> object:
+    """The shipped defaults, parsed with no command-line flags."""
+    monkeypatch.setattr(sys, "argv", ["train_unsloth.py"])
+    return tr.parse_args()
 
 
 class FakeTokenizer:
@@ -323,6 +330,83 @@ class TestSubsample:
 
 
 # --------------------------------------------------------------------------- #
+# find_resume_checkpoint
+# --------------------------------------------------------------------------- #
+
+
+def make_checkpoint(root: Path, step: int, *, full: bool = True,
+                    state: dict | None = None) -> Path:
+    """A checkpoint directory shaped like the one the Trainer writes."""
+    path = root / f"checkpoint-{step}"
+    path.mkdir(parents=True)
+    if state is None:
+        state = {"global_step": step, "log_history": []}
+    (path / "trainer_state.json").write_text(json.dumps(state), encoding="utf-8")
+    if full:
+        (path / "scheduler.pt").write_bytes(b"sched")
+        (path / "optimizer.pt").write_bytes(b"opt")
+    return path
+
+
+class TestFindResumeCheckpoint:
+    def test_returns_nothing_without_an_output_directory(self, tmp_path):
+        assert tr.find_resume_checkpoint(tmp_path / "absent", 500) is None
+
+    def test_returns_nothing_without_a_checkpoint(self, tmp_path):
+        (tmp_path / "checkpoint-100").mkdir()  # not a checkpoint name
+        assert tr.find_resume_checkpoint(tmp_path, 500) is None
+
+    def test_picks_the_last_incomplete_checkpoint(self, tmp_path):
+        make_checkpoint(tmp_path, 100)
+        want = make_checkpoint(tmp_path, 300)
+        make_checkpoint(tmp_path, 200)
+        assert tr.find_resume_checkpoint(tmp_path, 500) == want
+
+    def test_ignores_a_checkpoint_that_reached_the_budget(self, tmp_path):
+        make_checkpoint(tmp_path, 500)
+        assert tr.find_resume_checkpoint(tmp_path, 500) is None
+
+    def test_ignores_a_checkpoint_past_the_budget(self, tmp_path):
+        # Raising the budget turns the same checkpoint into a resumable one.
+        make_checkpoint(tmp_path, 500)
+        assert tr.find_resume_checkpoint(tmp_path, 750) is not None
+
+    def test_rejects_a_checkpoint_without_optimizer_state(self, tmp_path):
+        # save_only_model writes the weights alone. Resuming from that would
+        # restart the optimizer and the LR schedule on trained weights, which
+        # is worse than starting over.
+        make_checkpoint(tmp_path, 300, full=False)
+        assert tr.find_resume_checkpoint(tmp_path, 500) is None
+
+    def test_rejects_an_unreadable_trainer_state(self, tmp_path):
+        make_checkpoint(tmp_path, 300, state={"global_step": "many"})
+        assert tr.find_resume_checkpoint(tmp_path, 500) is None
+
+    def test_rejects_a_corrupt_trainer_state(self, tmp_path):
+        path = make_checkpoint(tmp_path, 300)
+        (path / "trainer_state.json").write_text("{not json", encoding="utf-8")
+        assert tr.find_resume_checkpoint(tmp_path, 500) is None
+
+    def test_rejects_a_step_zero_checkpoint(self, tmp_path):
+        make_checkpoint(tmp_path, 0)
+        assert tr.find_resume_checkpoint(tmp_path, 500) is None
+
+
+class TestCheckpointConfig:
+    def _config(self, monkeypatch, **overrides):
+        monkeypatch.setattr(sys, "argv", ["train_unsloth.py", *overrides.pop("argv", [])])
+        args = tr.parse_args()
+        return tr.setup_training_environment(args, has_val=True)
+
+    def test_checkpoints_keep_the_state_a_resume_needs(self, monkeypatch):
+        assert self._config(monkeypatch)["save_only_model"] is False
+
+    def test_save_steps_lands_on_every_evaluation_point(self, monkeypatch):
+        config = self._config(monkeypatch)
+        assert config["save_steps"] % config["eval_steps"] == 0
+
+
+# --------------------------------------------------------------------------- #
 # project_eval_minutes
 # --------------------------------------------------------------------------- #
 
@@ -338,10 +422,21 @@ class TestProjectEvalMinutes:
         with_test = tr.project_eval_minutes(2000, 2000, 10)
         assert with_test > base
 
-    def test_defaults_stay_under_the_five_hour_ceiling(self):
+    def test_defaults_stay_under_the_five_hour_ceiling(self, monkeypatch):
         # 500 steps at eval-steps 50 is 10 evaluations.
-        projected = tr.project_eval_minutes(2000, 2000, 10)
+        args = _args(monkeypatch)
+        projected = tr.project_eval_minutes(
+            args.eval_sample, args.test_sample, math.ceil(500 / args.eval_steps),
+        )
         assert projected < 300, f"default eval budget is {projected:.0f} min"
+
+    def test_one_default_evaluation_point_is_minutes_not_an_hour(self, monkeypatch):
+        # The stall this guards against: a pass over the seeded subset has to
+        # log progress and finish in a few minutes, not sit silent for the 20
+        # minutes a 2,000-example pass costs.
+        args = _args(monkeypatch)
+        per_point = tr.project_eval_minutes(args.eval_sample, 0, 1)
+        assert per_point < 10, f"one evaluation point projects to {per_point:.0f} min"
 
     def test_full_splits_would_blow_the_ceiling(self):
         # Documents why the sample defaults exist at all.
