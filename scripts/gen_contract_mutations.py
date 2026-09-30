@@ -286,7 +286,16 @@ def _pick(seq: tuple[str, ...], key: str) -> str:
 def instantiate(template: dict[str, Any], index: int) -> dict[str, Any]:
     """Build one instance dict (unit, typ, spec, body, template)."""
     unit = _pick(_UNIT_NAMES, template["name"] + str(index))
-    typ = template["types"][index % len(template["types"])] if template["types"] else ""
+    types = template["types"]
+    if types:
+        typ = types[index % len(types)]
+    elif template.get("integer_family"):
+        # Typeless templates (the loop families) rotate through the integer
+        # family anyway, via the {typ2} widening target: the widening type is
+        # the variety axis when the profile has no {typ} placeholder.
+        typ = ""
+    else:
+        typ = ""
     subs = {"unit": unit, "typ": typ, "typ2": template.get("typ2", "")}
     decl = template["decl"].format(**subs)
     contract = template["contract"].format(**subs)
@@ -658,8 +667,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Generate gnatprove-verified contract training turns.")
     parser.add_argument("--output", type=Path, default=OUTPUT)
     parser.add_argument(
-        "--limit", type=int, default=60,
-        help="approximate number of instances to verify (about ten per template)",
+        "--limit", type=int, default=240,
+        help="approximate number of instances to verify (24 per template family)",
     )
     parser.add_argument("--force", action="store_true", help="regenerate even when the inputs are unchanged")
     parser.add_argument("-v", "--verbose", action="store_true")

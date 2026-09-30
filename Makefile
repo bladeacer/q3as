@@ -1,4 +1,4 @@
-.PHONY: help setup sync download build-dataset parse-data gen-contracts check-integrity check-links train generate eval eval-pipeline eval-report bump-version prove ast-deps ada-env test lint validate-defects agents-tree fetch-sources check-sources update-sources clean clean-model all check-model
+.PHONY: help setup sync download build-dataset parse-data gen-contracts gen-verified-spark check-integrity check-links train generate eval eval-pipeline eval-report bump-version prove ast-deps ada-env test lint validate-defects agents-tree fetch-sources check-sources update-sources clean clean-model all check-model
 
 # Prerequisite chain for the dataset: parser outputs (docs chunks, AST units,
 # contract turns) must exist before the builder runs. Every stage fingerprints
@@ -9,7 +9,8 @@
 DATASET_EXTRA_TURNS := \
 	data/processed/docs_chunks.jsonl \
 	data/processed/ada_ast_units.jsonl \
-	data/processed/contract_mutations.jsonl
+	data/processed/contract_mutations.jsonl \
+	data/processed/verified_spark.jsonl
 
 # Worker processes for the parsers and the builder. 0 means one per CPU core,
 # which is what every script documents and what they do when the flag is
@@ -29,7 +30,7 @@ FORCE_FLAG = $(if $(FORCE),--force,)
 .PHONY: $(DATASET_EXTRA_TURNS)
 
 $(DATASET_EXTRA_TURNS):
-	$(MAKE) parse-data gen-contracts
+	$(MAKE) parse-data gen-contracts gen-verified-spark
 
 # bash so `set -o pipefail` works for tee'd targets (training.log capture).
 SHELL := /bin/bash
@@ -131,7 +132,7 @@ check-model: ## Check if model exists; download if missing
 		$(MAKE) download; \
 	fi
 
-build-dataset: parse-data gen-contracts ## Build the training dataset from cached Ada source trees
+build-dataset: parse-data gen-contracts gen-verified-spark ## Build the training dataset from cached Ada source trees
 	## Ada code sources (cache): adacovex, Ada_CRDT, Ada-83-TLALOC,
 	## plus the RobertBoettcherSF Ada-Algorithms monorepo (MIT).
 	## Doc sources (cache): learn, training_material (CC-BY-4.0). Guidance in system
@@ -201,7 +202,7 @@ test: ## Run the Python unit tests
 
 lint: ## Run ruff and mypy over the project sources, then check markdown links and the AGENTS tree
 	uv run ruff check data/processing_scripts/ scripts/ eval/ tests/ tools/
-	MYPYPATH=data/processing_scripts uv run mypy data/processing_scripts/build_dataset.py data/processing_scripts/parse_docs.py data/processing_scripts/parse_ada_ast.py data/processing_scripts/eval_guard.py data/processing_scripts/code_variants.py data/processing_scripts/stage_state.py data/processing_scripts/progress.py eval/ada_eval_common.py eval/baseline_eval.py scripts/alire_env.py scripts/bump_version.py scripts/build_libadalang.py scripts/gen_eval_report.py scripts/gen_agents_tree.py scripts/gen_contract_mutations.py scripts/fetch_repos.py scripts/collect_cap_results.py scripts/make_probe_splits.py tools/check-links.py
+	MYPYPATH=data/processing_scripts uv run mypy data/processing_scripts/build_dataset.py data/processing_scripts/parse_docs.py data/processing_scripts/parse_ada_ast.py data/processing_scripts/eval_guard.py data/processing_scripts/code_variants.py data/processing_scripts/stage_state.py data/processing_scripts/progress.py eval/ada_eval_common.py eval/baseline_eval.py scripts/alire_env.py scripts/bump_version.py scripts/build_libadalang.py scripts/gen_eval_report.py scripts/gen_agents_tree.py scripts/gen_contract_mutations.py scripts/gen_verified_spark.py scripts/fetch_repos.py scripts/collect_cap_results.py scripts/make_probe_splits.py tools/check-links.py
 	uv run python tools/check-links.py
 	uv run python scripts/gen_agents_tree.py --check
 
@@ -214,6 +215,11 @@ parse-data: fetch-sources ## Run the parser modules into data/processed/ extra J
 
 gen-contracts: ## Generate gnatprove-verified contract turns (skipped when unchanged; FORCE=1)
 	uv run python scripts/gen_contract_mutations.py $(FORCE_FLAG)
+
+# Real SPARK2 units from the source cache, proved with the local gnatprove
+# before they train. A unit that does not prove never becomes a turn.
+gen-verified-spark: ## Verify real SPARK2 units with gnatprove and emit completion turns
+	uv run python scripts/gen_verified_spark.py $(FORCE_FLAG)
 
 check-integrity: ## Fail if any split file contains ada-eval evaluation content
 	uv run python data/processing_scripts/eval_guard.py data/processed/dataset_train.jsonl data/processed/dataset_val.jsonl data/processed/dataset_test.jsonl

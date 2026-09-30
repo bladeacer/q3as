@@ -295,6 +295,7 @@ q3as/
            v0.4.0.md
            v0.4.1.md
            v0.5.0.md
+           v0.6.0.md
        results/
            README.md
            result-data-v0.1.0.json
@@ -356,6 +357,7 @@ q3as/
        test_eval_scoring.py
        test_gen_contract_mutations.py
        test_generate.py
+       test_lab_extraction.py
        test_parsers.py
        test_reporting.py
        test_stage_state.py

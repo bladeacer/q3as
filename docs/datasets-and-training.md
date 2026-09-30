@@ -12,8 +12,9 @@ configured for reproducibility and early stopping.
 | `doc_qa` | Ada code blocks from AdaCore course material, with a completion answer and an STE-compliant explanation answer |
 | `doc_section` | Heading-chunked sections of course material ([`parse_docs.py`](../data/processing_scripts/parse_docs.py)) |
 | `ast_qa` | AST-derived turns ([`parse_ada_ast.py`](../data/processing_scripts/parse_ada_ast.py)): body-from-spec completion, contract reading, **contract writing** (bare spec in, `Pre`/`Post`/`Global`/`Depends` declaration out), and constrained types. The parser emits these as `ast_impl`, `ast_contract`, `ast_contract_write` and `ast_type`; the builder records them under the single dataset kind `ast_qa`, which is the name that appears in `dataset_metadata.json` |
-| `toolchain_qa` | Question/answer turns from the AdaCore agent skills |
-| `contract_synth` | gnatprove-verified synthetic contract turns ([`scripts/gen_contract_mutations.py`](../scripts/gen_contract_mutations.py)): contract writing, why-weakened-contracts-fail, and fix turns, plus body completion for the every-path-assignment family. Ten template families map one to one onto the eval proof blockers (overflow guards, out-parameter initialization plus postcondition, raise guards, loop invariants with overflow widening, `Depends` swaps, `Global` data flow, clamp ranges, even division) |
+| `toolchain_qa` | Question/answer turns from the AdaCore agent skills, including the proof-workflow references (triage of unproved checks, hint strength ordering, refactoring for proof, overflow patterns, command-line levels) |
+| `contract_synth` | gnatprove-verified synthetic contract turns ([`scripts/gen_contract_mutations.py`](../scripts/gen_contract_mutations.py)): contract writing, why-weakened-contracts-fail, and fix turns, plus body completion for the every-path-assignment family. Ten template families map one to one onto the eval proof blockers (overflow guards, out-parameter initialization plus postcondition, raise guards, loop invariants with overflow widening, `Depends` swaps, `Global` data flow, clamp ranges, even division). Groups are exempt from the AST-structural cap: the per-family shape repetition is the curriculum, every instance is prover-verified, and the whole family stays under 1% of the corpus |
+| `lab_pair` | Completion turns from the training-material labs: each lab ships a `prompt/` skeleton tree beside an `answer/` solution tree, and a turn presents the prompt file and answers with the solution. The format is the one the evaluation scores (declaration in, completed unit out); 47 labs, 129 turns |
 | `ast_defect` / `variant` | Defect and renamed-variant turns derived from ingested parser records (same split group as their source record) |
 
 ### How AST units are extracted
@@ -232,14 +233,19 @@ mechanisms keep the splits honest:
    instrumented build the metadata comes from, classifying every turn and every
    drop). Prose turns are untouched: doc QA, doc sections, and toolchain QA
    carry no Ada fence, so they have no structural signature and only
-   byte-identical records are ever dropped (5,344 of 5,346 survived). Defect
-   turns were not: a defect turn's first fence is its *corrected* code, which is
-   the same code its original record answers with, so an unkeyed signature put
-   both in one bucket. Plain copies filled the bucket, and across the 24,279
-   defect turns the AST parser drives, the cap cut 7,982 of them, 74 (family,
-   code shape) combinations lost every copy they had, and 1,291 code shapes lost
-   at least one of the seventeen families outright. Per-family survival was as
-   low as 29% (`old_misuse`) and 33% (`contract`).
+   byte-identical records are ever dropped (5,344 of 5,346 survived).
+   `contract_synth` groups are exempt by prefix: the per-family shape
+   repetition is the curriculum, every instance is gnatprove-verified, and the
+   family is a fixed ~700-turn budget rather than an unbounded extractor, so
+   the balance concern the cap exists for does not arise (at the shipped cap
+   of 10, more than half the scaled contract turns would have been cut).
+   Defect turns were not exempt: a defect turn's first fence is its *corrected*
+   code, which is the same code its original record answers with, so an
+   unkeyed signature put both in one bucket. Plain copies filled the bucket,
+   and across the 24,279 defect turns the AST parser drives, the cap cut 7,982
+   of them, 74 (family, code shape) combinations lost every copy they had, and
+   1,291 code shapes lost at least one of the seventeen families outright.
+   Per-family survival was as low as 29% (`old_misuse`) and 33% (`contract`).
 
    The defect is now part of the cap key
    (`_ast_structural_signature`), so the cap thins repeats of one diagnosis on

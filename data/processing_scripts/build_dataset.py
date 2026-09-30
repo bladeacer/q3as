@@ -455,8 +455,11 @@ _SKILL_DOC_PATTERNS: dict[str, list[str]] = {
 
 # AdaCore skills: keep SKILL.md files compact in prompts, but load a
 # bounded subset of reference files so toolchain QA turns have substance.
-_ADACORE_REF_LIMIT = 6
-_ADACORE_REF_MAX_CHARS = 6000
+_ADACORE_REF_LIMIT = 12
+# 24K covers the largest reference doc whole (the proof workflow guide is
+# 21.6K); the old 6K cap cut mid-document and hid sections the QA anchors
+# point at, so those questions silently produced no turn.
+_ADACORE_REF_MAX_CHARS = 24000
 
 
 def _collect_skill_docs(root: Path, dir_name: str) -> list[Path]:
@@ -587,6 +590,109 @@ def _skill_display_name(dir_name: str, path: Path) -> str:
     return path.stem
 
 
+# Assurance-ladder question set over the compliance and proof docs of the
+# SPARK Platinum sources (Ada_CRDT docs/proof + docs/compliance, adacovex
+# docs/). Each entry: (question, regex locating the answer section, fallback
+# keyword). The docs state the ladder criteria, the zero-justification
+# doctrine, and the skip taxonomy in the projects' own words.
+_SPARK_ASSURANCE_QUESTIONS: list[tuple[str, str, str]] = [
+    (
+        "What does each SPARK assurance level require?",
+        r"\|\s*Level\s*\|\sCriter",
+        "assurance level",
+    ),
+    (
+        "Why does the project hold justified checks at zero?",
+        r"A justified check is",
+        "justified check",
+    ),
+    (
+        "When should a unit be excluded from SPARK analysis, and how is the exclusion documented?",
+        r"## Why a unit is skipped",
+        "skipped",
+    ),
+    (
+        "What must a proof record state so a later campaign can compare with it?",
+        r"## The current ledger",
+        "ledger",
+    ),
+    (
+        "How does continuous integration gate on a SPARK assurance level?",
+        r"require-spark",
+        "spark",
+    ),
+]
+
+# Ada_CRDT keeps its assurance docs under docs/proof and docs/compliance;
+# adacovex keeps the matching material (CI gating, dashboard, ledger audit)
+# under docs/usage and docs/archive. Only existing directories contribute.
+_SPARK_ASSURANCE_DOC_DIRS = ("docs/proof", "docs/compliance", "docs/usage", "docs/archive")
+
+
+def load_spark_assurance_docs(extra_input_dirs: list[Path]) -> str:
+    """Compliance and proof documentation from the SPARK Platinum sources.
+
+    Reads the assurance-ladder pages (level criteria, justification doctrine,
+    skip taxonomy, proof ledgers, CI gating) from each input repo's docs
+    trees. These repos document *how a codebase reaches and keeps Platinum*,
+    which is exactly the process knowledge the eval's proof failures need,
+    and none of it is source code, so the code extractors never see it.
+    """
+    parts: list[str] = []
+    for root in extra_input_dirs:
+        if not root.exists():
+            continue
+        for sub in _SPARK_ASSURANCE_DOC_DIRS:
+            doc_dir = root / sub
+            if not doc_dir.is_dir():
+                continue
+            for doc in sorted(doc_dir.rglob("*.md")):
+                try:
+                    text = doc.read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    continue
+                if text.strip():
+                    rel = doc.relative_to(root)
+                    parts.append(f"### {root.name}/{rel}\n\n{text}")
+    return "\n\n".join(parts)
+
+
+def build_spark_assurance_turns(
+    corpus: str,
+    ste_rules: str,
+    glossary: str,
+) -> list[tuple[str, dict[str, list[dict[str, str]]]]]:
+    """Assurance-ladder QA turns from the Platinum repos' compliance docs.
+
+    Each question is answered from the section of the source documentation
+    that states the practice, STE-cleaned with code fences intact. One group
+    per question.
+    """
+    grouped: list[tuple[str, dict[str, list[dict[str, str]]]]] = []
+    for idx, (question, anchor_regex, fallback) in enumerate(_SPARK_ASSURANCE_QUESTIONS):
+        chunk = _extract_answer_chunk(corpus, anchor_regex, fallback)
+        if not chunk:
+            logger.warning("No assurance-doc section found for: %s", question)
+            continue
+        answer = _ste_clean_markdown(chunk)
+        intro = (
+            "This answer summarizes the assurance documentation of SPARK "
+            "Platinum projects. Follow the stated criteria exactly."
+        )
+        assistant_msg = sanitize_prose(intro) + "\n\n" + answer
+        grouped.append((f"assurance:{idx}", {
+            "messages": [
+                {
+                    "role": "system",
+                    "content": _compose_system_prompt("SPARK 2014", ste_rules, glossary),
+                },
+                {"role": "user", "content": question},
+                {"role": "assistant", "content": assistant_msg},
+            ],
+        }))
+    return grouped
+
+
 def load_adacore_toolchain_docs() -> dict[str, str]:
     """Load the AdaCore skills (../skills) for toolchain QA generation.
 
@@ -610,7 +716,7 @@ def load_adacore_toolchain_docs() -> dict[str, str]:
                 chunks.append(skill_md.read_text(encoding="utf-8"))
             except (UnicodeDecodeError, OSError):
                 pass
-        refs = sorted((skill_dir / "references").glob("*.md")) if (skill_dir / "references").is_dir() else []
+        refs = sorted((skill_dir / "references").rglob("*.md")) if (skill_dir / "references").is_dir() else []
         for ref in refs[:_ADACORE_REF_LIMIT]:
             try:
                 text = ref.read_text(encoding="utf-8")
@@ -1895,6 +2001,162 @@ def extract_ada_code_blocks(doc_root: Path, imap=None) -> list[str]:
     return blocks
 
 
+def _looks_like_ada_file(code: str) -> bool:
+    """Cheap Ada compilation-unit shape check for whole files."""
+    return bool(re.search(
+        r"\b(?:procedure|function|package(\s+body)?|generic|task(\s+body)?|protected(\s+body)?)\b",
+        code,
+    ))
+
+
+def discover_lab_pairs(
+    doc_roots: list[Path],
+) -> list[dict[str, Any]]:
+    """Find prompt/ answer/ lab twins under documentation roots.
+
+    AdaCore training-material labs ship a ``prompt/`` tree (the skeleton the
+    student starts from) beside an ``answer/`` tree (the solution). The file
+    names match one to one. This is exactly the completion format the
+    evaluation measures - declaration in, completed unit out - and none of
+    it reached the dataset before: the doc path reads only RST/Markdown
+    fences, never the lab source files.
+
+    Returns one dict per lab file pair: the prompt and answer text, the
+    relative file name, and the lab directory name (the split group key).
+    """
+    pairs: list[dict[str, Any]] = []
+    for root in doc_roots:
+        if not root.exists():
+            continue
+        for prompt_dir in sorted(root.rglob("prompt")):
+            if not prompt_dir.is_dir():
+                continue
+            answer_dir = prompt_dir.parent / "answer"
+            if not answer_dir.is_dir():
+                continue
+            lab_name = prompt_dir.parent.name
+            for prompt_file in sorted(prompt_dir.rglob("*")):
+                if not prompt_file.is_file():
+                    continue
+                rel = prompt_file.relative_to(prompt_dir)
+                answer_file = answer_dir / rel
+                if not answer_file.is_file():
+                    continue
+                try:
+                    prompt_text = prompt_file.read_text(encoding="utf-8", errors="replace")
+                    answer_text = answer_file.read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    continue
+                pairs.append({
+                    "prompt": prompt_text,
+                    "answer": answer_text,
+                    "name": rel.as_posix(),
+                    "lab": lab_name,
+                })
+    return pairs
+
+
+def _lab_change_summary(prompt_text: str, answer_text: str) -> str | None:
+    """One STE sentence set describing what the solution adds, or None.
+
+    Derived from the diff only, so the explanation stays factual: the
+    subprograms the answer introduces, plus the changed line count. Returns
+    None when the diff carries no recognisable addition.
+    """
+    import difflib
+
+    prompt_lines = prompt_text.splitlines()
+    answer_lines = answer_text.splitlines()
+    added = [
+        line.strip()
+        for line in difflib.unified_diff(prompt_lines, answer_lines, lineterm="", n=0)
+        if line.startswith("+") and not line.startswith("+++")
+    ]
+    if not added:
+        return None
+    added_text = "\n".join(added)
+    names: list[str] = []
+    for match in re.finditer(r"\b(?:procedure|function)\s+(\w+)", added_text):
+        name = match.group(1)
+        if name not in names:
+            names.append(name)
+    count = len(added)
+    if names:
+        listing = ", ".join(names[:4]) + (" and others" if len(names) > 4 else "")
+        head = f"The solution completes {listing}."
+    else:
+        head = "The solution fills in the statements the skeleton left out."
+    lines_word = "line" if count == 1 else "lines"
+    tail = f"{head} It adds {count} {lines_word} against the skeleton."
+    if not names and added:
+        # No subprogram boundary in the diff: quote the first added line so
+        # the explanation stays concrete. Code text is exempt from the STE
+        # word rules. The unified-diff marker prefix is not code, so strip
+        # it before quoting.
+        quote = added[0].lstrip("+ ").rstrip(";").strip()
+        if len(quote) > 60:
+            quote = quote[:57] + "..."
+        tail += f" The first change is: {quote}."
+    return tail
+
+
+def build_lab_pair_turns(
+    pairs: list[dict[str, Any]],
+    guidance_text: str = "",
+) -> list[tuple[str, dict[str, list[dict[str, str]]]]]:
+    """Build completion turns from lab prompt/answer file twins.
+
+    A pair whose files are identical is a no-op lab and is skipped. Ada
+    files become spec/body completion turns in the shape of the evaluation
+    set: the prompt file is the context, the answer's diff against the
+    prompt is the target. Non-Ada files (project files, plain text) are
+    skipped. The whole lab shares one group so the split never separates a
+    prompt from its answer.
+    """
+    grouped: list[tuple[str, dict[str, list[dict[str, str]]]]] = []
+    for pair in pairs:
+        prompt_text, answer_text = pair["prompt"], pair["answer"]
+        if prompt_text.strip() == answer_text.strip():
+            continue
+        name = str(pair["name"])
+        if not name.endswith((".ads", ".adb")):
+            continue
+        if not _looks_like_ada_file(prompt_text) and not _looks_like_ada_file(answer_text):
+            continue
+        lab = str(pair["lab"])
+        group = f"lab:{zlib.crc32(lab.encode('utf-8'))}"
+        cleaned_prompt = sanitize_content(strip_noisy_comments(prompt_text))
+        cleaned_answer = sanitize_content(strip_noisy_comments(answer_text))
+        user_msg = (
+            f"Complete the Ada source file {name}. The code shows the lab "
+            "skeleton; write the full solution as one compilation unit.\n\n"
+            f"```ada\n{cleaned_prompt}\n```"
+        )
+        grouped.append((group, {
+            "messages": [
+                {"role": "user", "content": user_msg},
+                {"role": "assistant", "content": f"```ada\n{cleaned_answer}\n```"},
+            ],
+        }))
+        # Explanation twin: what changed from skeleton to solution, derived
+        # from the diff, so the model also learns to describe a completion,
+        # not only to produce one.
+        summary = _lab_change_summary(prompt_text, answer_text)
+        if summary:
+            grouped.append((group, {
+                "messages": [
+                    {"role": "user", "content": (
+                        f"Here is a lab skeleton of {name} and its solution. "
+                        "Explain what the solution adds.\n\n"
+                        f"Skeleton:\n```ada\n{cleaned_prompt}\n```\n\n"
+                        f"Solution:\n```ada\n{cleaned_answer}\n```"
+                    )},
+                    {"role": "assistant", "content": summary},
+                ],
+            }))
+    return grouped
+
+
 def build_doc_training_turns(
     doc_blocks: list[str],
     guidance_text: str = "",
@@ -2040,6 +2302,39 @@ _TOOLCHAIN_QUESTIONS: dict[str, list[tuple[str, str, str]]] = {
             "What is the workflow for debugging failed proof obligations?",
             r"## Use Cases",
             "Proving SPARK",
+        ),
+        # Proof-workflow questions anchored on the references/proof/ docs:
+        # they teach the triage and repair moves the eval's unproved
+        # samples need (root causes, refactor-for-proof, command levels).
+        (
+            "How should I triage and fix SPARK proof failures step by step?",
+            r"## Triage",
+            "Triage",
+        ),
+        (
+            "Which hint strengths does gnatprove accept, in what order?",
+            r"## Hint Strength Ordering",
+            "hint",
+        ),
+        (
+            "How do I refactor SPARK code so the prover can discharge it?",
+            r"## Concepts",
+            "provability",
+        ),
+        (
+            "What gnatprove command-line options control proof effort and output?",
+            r"## Proof Levels",
+            "level",
+        ),
+        (
+            "What are the standard patterns for proving overflow checks in SPARK?",
+            r"## Patterns",
+            "overflow",
+        ),
+        (
+            "How do I investigate an unproved check in gnatprove output?",
+            r"## Concepts",
+            "unproved",
         ),
     ],
     "alire": [
@@ -2415,7 +2710,18 @@ def dedup_grouped(
             breakdown["exact"] += 1
             continue
         structural = _ast_structural_signature(turn["messages"])
-        if structural is not None and ast_structural_cap != AST_STRUCTURAL_CAP_UNLIMITED:
+        # Verified synthetic contract turns (group prefix contract-synth:)
+        # are exempt from the structural cap, like prose turns: their
+        # instances deliberately repeat one lesson shape per family (that is
+        # the curriculum), every instance is gnatprove-verified, and even a
+        # full run stays under 1% of the corpus, so the family-balance risk
+        # the cap exists for does not apply. Exact duplicates still drop.
+        exempt = group.startswith("contract-synth:")
+        if (
+            structural is not None
+            and not exempt
+            and ast_structural_cap != AST_STRUCTURAL_CAP_UNLIMITED
+        ):
             count = ast_seen.get(structural, 0)
             if count >= ast_structural_cap:
                 breakdown["ast_structural_capped"] += 1
@@ -2538,6 +2844,8 @@ def _extra_turn_kind(meta: dict[str, Any]) -> str:
         return "ast_qa"
     if kind.startswith("contract_synth_"):
         return "contract_synth"
+    if kind.startswith("spark_verified"):
+        return "spark_verified"
     return "extra"
 
 
@@ -2738,6 +3046,7 @@ def build_dataset(
     glossary = build_technical_term_glossary()
     guidance_text, skills_loaded = load_agent_skill_guidance(guidance_dirs or [])
     toolchain_docs = load_adacore_toolchain_docs()
+    assurance_corpus = load_spark_assurance_docs(extra_input_dirs or [])
 
     logger.info("Agent skills loaded: %s", {k: len(v) for k, v in skills_loaded.items()})
     logger.info("Toolchain skills with QA templates: %s", sorted(toolchain_docs.keys()))
@@ -2867,6 +3176,18 @@ def build_dataset(
         all_grouped.extend(doc_grouped)
         turn_counts["doc_qa"] = turn_counts.get("doc_qa", 0) + len(doc_grouped)
 
+    # Lab completion turns: training_material labs ship prompt/ answer/
+    # file twins (skeleton and solution). The doc path above reads only
+    # RST/Markdown fences, so these Ada files never reached the dataset.
+    with progress_log.phase("lab pairs", logger, roots=len(doc_dirs or [])):
+        lab_pairs = discover_lab_pairs(doc_dirs or [])
+    if lab_pairs:
+        logger.info("Discovered %d lab prompt/answer file pairs", len(lab_pairs))
+        with progress_log.phase("lab completion turns", logger, pairs=len(lab_pairs)):
+            lab_grouped = build_lab_pair_turns(lab_pairs, guidance_text)
+        all_grouped.extend(lab_grouped)
+        turn_counts["lab_pair"] = turn_counts.get("lab_pair", 0) + len(lab_grouped)
+
     if pool:
         pool.close()
         pool.join()
@@ -2877,6 +3198,13 @@ def build_dataset(
             qa_grouped = build_toolchain_qa_turns(toolchain_docs, ste_rules, glossary)
         all_grouped.extend(qa_grouped)
         turn_counts["toolchain_qa"] = turn_counts.get("toolchain_qa", 0) + len(qa_grouped)
+
+    # SPARK assurance-ladder QA from the Platinum sources' compliance docs
+    if assurance_corpus:
+        with progress_log.phase("assurance QA turns", logger, chars=len(assurance_corpus)):
+            assurance_grouped = build_spark_assurance_turns(assurance_corpus, ste_rules, glossary)
+        all_grouped.extend(assurance_grouped)
+        turn_counts["assurance_qa"] = turn_counts.get("assurance_qa", 0) + len(assurance_grouped)
 
     # Pre-built turns from the parser modules (doc chunks, Ada AST units,
     # synthetic contract turns). The per-file stats double as provenance:
