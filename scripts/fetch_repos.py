@@ -109,6 +109,11 @@ class RepoRequest:
             raise ValueError(f"Not a GitHub repository URL: {self.url}")
         return match.group(2)
 
+    @property
+    def name(self) -> str:
+        """owner/repo, the cache identity used by check and update."""
+        return f"{self.owner}/{self.repo}"
+
 
 @dataclass
 class FetchResult:
@@ -169,6 +174,99 @@ def head_commit(owner: str, repo: str, branch: str) -> str | None:
     if isinstance(obj, dict) and isinstance(obj.get("sha"), str):
         return obj["sha"]
     return None
+
+
+def _parse_git_refs(data: bytes) -> tuple[str | None, dict[str, str]] | None:
+    """``(head_sha, refs)`` from a git smart-HTTP ref advertisement.
+
+    Parses the pkt-line stream ``GET .../info/refs?service=git-upload-pack``
+    answers with. head_sha resolves through the ``symref=HEAD:<branch>``
+    capability when present, else through a literal ``HEAD`` entry for a
+    detached head. None when the payload is not an advertisement (a dumb
+    server, an auth page) so the caller can fall back.
+    """
+
+    def pkt_lines(payload: bytes) -> list[str]:
+        lines: list[str] = []
+        position = 0
+        while position + 4 <= len(payload):
+            try:
+                length = int(payload[position:position + 4], 16)
+            except ValueError:
+                return lines
+            if length == 0:  # flush packet
+                position += 4
+                continue
+            if length < 4 or position + length > len(payload):
+                break
+            lines.append(payload[position + 4:position + length].decode("utf-8", errors="replace"))
+            position += length
+        return lines
+
+    lines = pkt_lines(data)
+    if not lines or not lines[0].startswith("# service="):
+        return None
+    refs: dict[str, str] = {}
+    symref_head: str | None = None
+    for text in lines[1:]:
+        if "\x00" in text:
+            ref_line, capabilities = text.split("\x00", 1)
+        else:
+            ref_line, capabilities = text, ""
+        parts = ref_line.strip().split(" ", 1)
+        if len(parts) != 2:
+            continue
+        sha, name = parts[0].strip(), parts[1].strip()
+        if name == "capabilities^{}":
+            continue  # capability listing of an advertisement without refs
+        refs[name] = sha
+        for capability in capabilities.split(" "):
+            if capability.startswith("symref=HEAD:"):
+                symref_head = capability.split(":", 1)[1]
+    if symref_head and symref_head in refs:
+        return refs[symref_head], refs
+    if "HEAD" in refs:
+        return refs["HEAD"], refs
+    # No HEAD entry and no symref: fall back to the branch the server called
+    # first, which GitHub orders as the default branch.
+    for name, sha in refs.items():
+        if name.startswith("refs/heads/"):
+            return sha, refs
+    return None
+
+
+def head_commit_git(owner: str, repo: str) -> str | None:
+    """HEAD commit via the git smart-HTTP protocol, or None.
+
+    This is the ``git ls-remote`` endpoint, not the REST API: it has no
+    hourly quota to exhaust, which matters because a quota-limited API made
+    every head look unknown and pushed ``--update`` into re-fetching the
+    whole cache forever (the commits were never recorded, so nothing could
+    ever compare equal).
+    """
+    url = f"https://github.com/{owner}/{repo}.git/info/refs?service=git-upload-pack"
+    try:
+        data = _http_get(url, timeout=30, retries=1)
+    except (urllib.error.URLError, OSError, TimeoutError):
+        return None
+    parsed = _parse_git_refs(data)
+    return parsed[0] if parsed else None
+
+
+def head_commit_resolve(owner: str, repo: str) -> str | None:
+    """HEAD commit of a repository: git protocol first, REST API fallback.
+
+    The tarball URL follows ``HEAD``, so resolving HEAD directly is what a
+    downloaded or compared cache entry actually contains, and the git
+    protocol endpoint keeps working when the API quota is gone.
+    """
+    sha = head_commit_git(owner, repo)
+    if sha:
+        return sha
+    branch = default_branch(owner, repo)
+    if not branch:
+        return None
+    return head_commit(owner, repo, branch)
 
 
 def default_branch(owner: str, repo: str) -> str | None:
@@ -261,10 +359,18 @@ def _extract_tarball(archive_bytes: bytes, destination: Path) -> None:
             shutil.copytree(extract_dir, destination)
 
 
-def fetch_repo(request: RepoRequest) -> FetchResult:
-    """Fetch one repository into the cache (or report it as cached)."""
+def fetch_repo(request: RepoRequest, force: bool = False) -> FetchResult:
+    """Fetch one repository into the cache (or report it as cached).
+
+    ``force`` re-fetches an entry that is already cached: ``--update`` needs
+    this for repositories whose recorded commit moved (or was never
+    recorded), and ``--refresh`` for a manual re-fetch. Without it the cache
+    short-circuit below would return "cached" for exactly the entries the
+    update flags exist to refresh, and ``--update`` would re-fetch nothing
+    (which is what happened before this parameter existed).
+    """
     directory = target_dir(request)
-    if is_cached(request):
+    if is_cached(request) and not force:
         return FetchResult(request, "cached")
 
     tarball_url = f"https://codeload.github.com/{request.owner}/{request.repo}/tar.gz/HEAD"
@@ -282,9 +388,10 @@ def fetch_repo(request: RepoRequest) -> FetchResult:
         description = api.get("description")
         branch = api.get("default_branch")
     # Record the commit the tarball is the head of, so a later --check can say
-    # whether this cache entry is still current. The tarball URL follows the
-    # default branch, so the head of that branch is what was just downloaded.
-    commit = head_commit(request.owner, request.repo, branch) if branch else None
+    # whether this cache entry is still current. The tarball URL follows
+    # HEAD, so HEAD is what was just downloaded; the git-protocol resolver
+    # keeps working when the REST API quota is exhausted.
+    commit = head_commit_resolve(request.owner, request.repo)
 
     try:
         if directory.exists():
@@ -302,12 +409,23 @@ def fetch_repo(request: RepoRequest) -> FetchResult:
     return FetchResult(request, "fetched", detail)
 
 
-def fetch_all(requests: list[RepoRequest], jobs: int = 8) -> list[FetchResult]:
-    """Fetch *requests* in parallel, preserving input order in the result."""
+def fetch_all(
+    requests: list[RepoRequest], jobs: int = 8, force_names: frozenset[str] | None = None,
+) -> list[FetchResult]:
+    """Fetch *requests* in parallel, preserving input order in the result.
+
+    Repositories whose ``owner/repo`` name is in *force_names* are re-fetched
+    even when cached (see fetch_repo).
+    """
     if not requests:
         return []
+    forced = force_names or frozenset()
+
+    def run(request: RepoRequest) -> FetchResult:
+        return fetch_repo(request, force=request.name in forced)
+
     with concurrent.futures.ThreadPoolExecutor(max_workers=max(jobs, 1)) as pool:
-        results = list(pool.map(fetch_repo, requests))
+        results = list(pool.map(run, requests))
     cached = sum(1 for r in results if r.status == "cached")
     fetched = sum(1 for r in results if r.status == "fetched")
     failed = [r for r in results if r.status == "failed"]
@@ -430,8 +548,7 @@ def check_repo(request: RepoRequest) -> CheckResult:
     cached = _cached_commit(meta, request)
     if meta is None:
         return CheckResult(name, CHECK_ABSENT, "", "")
-    branch = meta.get("default_branch") or default_branch(request.owner, request.repo)
-    head = head_commit(request.owner, request.repo, branch) if branch else None
+    head = head_commit_resolve(request.owner, request.repo)
     if head is None:
         # A failed check must never look like a change: reporting it as
         # current would hide a real update, reporting it as moved would
@@ -527,7 +644,7 @@ def main(argv: list[str] | None = None) -> int:
         if not stale:
             print("Nothing to re-fetch.")
             return 0
-        requests = [r for r in requests if f"{r.owner}/{r.repo}" in stale]
+        requests = [r for r in requests if r.name in stale]
         if any(r.status == CHECK_UNTRACKED for r in checked):
             # An untracked entry has no commit to compare, so it is not known
             # to be current. Re-fetching it is the only way to start tracking
@@ -538,9 +655,18 @@ def main(argv: list[str] | None = None) -> int:
                 "their content may be unchanged.",
                 sum(1 for r in checked if r.status == CHECK_UNTRACKED),
             )
+        # fetch_repo's cache short-circuit must not swallow these: they are
+        # exactly the entries the check said need a re-fetch.
+        force_names = frozenset(stale)
+    elif args.refresh:
+        # Same for a manual refresh: the filtered request list names what to
+        # re-fetch, so every one of them bypasses the cache.
+        force_names = frozenset(r.name for r in requests)
+    else:
+        force_names = frozenset()
 
     logger.info("Fetching %d repositories (%d jobs)", len(requests), args.jobs)
-    results = fetch_all(requests, jobs=args.jobs)
+    results = fetch_all(requests, jobs=args.jobs, force_names=force_names)
 
     failures = [r for r in results if r.status == "failed"]
     core_failures = [r for r in failures if r.request.origin == "core"]

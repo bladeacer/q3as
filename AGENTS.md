@@ -257,8 +257,15 @@ available: False` and uses its structural scanner.
 <!-- AGENTS:TREE-BEGIN -->
 ```text
 q3as/
+   .freebuff/
+       project-id
    data/
        processed/
+           .stages/
+               ada_ast_units.json
+               contract_mutations.json
+               dataset.json
+               docs_chunks.json
            ada_ast_units.jsonl
            contract_mutations.jsonl
            dataset.jsonl
@@ -287,12 +294,15 @@ q3as/
            v0.3.0.md
            v0.4.0.md
            v0.4.1.md
+           v0.5.0.md
        results/
            README.md
            result-data-v0.1.0.json
            result-data-v0.3.0.json
+           result-data-v0.4.1.json
            result-v0.1.0.md
            result-v0.3.0.md
+           result-v0.4.1.md
        architecture.md
        data-provenance.md
        datasets-and-training.md
@@ -344,6 +354,7 @@ q3as/
        test_eval_guard.py
        test_eval_report_training.py
        test_eval_scoring.py
+       test_gen_contract_mutations.py
        test_generate.py
        test_parsers.py
        test_reporting.py

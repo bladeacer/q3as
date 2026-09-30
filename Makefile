@@ -201,7 +201,7 @@ test: ## Run the Python unit tests
 
 lint: ## Run ruff and mypy over the project sources, then check markdown links and the AGENTS tree
 	uv run ruff check data/processing_scripts/ scripts/ eval/ tests/ tools/
-	uv run mypy data/processing_scripts/build_dataset.py data/processing_scripts/parse_docs.py data/processing_scripts/parse_ada_ast.py data/processing_scripts/eval_guard.py data/processing_scripts/code_variants.py data/processing_scripts/stage_state.py data/processing_scripts/progress.py eval/ada_eval_common.py eval/baseline_eval.py scripts/alire_env.py scripts/bump_version.py scripts/build_libadalang.py scripts/gen_eval_report.py scripts/gen_agents_tree.py scripts/collect_cap_results.py scripts/make_probe_splits.py tools/check-links.py
+	MYPYPATH=data/processing_scripts uv run mypy data/processing_scripts/build_dataset.py data/processing_scripts/parse_docs.py data/processing_scripts/parse_ada_ast.py data/processing_scripts/eval_guard.py data/processing_scripts/code_variants.py data/processing_scripts/stage_state.py data/processing_scripts/progress.py eval/ada_eval_common.py eval/baseline_eval.py scripts/alire_env.py scripts/bump_version.py scripts/build_libadalang.py scripts/gen_eval_report.py scripts/gen_agents_tree.py scripts/gen_contract_mutations.py scripts/fetch_repos.py scripts/collect_cap_results.py scripts/make_probe_splits.py tools/check-links.py
 	uv run python tools/check-links.py
 	uv run python scripts/gen_agents_tree.py --check
 

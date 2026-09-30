@@ -2,18 +2,30 @@
 """gen_contract_mutations.py - gnatprove-verified synthetic contract data.
 
 The eval showed the fine-tuned model writes near-correct code whose
-contracts do not discharge (``VC_OVERFLOW_CHECK`` x8 and friends). Real
-corpora contain few *provable* contracts, so this tool synthesizes them:
+contracts do not discharge: ``VC_OVERFLOW_CHECK`` x8, ``UNINITIALIZED``
+x4, ``VC_POSTCONDITION`` x3, ``VC_RAISE`` x2, ``DEPENDS_MISSING`` x2
+(results v0.4.1). Real corpora contain few *provable* contracts, so this
+tool synthesizes them, one template family per eval blocker:
 
-1. Each template below (guarded increment, even halve, swap with
-   ``Depends``, clamp range, guarded subtract) is instantiated over
-   parameterized names, types, and bounds.
+1. Each template below is instantiated over parameterized names, types,
+   and bounds. The families cover overflow guards (``Pre`` bounding
+   arithmetic), initialization plus postcondition (an ``out`` parameter
+   written on every path), raise guards (a ``Pre`` that makes the
+   ``raise`` impossible), loop invariants (triangle sum, array maximum),
+   ``Depends`` swaps, clamp ranges, and ``Global`` data-flow contracts.
 2. Every instance is compiled and proved with the real ``gnatprove`` in a
-   temporary GNAT project. Only instances whose whole unit comes out
-   ``proved`` are kept - a contract that does not prove never trains.
-3. Wrong variants (a deliberately weakened contract) are kept only when
-   gnatprove reports them ``not proved``, so broken examples carry a
-   machine-checked proof failure, not a guess.
+   temporary GNAT project, in batches. Only instances whose whole unit
+   comes out ``proved`` are kept - a contract that does not prove never
+   trains.
+3. Wrong variants (a deliberately weakened contract) are verified the
+   same way and kept only when gnatprove reports them ``not proved``, so
+   broken examples carry a machine-checked proof failure, not a guess.
+
+Every template family can produce up to four turn kinds: write the
+contract (``contract_synth_write``), explain why it discharges
+(``contract_synth_why``), complete a body under a spec
+(``contract_synth_body``, when the body carries the real lesson), and
+repair a machine-verified broken contract (``contract_synth_fix``).
 
 Output: ``data/processed/contract_mutations.jsonl`` in the chat-record
 shape the dataset builder ingests (``--extra-turns``), with a ``meta``
@@ -50,14 +62,15 @@ import alire_env
 import stage_state
 from alire_env import alire_env_path, find_tool
 
-OUTPUT = ROOT / "data" / "processed" / "contract_mutations.jsonl"
-
-# --------------------------------------------------------------------------- #
-# Templates (each shape verified against gnatprove 16, --level=1, before
-# release; see the probe notes in docs/datasets-and-training.md)
+OUTPUT = ROOT / "data" / "processed" / "contract_mutations.jsonl"# --------------------------------------------------------------------------- #
+# Templates: one family per eval proof blocker. Each template states the
+# whole SPARK unit (spec aspect clauses plus body), so verification covers
+# the real proof obligation, not just a declaration. Shapes marked "probe
+# notes" were verified against gnatprove 16 --level=1 before release.
 # --------------------------------------------------------------------------- #
 
 TEMPLATES: tuple[dict[str, Any], ...] = (
+    # --- VC_OVERFLOW_CHECK: the contract must bound the arithmetic. ---
     {
         "name": "guarded_increment",
         "decl": "procedure {unit} (X : in out {typ})",
@@ -93,17 +106,6 @@ TEMPLATES: tuple[dict[str, Any], ...] = (
         "weaken": (r"X mod 2 = 0", "X > 0"),
     },
     {
-        "name": "swap_depends",
-        "decl": "procedure {unit} (A : in out {typ}; B : in out {typ})",
-        "contract": "Depends => (A => B, B => A), Post => A = B'Old and B = A'Old",
-        "body": (
-            "   procedure {unit} (A : in out {typ}; B : in out {typ}) is\n"
-            "      T : {typ} := A;\n   begin\n      A := B;\n      B := T;\n   end {unit};"
-        ),
-        "types": ("Integer", "Natural"),
-        "weaken": (r"Post => A = B'Old and B = A'Old", "Post => A = A'Old"),
-    },
-    {
         "name": "clamp_range",
         "decl": "procedure {unit} (X : in {typ}; Lo : in {typ}; Hi : in {typ}; Y : out {typ})",
         "contract": "Pre => Lo <= Hi, Post => Y in Lo .. Hi",
@@ -117,6 +119,151 @@ TEMPLATES: tuple[dict[str, Any], ...] = (
         "types": ("Integer",),
         "weaken": (r"Pre => Lo <= Hi, ", ""),
     },
+    # --- UNINITIALIZED + VC_POSTCONDITION: an out parameter must be
+    # --- assigned on every path; the Post states what was stored.
+    {
+        "name": "init_default",
+        "decl": "procedure {unit} (R : out {typ}; N : in {typ})",
+        "contract": "Post => R = N",
+        "body": (
+            "   procedure {unit} (R : out {typ}; N : in {typ}) is\n"
+            "   begin\n      R := N;\n   end {unit};"
+        ),
+        "types": ("Natural", "Integer", "Positive"),
+        # A body that skips the write on one path: gnatprove reports
+        # "might not be initialized" plus "postcondition might fail".
+        "weak_body": (
+            "   procedure {unit} (R : out {typ}; N : in {typ}) is\n"
+            "   begin\n"
+            "      if N > 0 then\n         R := N;\n      end if;\n"
+            "   end {unit};"
+        ),
+        "fix_contract": "Pre => N > 0, Post => R = N",
+        "fix_explain": (
+            "The body writes R only when N is positive. On other paths R is "
+            "never assigned, so gnatprove reports that R might not be "
+            "initialized and that the postcondition might fail. The "
+            "precondition N > 0 rules out the skipping paths, so both "
+            "checks discharge. Restricting the inputs is the right fix "
+            "here: adding an else branch would change what the subprogram "
+            "computes."
+        ),
+        "weaken": None,
+    },
+    # --- VC_RAISE: the Pre makes the raise impossible. ---
+    {
+        "name": "raise_guard",
+        "decl": "procedure {unit} (V : in {typ})",
+        "contract": "Pre => V >= 0",
+        "body": (
+            "   procedure {unit} (V : in {typ}) is\n"
+            "   begin\n"
+            "      if V < 0 then\n         raise Constraint_Error;\n      end if;\n"
+            "   end {unit};"
+        ),
+        "types": ("Integer",),
+        # A wrong-boundary guard: V /= 0 still allows V = Integer'First, so
+        # the raise check cannot discharge. Valid syntax, real failure.
+        "weaken": ("Pre => V >= 0", "Pre => V /= 0"),
+    },
+    # --- Loop invariants: the lesson is a floating invariant that ties the
+    # --- running variable to the processed prefix, plus the widening that
+    # --- discharges the overflow VCs a naive accumulator trips.
+    {
+        "name": "loop_sum",
+        "decl": "function {unit} (N : in Natural) return Long_Long_Integer",
+        "contract": (
+            "Post => {unit}'Result\n"
+            "               = ({typ2} (N) + 1) * {typ2} (N) / 2"
+        ),
+        "body": (
+            "   function {unit} (N : in Natural) return Long_Long_Integer is\n"
+            "      Total : Long_Long_Integer := 0;\n"
+            "   begin\n"
+            "      for I in 1 .. N loop\n"
+            "         pragma Loop_Invariant\n"
+            "           (Total = {typ2} (I - 1) * {typ2} (I) / 2);\n"
+            "         Total := Total + {typ2} (I);\n"
+            "      end loop;\n"
+            "      return Total;\n"
+            "   end {unit};"
+        ),
+        "types": (),  # unused: {typ} does not appear in this template
+        "typ2": "Long_Long_Integer",
+        # A wrong postcondition (the classic off-by-one: forgetting the
+        # +1). Valid syntax, real failure: only N in 0 .. 1 satisfies it.
+        "weaken": (
+            r"= ({typ2} (N) + 1) * {typ2} (N) / 2",
+            r"= {typ2} (N)",
+        ),
+    },
+    {
+        "name": "loop_max_array",
+        "decl": "function {unit} (A : in Int_Array) return Integer",
+        "contract": (
+            "Pre  => A'Length > 0 and A'Last < Positive'Last, "
+            "Post => (for all K in A'Range => {unit}'Result >= A (K))"
+        ),
+        "body": (
+            "   function {unit} (A : in Int_Array) return Integer is\n"
+            "      Best : Integer := A (A'First);\n"
+            "   begin\n"
+            "      for K in A'First + 1 .. A'Last loop\n"
+            "         pragma Loop_Invariant\n"
+            "           (for all J in A'First .. K - 1 => Best >= A (J));\n"
+            "         if A (K) > Best then\n"
+            "            Best := A (K);\n"
+            "         end if;\n"
+            "      end loop;\n"
+            "      return Best;\n"
+            "   end {unit};"
+        ),
+        "types": (),
+        # Drop the A'Last bound: the index increment A'First + 1 can then
+        # overflow, so the invariant cannot discharge.
+        "weaken": (" and A'Last < Positive'Last", ""),
+        "extra_decls": {
+            "Int_Array": "   type Int_Array is array (Positive range <>) of Integer;\n",
+        },
+    },
+    # --- DEPENDS_MISSING: an explicit data-flow contract. ---
+    {
+        "name": "swap_depends",
+        "decl": "procedure {unit} (A : in out {typ}; B : in out {typ})",
+        "contract": "Depends => (A => B, B => A), Post => A = B'Old and B = A'Old",
+        "body": (
+            "   procedure {unit} (A : in out {typ}; B : in out {typ}) is\n"
+            "      T : {typ} := A;\n"
+            "   begin\n"
+            "      A := B;\n"
+            "      B := T;\n"
+            "   end {unit};"
+        ),
+        "types": ("Integer", "Natural"),
+        "weaken": (r"Post => A = B'Old and B = A'Old", "Post => A = A'Old"),
+    },
+    # --- Global data flow: a package variable plus its Global contract.
+    # --- The wrong form contradicts the body and the flow analysis rejects
+    # --- it with a hard error (probe note: gnatprove reports "Count" is
+    # --- referenced in Pre but missing from the Global for the null form).
+    {
+        "name": "global_counter",
+        "decl": "procedure {unit} (X : in {typ})",
+        "contract": (
+            "Global => (In_Out => Count), Pre => X <= {typ}'Last - Count"
+        ),
+        "body": (
+            "   procedure {unit} (X : in {typ}) is\n"
+            "   begin\n"
+            "      Count := Count + X;\n"
+            "   end {unit};"
+        ),
+        "types": ("Natural",),
+        "weaken": ("Global => (In_Out => Count)", "Global => null"),
+        "extra_decls": {
+            "Count": "   Count : Natural := 0;\n",
+        },
+    },
 )
 
 _UNIT_NAMES = (
@@ -124,6 +271,11 @@ _UNIT_NAMES = (
     "Take_Half", "Split_Even", "Halve_Input", "Exchange", "Trade_Slots",
     "Swap_Sides", "Confine", "Bound_Value", "Restrain_To", "Clip_To_Range",
     "Safe_Diff", "Subtract_Guarded", "Take_Away", "Diminish_By",
+    "Fill_Buffer", "Store_Value", "Copy_Result", "Load_Entry", "Set_Field",
+    "Check_Sign", "Guard_Value", "Reject_Negative", "Screen_Input",
+    "Sum_Range", "Accumulate", "Running_Total", "Pick_Maximum",
+    "Tallest_Of", "Greatest_In", "Reflect_Pair", "Mirror_Items",
+    "Count_Up", "Record_Call", "Log_Tick", "Advance_Clock",
 )
 
 
@@ -134,13 +286,26 @@ def _pick(seq: tuple[str, ...], key: str) -> str:
 def instantiate(template: dict[str, Any], index: int) -> dict[str, Any]:
     """Build one instance dict (unit, typ, spec, body, template)."""
     unit = _pick(_UNIT_NAMES, template["name"] + str(index))
-    typ = template["types"][index % len(template["types"])]
-    subs = {"unit": unit, "typ": typ}
+    typ = template["types"][index % len(template["types"])] if template["types"] else ""
+    subs = {"unit": unit, "typ": typ, "typ2": template.get("typ2", "")}
     decl = template["decl"].format(**subs)
     contract = template["contract"].format(**subs)
+    # Package-level declarations some templates need (a state variable, an
+    # array type the declaration refers to). Plain Ada, goes into spec and
+    # body alike.
+    extra_decls: dict[str, str] = template.get("extra_decls", {})
+    extra = (
+        "\n" + "\n".join(extra_decls.values()).rstrip("\n") + "\n"
+        if extra_decls
+        else ""
+    )
+    # extra_decls go into the SPEC only: the body sees them through the
+    # package, and a second copy in the body is a declaration conflict
+    # (verified: gnatprove rejects the duplicated type with "conflicts with
+    # declaration", which then cascades into a bogus "missing body").
     spec = (
         "pragma SPARK_Mode (On);\n\n"
-        f"package Ctr_{index} is\n\n"
+        f"package Ctr_{index} is\n{extra}\n"
         f"   {decl}\n     with {contract};\n\n"
         f"end Ctr_{index};\n"
     )
@@ -150,14 +315,21 @@ def instantiate(template: dict[str, Any], index: int) -> dict[str, Any]:
         f"{template['body'].format(**subs)}\n\n"
         f"end Ctr_{index};\n"
     )
-    return {"index": index, "unit": unit, "typ": typ, "decl": decl, "spec": spec, "body": body, "template": template}
+    return {
+        "index": index, "unit": unit, "typ": typ, "decl": decl,
+        "contract": contract, "spec": spec, "body": body, "template": template,
+    }
 
 
 def weaken(instance: dict[str, Any]) -> str | None:
     """Break the contract per the template rule (for wrong-example turns)."""
-    old, new = instance["template"]["weaken"]
-    old_f = old.format(typ=instance["typ"])
-    new_f = new.format(typ=instance["typ"])
+    rule = instance["template"].get("weaken")
+    if rule is None:
+        return None
+    old, new = rule
+    subs = {"typ": instance["typ"], "typ2": instance["template"].get("typ2", "")}
+    old_f = old.format(**subs)
+    new_f = new.format(**subs)
     broken = instance["spec"].replace(old_f, new_f)
     return broken if broken != instance["spec"] else None
 
@@ -201,6 +373,21 @@ def _packages(units: list[dict[str, Any]]) -> set[str]:
     return {re.search(r"package\s+(?:body\s+)?(\w+)", u["spec"]).group(1) for u in units}  # type: ignore[union-attr]
 
 
+def _unit_proved_from_summary(package: str, summary: str) -> bool | None:
+    """Per-unit proof status from a gnatprove.out summary.
+
+    True when every analyzed line for *package* (the package itself plus its
+    ``Package.Unit`` subprograms) ends in "and proved"; False when any line
+    is "not proved"; None when the unit has no lines at all, which the
+    caller must treat as "did not prove" so a parse failure never trains an
+    unverified unit.
+    """
+    lines = re.findall(rf"^\s*{package}(?:\.\w+)? at \S+ .*$", summary, re.MULTILINE)
+    if not lines:
+        return None
+    return all("and proved" in ln and "not proved" not in ln for ln in lines)
+
+
 def batch_verify(batch: list[dict[str, Any]], workdir: Path) -> dict[int, bool]:
     """Verify a batch in one gnatprove run. Returns {index: all_proved}."""
     src = workdir / "src"
@@ -213,13 +400,8 @@ def batch_verify(batch: list[dict[str, Any]], workdir: Path) -> dict[int, bool]:
     flags: dict[int, bool] = {}
     for unit in batch:
         package = re.search(r"package\s+(?:body\s+)?(\w+)", unit["spec"]).group(1)  # type: ignore[union-attr]
-        if all_proved:
-            flags[unit["index"]] = True
-            continue
-        # Partial failure: this unit proves only if its summary lines all
-        # say "and proved" (package and each subprogram).
-        lines = re.findall(rf"^\s*{package}(?:\.\w+)? at \S+ .*$", summary, re.MULTILINE)
-        flags[unit["index"]] = bool(lines) and all("and proved" in ln and "not proved" not in ln for ln in lines)
+        status = True if all_proved else _unit_proved_from_summary(package, summary)
+        flags[unit["index"]] = status is True
     return flags
 
 
@@ -240,8 +422,41 @@ def verify_unproved(spec: str, body: str, workdir: Path) -> bool:
 # Turn building
 # --------------------------------------------------------------------------- #
 
-def _explain(unit: str, typ: str, spec: str) -> str:
+def _explain(unit: str, typ: str, spec: str, template_name: str) -> str:
     """Short STE explanation (template-checked, not model-generated)."""
+    if template_name == "init_default":
+        return (
+            f"{unit} writes the out parameter R from N. The postcondition "
+            f"R = N states that fact. SPARK flow analysis requires an out "
+            "parameter to be assigned on every path, and the prover "
+            "discharges the postcondition from the single assignment."
+        )
+    if template_name == "raise_guard":
+        return (
+            f"The body of {unit} raises Constraint_Error when V is "
+            "negative. The precondition V >= 0 makes that branch "
+            "impossible, so gnatprove discharges the exception check. In "
+            "SPARK, a subprogram allows no exception to propagate unless "
+            "the contract rules the raising inputs out."
+        )
+    if template_name in ("loop_sum", "loop_max_array"):
+        return (
+            "The loop needs a loop invariant that ties the running "
+            "variable to the part of the input processed so far. The "
+            "invariant holds before the loop, survives one iteration, and "
+            "is strong enough at the exit to prove the postcondition. The "
+            "arithmetic is widened to Long_Long_Integer so the overflow "
+            "checks discharge, because a Natural accumulator can overflow "
+            "before the loop ends."
+        )
+    if template_name == "global_counter":
+        return (
+            f"{unit} updates the package variable Count. The Global "
+            "aspect declares that data flow, and the precondition bounds "
+            "X so the update cannot overflow. gnatprove checks the "
+            "contract against the body, so a Global aspect that hides a "
+            "variable the body reads or writes is a hard error."
+        )
     contract = re.search(r"with ([^;]+);", spec, re.DOTALL)
     text = " ".join(contract.group(1).split()) if contract else "the contract"
     return (
@@ -253,9 +468,27 @@ def _explain(unit: str, typ: str, spec: str) -> str:
 
 
 def _decl_with_contract(spec: str, unit: str) -> str:
-    """Extract the declaration plus aspect clause lines for a unit."""
-    match = re.search(rf"^\s*(?:procedure|function)\s+{unit}\b[^;]*;", spec, re.DOTALL | re.MULTILINE)
-    return " ".join(match.group(0).split()) if match else unit
+    """Extract the declaration plus aspect clauses for a unit.
+
+    A plain first-semicolon cut truncates every multi-parameter declaration
+    at its parameter list (``procedure Fill (R : out Natural;``), so this
+    scans from the declaration start to the first ``;`` at parenthesis
+    depth zero: parameter semicolons sit inside parens, aspect expressions
+    use parens and commas, and the terminating semicolon is bare.
+    """
+    match = re.search(rf"\b(?:procedure|function)\s+{unit}\b", spec)
+    if not match:
+        return unit
+    depth = 0
+    for position in range(match.start(), len(spec)):
+        char = spec[position]
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth = max(0, depth - 1)
+        elif char == ";" and depth == 0:
+            return " ".join(spec[match.start():position + 1].split())
+    return unit
 
 
 def build_turns(limit: int) -> list[dict[str, Any]]:
@@ -283,6 +516,7 @@ def build_turns(limit: int) -> list[dict[str, Any]]:
                 logger.info("unit %s did not prove; dropped", instance["unit"])
                 continue
             spec, unit, typ = instance["spec"], instance["unit"], instance["typ"]
+            template = instance["template"]
             group = f"contract-synth:{zlib.crc32(spec.encode('utf-8'))}"
             verified = "gnatprove proved"
             full_decl = _decl_with_contract(spec, unit)
@@ -299,7 +533,7 @@ def build_turns(limit: int) -> list[dict[str, Any]]:
                 ],
                 "meta": {
                     "kind": "contract_synth_write", "unit": unit,
-                    "template": instance["template"]["name"], "verified": verified,
+                    "template": template["name"], "verified": verified,
                     "group": group,
                 },
             })
@@ -308,22 +542,87 @@ def build_turns(limit: int) -> list[dict[str, Any]]:
                     {"role": "user", "content": (
                         f"Why does the contract of `{unit}` over {typ} make "
                         "the body provable?"
+                    ) if typ else (
+                        f"Why does the contract of `{unit}` make the body "
+                        "provable?"
                     )},
-                    {"role": "assistant", "content": _explain(unit, typ, spec)},
+                    {"role": "assistant", "content": _explain(unit, typ, spec, template["name"])},
                 ],
                 "meta": {
                     "kind": "contract_synth_why", "unit": unit,
-                    "template": instance["template"]["name"], "verified": verified,
+                    "template": template["name"], "verified": verified,
                     "group": group,
                 },
             })
 
+            # Body completion: for the templates whose real lesson sits in
+            # the body (loop invariant placement, every-path assignment),
+            # also train spec-in, working-body-out. gnatprove proved exactly
+            # this spec/body pair in the batch run above.
+            if "weak_body" in template:
+                records.append({
+                    "messages": [
+                        {"role": "user", "content": (
+                            "Write the SPARK body for this declaration. The "
+                            "body must satisfy every check the contract "
+                            "implies.\n\n```ada\n" + bare + "\n```"
+                        )},
+                        {"role": "assistant", "content": "```ada\n" + instance["body"] + "\n```"},
+                    ],
+                    "meta": {
+                        "kind": "contract_synth_body", "unit": unit,
+                        "template": template["name"], "verified": verified,
+                        "group": group,
+                    },
+                })
+
+            if "fix_contract" in template:
+                # Weak-body family: the contract is right and the body is
+                # wrong (writes the out parameter on one path only). Verify
+                # that the weak body really fails, then train repaired-unit
+                # out. The corrected precondition is part of the answer.
+                weak_body = template["weak_body"].format(
+                    unit=unit, typ=typ, typ2=template.get("typ2", ""),
+                )
+                with tempfile.TemporaryDirectory(prefix="q3as-unpr-") as tmp2:
+                    try:
+                        weak_proves = not verify_unproved(spec, weak_body, Path(tmp2))
+                    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
+                        logger.warning("unproved-check failed (%s); skipping body-fix turn", exc)
+                        weak_proves = True
+                if not weak_proves:
+                    fixed_unit = spec + "\n" + template["body"].format(
+                        unit=unit, typ=typ, typ2=template.get("typ2", ""),
+                    )
+                    records.append({
+                        "messages": [
+                            {"role": "user", "content": (
+                                "gnatprove cannot prove this unit: the out "
+                                "parameter R might not be initialized on every "
+                                "path. Add the missing contract piece so the "
+                                "body proves.\n\n```ada\n"
+                                + spec + "\n" + weak_body + "\n```"
+                            )},
+                            {"role": "assistant", "content": (
+                                template["fix_explain"]
+                                + "\n\n```ada\n" + fixed_unit + "\n```"
+                            )},
+                        ],
+                        "meta": {
+                            "kind": "contract_synth_fix", "unit": unit,
+                            "template": template["name"],
+                            "verified": "gnatprove unproved before fix",
+                            "group": group,
+                        },
+                    })
+                continue
+
             broken_spec = weaken(instance)
             if broken_spec is None:
                 continue
-            with tempfile.TemporaryDirectory(prefix="q3as-unpr-") as tmp2:
+            with tempfile.TemporaryDirectory(prefix="q3as-unpr-") as tmp3:
                 try:
-                    still_proves = not verify_unproved(broken_spec, instance["body"], Path(tmp2))
+                    still_proves = not verify_unproved(broken_spec, instance["body"], Path(tmp3))
                 except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
                     logger.warning("unproved-check failed (%s); skipping wrong turn", exc)
                     continue
@@ -347,7 +646,7 @@ def build_turns(limit: int) -> list[dict[str, Any]]:
                 ],
                 "meta": {
                     "kind": "contract_synth_fix", "unit": unit,
-                    "template": instance["template"]["name"],
+                    "template": template["name"],
                     "verified": "gnatprove unproved before fix",
                     "group": group,
                 },
@@ -358,7 +657,10 @@ def build_turns(limit: int) -> list[dict[str, Any]]:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Generate gnatprove-verified contract training turns.")
     parser.add_argument("--output", type=Path, default=OUTPUT)
-    parser.add_argument("--limit", type=int, default=30, help="approximate number of instances to verify")
+    parser.add_argument(
+        "--limit", type=int, default=60,
+        help="approximate number of instances to verify (about ten per template)",
+    )
     parser.add_argument("--force", action="store_true", help="regenerate even when the inputs are unchanged")
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()

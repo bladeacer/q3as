@@ -1274,6 +1274,19 @@ def inject_defect(code: str, family: str) -> tuple[str, str, str] | None:
             pos = _first_use(code, name, dm.end(), spans)
             if pos is None:
                 continue
+            # A use site on a subprogram header line is a formal parameter
+            # or the profile itself: the spec must stay conformant with the
+            # body, so GNAT leads with "not fully conformant" / "name does
+            # not match" there, not "undefined" (validate-defects evidence:
+            # string_compression). The parameter can sit on a continuation
+            # line of a multi-line profile, so walk back a few lines for the
+            # introducing keyword. The claim must stay the plain undefined
+            # error, so pick a different candidate.
+            line_start = code.rfind("\n", 0, pos) + 1
+            look_back = code[max(0, line_start - 300):pos]
+            tail_lines = [ln for ln in look_back.splitlines()[-3:]]
+            if any(re.search(r"\b(?:procedure|function)\b[^;]*\(", ln) for ln in tail_lines):
+                continue
             broken = code[:pos] + typo + code[pos + len(name):]
             return (
                 broken,
@@ -1503,6 +1516,23 @@ def inject_defect(code: str, family: str) -> tuple[str, str, str] | None:
                 cut = max(1, len(name) // 3)
                 corrupted = name[:len(name) - cut]
                 if corrupted == name:
+                    continue
+                # A truncated name that collides with another in-scope
+                # declaration changes the error: GNAT resolves the call to
+                # that declaration and reports a missing body instead of
+                # "undefined" (validate-defects evidence:
+                # Histogram_Equalization). Prefix hits count too: the call
+                # site regex also matches a spec DECLARATION line
+                # (``procedure X (...);``), and corrupting that declaration
+                # leaves a dangling name the body no longer completes. Only
+                # a name defined nowhere keeps the claimed message true.
+                line_start = code.rfind("\n", 0, pos) + 1
+                rest = code[:pos] + code[pos + len(name):]
+                line_end = code.find("\n", pos)
+                occurrence_line = code[line_start:line_end if line_end != -1 else len(code)]
+                if re.search(r"\b(?:procedure|function)\b", occurrence_line):
+                    continue  # a declaration line, not a call site
+                if re.search(rf"\b{re.escape(corrupted)}\b", rest):
                     continue
                 broken = code[:pos] + corrupted + code[pos + len(name):]
                 if broken != code:

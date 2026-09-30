@@ -11,8 +11,10 @@ The cache lives at `data/raw_repos/<owner>/<repo>/` (gitignored), holds HTTP
 tarballs (no git metadata), and is content-addressed by repository identity: a
 re-run re-fetches nothing already on disk. Per-repository metadata
 (`.q3as-source.json`) records the URL, fetch time, the license SPDX when the
-GitHub API answers, and the commit of the default branch the tarball is the
-head of. The legacy `../<repo>` sibling layout still resolves as a fallback,
+GitHub API answers, and the commit the tarball is the head of. That commit is
+resolved through the git smart-HTTP endpoint (`/info/refs?service=git-upload-pack`,
+the `git ls-remote` URL), which has no hourly quota; the REST API stays as a
+fallback. The legacy `../<repo>` sibling layout still resolves as a fallback,
 but nothing creates it anymore.
 
 ## Keeping the sources current
@@ -25,16 +27,16 @@ compared with upstream:
 |---|---|
 | `make fetch-sources` | Reuse the cache. No network, no rebuild. This is what the pipeline calls. |
 | `make check-sources` | Ask GitHub for each repository's head commit and print cached vs upstream. Downloads nothing. Exits non-zero when anything moved, so it can gate a scheduled run. |
-| `make update-sources` | Re-fetch only the repositories whose commit moved, then rebuild the dataset from the refreshed cache and print the `make check-integrity` reminder. |
+| `make update-sources` | Re-fetch only the repositories whose commit moved (or was never recorded), then rebuild the dataset from the refreshed cache and print the `make check-integrity` reminder. |
 
 There is no separate "rebuild" step to remember: the dataset stages fingerprint
 their input trees by content, so a refreshed repository changes the digest and
 `make build-dataset` re-parses and rebuilds. A repository whose head cannot be
-read (API quota, network) is reported as `unknown` and is **not** re-fetched, so
-a failed check never destroys a good cache. Entries fetched before commits were
-recorded show as `untracked`; `--update` re-fetches them once so they start
-being tracked, and says so, because that is the one case where a cache that may
-be perfectly fine is touched.
+read (network, quota on the API fallback) is reported as `unknown` and is
+**not** re-fetched, so a failed check never destroys a good cache. Entries
+fetched before commits were recorded show as `untracked`; `--update` re-fetches
+them once so they start being tracked, and says so, because that is the one
+case where a cache that may be perfectly fine is touched.
 
 When a source changes, review it before rebuilding: a new upstream revision can
 add license-relevant material, or add code whose text collides with the
