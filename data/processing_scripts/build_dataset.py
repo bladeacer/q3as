@@ -2388,6 +2388,29 @@ _TOOLCHAIN_QUESTIONS: dict[str, list[tuple[str, str, str]]] = {
 }
 
 
+def _chunk_start(doc_text: str, match: re.Match[str]) -> int:
+    """Where an answer chunk begins for an anchor *match*.
+
+    Three shapes, because the anchors are three shapes:
+    - a markdown table row keeps its whole line, so an anchor like
+      ``\\|\\s*Level\\s*\\|\\sCriter`` (first columns only) does not leave a
+      header fragment ("ion | Status") in front of the answer;
+    - a heading drops out of its own answer;
+    - prose starts at the anchor phrase, and at its line start when the
+      anchor already opens that line, so the first sentence is whole
+      instead of beginning mid-sentence.
+    """
+    index = match.end()
+    line_start = doc_text.rfind("\n", 0, index) + 1
+    head = doc_text[line_start]
+    if head == "|":
+        return line_start
+    if head == "#":
+        line_end = doc_text.find("\n", index)
+        return len(doc_text) if line_end < 0 else line_end + 1
+    return line_start if not doc_text[line_start:match.start()].strip() else match.start()
+
+
 def _extract_answer_chunk(doc_text: str, anchor_regex: str, fallback: str) -> str:
     """Extract the section after an anchor heading, bounded in size."""
     m = re.search(anchor_regex, doc_text)
@@ -2397,7 +2420,8 @@ def _extract_answer_chunk(doc_text: str, anchor_regex: str, fallback: str) -> st
             return ""
         chunk = doc_text[idx:idx + 2500]
     else:
-        chunk = doc_text[m.end():m.end() + 2500]
+        start = _chunk_start(doc_text, m)
+        chunk = doc_text[start:start + 2500]
     # Cut at the next top-level heading, if any.
     nxt = re.search(r"\n## ", chunk)
     if nxt:

@@ -45,8 +45,8 @@ build log rather than taking on faith).
 
 | Source | Cache path | Used for | License |
 |---|---|---|---|
-| [adacovex](https://github.com/bladeacer/adacovex) | `data/raw_repos/bladeacer/adacovex` | Ada/SPARK source with contract specs (code pairs, defect pairs, AST turns) | Apache-2.0 |
-| [Ada_CRDT](https://github.com/bladeacer/Ada_CRDT) | `data/raw_repos/bladeacer/Ada_CRDT` | Spec/body pairs for diversity | MIT |
+| [adacovex](https://github.com/bladeacer/adacovex) | `data/raw_repos/bladeacer/adacovex` | Ada/SPARK source with contract specs (code pairs, defect pairs, AST turns); `docs/usage` and `docs/archive` for `assurance_qa` (CI gating on an assurance level) | Apache-2.0 |
+| [Ada_CRDT](https://github.com/bladeacer/Ada_CRDT) | `data/raw_repos/bladeacer/Ada_CRDT` | Spec/body pairs for diversity; `docs/proof` and `docs/compliance` for `assurance_qa` (assurance ladder, zero-justification doctrine, skip taxonomy, proof ledger) | MIT |
 | [Ada-83-TLALOC](https://github.com/ViMoBr/Ada-83-TLALOC) | `data/raw_repos/ViMoBr/Ada-83-TLALOC` | Ada 83-era source (legacy patterns). Training use explicitly permitted by the author ([forum post](https://forum.ada-lang.io/t/fine-tuning-8b-ai-model-on-ada-spark/4746/3)) | GPL-3.0-or-later w/ GCC runtime exception; tests CC-BY-SA-4.0 |
 | [ada-eval](https://github.com/AdaCore/ada-eval) | `data/raw_repos/AdaCore/ada-eval` | **Eval-proper only** (see below). Used for benchmark generation/evaluation and the guard; the training pipeline never passes it as an input; also the uv path dependency for eval tooling | Apache-2.0 |
 | [AdaCore/learn](https://github.com/AdaCore/learn) | `data/raw_repos/AdaCore/learn` | Course material: doc-QA and heading-chunked doc sections | CC-BY-4.0 |
@@ -54,7 +54,7 @@ build log rather than taking on faith).
 | [agent-sh/ada-spark](https://github.com/agent-sh/ada-spark) | `data/raw_repos/agent-sh/ada-spark` | Current-toolchain guidance in system prompts | MIT |
 | [AminBlg/SimpleEnglish](https://github.com/AminBlg/SimpleEnglish) | `data/raw_repos/AminBlg/SimpleEnglish` | STE writing rules and word map (paraphrased, no spec text) | MIT |
 | [AdaCore/skills](https://github.com/AdaCore/skills) | `data/raw_repos/AdaCore/skills` | Toolchain QA (gnatprove, alire, gnatdoc, gnattest, gnatfuzz) | Apache-2.0 |
-| [RobertBoettcherSF/Ada-Algorithms](https://github.com/RobertBoettcherSF/Ada-Algorithms) | `data/raw_repos/RobertBoettcherSF/Ada-Algorithms` | Ada/SPARK algorithm implementations in a single monorepo (distributed systems, graph algorithms, image processing, compression, SPARK-verified sheets, parsers): thousands of files across category directories. Fetched as one archive. The author approved training use; that approval is not recorded in the repository (the README carries no LLM-usage disclosure). The MIT text is the repository's `LICENSE` | MIT |
+| [RobertBoettcherSF/Ada-Algorithms](https://github.com/RobertBoettcherSF/Ada-Algorithms) | `data/raw_repos/RobertBoettcherSF/Ada-Algorithms` | Ada/SPARK algorithm implementations in a single monorepo (distributed systems, graph algorithms, image processing, compression, SPARK-verified sheets, parsers): thousands of files across category directories. The 16 `SPARK2` topic trees are also the source of the prover-verified `spark_verified` turns. Fetched as one archive. The author approved training use; that approval is not recorded in the repository (the README carries no LLM-usage disclosure). The MIT text is the repository's `LICENSE` | MIT |
 
 Licensing summary: Apache-2.0 and MIT code is redistributable with attribution;
 CC-BY-4.0 course material is used with attribution; the GPL-licensed
@@ -137,12 +137,13 @@ build (see below) still drops a similar volume.
 
 Current shipped dataset (AST_STRUCTURAL_CAP = 10), as recorded in
 `data/processed/dataset_metadata.json` at build time:
-- 77,758 turns; group-aware splits 69,982 train / 3,834 val / 3,942 test,
-- eval guard: 479 blocked signatures (255 exact, 176 structural, plus
-  prompts), 695 contaminated groups dropped,
-- dedup before split: 53,380 duplicates removed (24,091 verbatim, 29,289
+- 80,233 turns; group-aware splits 72,124 train / 4,083 val / 4,026 test,
+- eval guard: 425 blocked signatures (394 subprograms: 207 exact,
+  187 structural; 31 prompts: 17 exact, 14 structural), 795 contaminated
+  groups dropped,
+- dedup before split: 52,476 duplicates removed (23,544 verbatim, 28,932
   AST-structural over the cap),
-- 2,413 empty-assistant records dropped (mostly spec-only units from the Ada-
+- 2,366 empty-assistant records dropped (mostly spec-only units from the Ada-
   Algorithms monorepo).
 
 The guard counts shift slightly between builds because dedup and the cap

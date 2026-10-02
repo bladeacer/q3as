@@ -18,6 +18,7 @@ string, and is listed in the [results index](../results/README.md).
 
 | Version | What changed | Results |
 |---|---|---|
+| [0.7.0](v0.7.0.md) | Prover-verified SPARK2 turns from all 16 trees, lab explanation twins, assurance-ladder QA, answer-chunking fix | _not run_ |
 | [0.6.0](v0.6.0.md) | Deeper extraction from existing sources: contract curriculum scaled 4x, lab prompt/answer turns, skills proof-workflow docs | _not run_ |
 | [0.5.0](v0.5.0.md) | Contract templates cover every eval proof blocker; `make update-sources` actually updates | _not run_ |
 | [0.4.1](v0.4.1.md) | Eval passes report a rate and ETA; smaller eval samples; an interrupted run resumes | _not run_ |

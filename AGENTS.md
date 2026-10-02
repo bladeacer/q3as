@@ -15,22 +15,28 @@ which commands to use. Regenerate the tree below with `make agents-tree`.
 3. `make parse-data` runs the parser modules (doc chunking, AST extraction)
    into `data/processed/*.jsonl`. AST extraction uses libadalang when
    `make ast-deps` has installed it, and the structural scanner otherwise.
-4. `make build-dataset` walks the cached Ada source trees, ingests
+4. `make gen-contracts` and `make gen-verified-spark` are the two gnatprove
+   stages: the first proves ten synthetic contract-template families, the
+   second proves real SPARK2 subprograms from the Ada-Algorithms monorepo
+   and keeps only the ones the prover discharges. Both write
+   `data/processed/*.jsonl` in the chat-record shape the builder ingests, and
+   both skip cleanly (keeping what they wrote) when `gnatprove` is absent.
+5. `make build-dataset` walks the cached Ada source trees, ingests
    the parser outputs, and emits `data/processed/dataset.jsonl` plus the
    train/val/test split files (chat-format turns: code, doc-QA, defect
-   pairs, contract-writing, toolchain QA).
-5. `make train` runs QLoRA fine-tuning (Unsloth) with seeded early stopping
+   pairs, contract-writing, toolchain QA, prover-verified SPARK bodies).
+6. `make train` runs QLoRA fine-tuning (Unsloth) with seeded early stopping
    and writes checkpoints plus a training summary (train/val/test loss
    histories) to `outputs/q3as/`.
-6. `make generate` produces Ada solutions with both models into
+7. `make generate` produces Ada solutions with both models into
    `outputs/generated_solutions/<label>/`.
-7. `make eval` and `make eval-pipeline` score them (BLEU, compilation, unit
+8. `make eval` and `make eval-pipeline` score them (BLEU, compilation, unit
    tests, SPARK proofs) and write reports to `outputs/`; `make eval-report`
    writes the versioned summary to `docs/results/result-vX.Y.Z.md` (version from
    [`alire.toml`](alire.toml), bumped with `make bump-version`), including the
    train/val/test loss table and a training-trend verdict.
 
-Steps 3 and 4 skip themselves when nothing they read has changed (see
+Steps 3 to 5 skip themselves when nothing they read has changed (see
 [`stage_state.py`](data/processing_scripts/stage_state.py) below), so a second
 `make all` reaches training in seconds. `FORCE=1` rebuilds anyway. Workers
 default to one per core; `DATASET_WORKERS=1` forces serial.
@@ -78,7 +84,11 @@ records from ada-eval.
   code shape, so a family is not thinned away by plain copies of the code it
   corrects; prose turns have no signature and are never capped), drops
   empty-assistant records, and writes JSONL plus metadata with per-source
-  provenance.
+  provenance. It also builds the turn kinds that no parser module emits:
+  `lab_pair` completion and diff-derived explanation twins from the
+  training-material labs (`discover_lab_pairs`, `build_lab_pair_turns`) and
+  `assurance_qa` from the SPARK Platinum repos' compliance docs
+  (`load_spark_assurance_docs`, `build_spark_assurance_turns`).
 - [`data/processing_scripts/source_paths.py`](data/processing_scripts/source_paths.py)
   - resolves every source repo to its cache directory
   (`data/raw_repos/<owner>/<repo>`, with the legacy sibling location as
@@ -140,6 +150,16 @@ records from ada-eval.
 - [`scripts/validate_defects.py`](scripts/validate_defects.py) - compiles the
   dataset's defect pairs with the real GNAT and checks the claimed compiler
   messages. Exit code is the contract: any "compiles clean" defect is a failure.
+- [`scripts/gen_contract_mutations.py`](scripts/gen_contract_mutations.py) -
+  gnatprove-verified synthetic contract curriculum (ten template families
+  aimed at the eval proof blockers, `--limit` instances per family), emitted
+  as `contract-synth:` groups that are exempt from the AST-structural cap.
+- [`scripts/gen_verified_spark.py`](scripts/gen_verified_spark.py) - proves the
+  real SPARK2 units of all 16 `Ada-Algorithms/*/SPARK2` trees and keeps only
+  the ones every check of which comes out proved. A batch that hits the
+  timeout is dropped whole: a killed run's partial summary cannot be trusted.
+  `--limit 0` (the default) takes every discovered unit; a full run is about
+  30 minutes on 16 cores and is paid once per source change.
 - [`scripts/fetch_repos.py`](scripts/fetch_repos.py) - archive-cache fetcher
   (HTTP tarballs, parallel, cached; every repo in `CORE_REPOS` including the
   Ada-Algorithms monorepo). Each cache entry records the upstream commit it
@@ -266,6 +286,7 @@ q3as/
                contract_mutations.json
                dataset.json
                docs_chunks.json
+               verified_spark.json
            ada_ast_units.jsonl
            contract_mutations.jsonl
            dataset.jsonl
@@ -274,6 +295,7 @@ q3as/
            dataset_train.jsonl
            dataset_val.jsonl
            docs_chunks.jsonl
+           verified_spark.jsonl
        processing_scripts/
            build_dataset.py
            code_variants.py
@@ -296,6 +318,7 @@ q3as/
            v0.4.1.md
            v0.5.0.md
            v0.6.0.md
+           v0.7.0.md
        results/
            README.md
            result-data-v0.1.0.json
@@ -342,6 +365,7 @@ q3as/
        gen_agents_tree.py
        gen_contract_mutations.py
        gen_eval_report.py
+       gen_verified_spark.py
        make_probe_splits.py
        python_env.sh
        run_cap_experiment.sh
@@ -377,6 +401,7 @@ q3as/
    ast.gpr
    LICENSE
    Makefile
+   plan.md
    pyproject.toml
    README.md
    run_download.py

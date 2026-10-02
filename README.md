@@ -54,7 +54,9 @@ Core sources (fetched into the local archive cache `data/raw_repos/<owner>/<repo
   - A single monorepo of the author's Ada/SPARK algorithm implementations
   (distributed systems, graph algorithms, image processing, compression,
   SPARK-verified sheets, parsers, and more), organised into category
-  directories. Their code is AI assisted.
+  directories. Their code is AI assisted. The 16 `SPARK2` topic trees are
+  proved with gnatprove, and only the subprograms the prover discharges
+  become training turns.
   [The author has given explicit permission to use this code for model training.](https://forum.ada-lang.io/t/fine-tuning-8b-ai-model-on-ada-spark/4746/6)
   *(MIT)*. 
 

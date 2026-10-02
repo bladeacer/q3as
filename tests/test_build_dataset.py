@@ -319,6 +319,61 @@ class TestGlossaryAndPrompt:
 
 
 # --------------------------------------------------------------------------- #
+# Answer chunks from anchor-referenced documentation
+# --------------------------------------------------------------------------- #
+
+
+class TestExtractAnswerChunk:
+    LADDER_DOC = (
+        "# Assurance\n\n"
+        "| Level | Criterion | Status |\n"
+        "|-------|-----------|--------|\n"
+        "| Stone | Valid SPARK subset | achieved |\n\n"
+        "## The current ledger\n\n"
+        "Totals for one gnatprove release.\n"
+    )
+
+    def test_table_anchor_keeps_the_whole_header_row(self):
+        # The anchor matches the first two columns only; cutting at the match
+        # end would open the answer with the fragment "ion | Status |".
+        chunk = bd._extract_answer_chunk(self.LADDER_DOC, r"\|\s*Level\s*\|\sCriter", "level")
+        assert chunk.startswith("| Level | Criterion | Status |")
+        assert "Stone" in chunk
+
+    def test_heading_anchor_drops_its_own_line(self):
+        chunk = bd._extract_answer_chunk(self.LADDER_DOC, r"## The current ledger", "ledger")
+        assert chunk.startswith("Totals for one")
+        assert "#" not in chunk
+
+    def test_prose_anchor_starts_at_the_phrase(self):
+        doc = "A justified check is a claim, not a\nproof, so the count is zero.\n"
+        chunk = bd._extract_answer_chunk(doc, r"A justified check is", "justified")
+        assert chunk.startswith("A justified check is a claim")
+        assert chunk.rstrip().endswith("zero.")
+
+    def test_prose_anchor_at_line_start_keeps_that_line(self):
+        doc = "  A justified check is a claim, not a proof.\n"
+        chunk = bd._extract_answer_chunk(doc, r"A justified check is", "justified")
+        assert chunk.startswith("A justified check is a claim")
+
+    def test_fallback_still_answers_without_the_anchor(self):
+        # The keyword path starts at the keyword itself, so a question whose
+        # heading was renamed still gets an answer.
+        doc = "The skip taxonomy lists four groups.\n"
+        chunk = bd._extract_answer_chunk(doc, r"## Nowhere", "skip taxonomy")
+        assert chunk.startswith("skip taxonomy lists four groups.")
+
+    def test_missing_anchor_and_keyword_is_empty(self):
+        assert bd._extract_answer_chunk("nothing here", r"## Nowhere", "absent") == ""
+
+    def test_next_top_level_heading_bounds_the_chunk(self):
+        doc = "# A\n\nfirst body\n\n## Next\n\nsecond body\n"
+        chunk = bd._extract_answer_chunk(doc, r"# A", "first body")
+        assert "second body" not in chunk
+        assert "first body" in chunk
+
+
+# --------------------------------------------------------------------------- #
 # STE rule loading (falls back gracefully when sibling repos are absent)
 # --------------------------------------------------------------------------- #
 

@@ -32,6 +32,7 @@ import argparse
 import json
 import logging
 import re
+import subprocess
 import sys
 import tempfile
 import zlib
@@ -45,15 +46,33 @@ sys.path.insert(0, str(ROOT / "scripts"))
 sys.path.insert(0, str(ROOT / "data" / "processing_scripts"))
 
 import alire_env
+import progress as progress_mod
 import stage_state
 from alire_env import alire_env_path, find_tool
 
 OUTPUT = ROOT / "data" / "processed" / "verified_spark.jsonl"
 
-DEFAULT_SOURCES = (
-    ROOT / "data" / "raw_repos" / "RobertBoettcherSF" / "Ada-Algorithms" / "sorting" / "SPARK2",
-    ROOT / "data" / "raw_repos" / "RobertBoettcherSF" / "Ada-Algorithms" / "graphs" / "SPARK2",
-)
+MONOREPO = ROOT / "data" / "raw_repos" / "RobertBoettcherSF" / "Ada-Algorithms"
+
+
+def default_sources() -> list[Path]:
+    """Every SPARK2 tree of the monorepo, in topic order."""
+    return sorted(
+        path for path in MONOREPO.glob("*/SPARK2") if path.is_dir()
+    )
+
+
+def _source_label(spec_path: Path) -> str:
+    """``Ada-Algorithms:<topic>/SPARK2/<file>.ads``.
+
+    The topic directory is part of the label: two topics carry SPARK2 units
+    of the same file name, so the tree alone does not identify the source.
+    """
+    try:
+        relative = spec_path.resolve().relative_to(MONOREPO)
+    except ValueError:
+        relative = Path(spec_path.name)
+    return f"Ada-Algorithms:{relative.as_posix()}"
 
 # Only units whose context clauses name these roots can be compiled
 # standalone: a with of a sibling unit would need that unit's tree, which
@@ -104,7 +123,7 @@ def _normalize_decl(decl: str) -> str:
 
 
 def discover_units(
-    source_dirs: list[Path], limit: int
+    source_dirs: list[Path], limit: int = 0
 ) -> list[dict[str, Any]]:
     """Whole spec/body files that are standalone and carry a subprogram.
 
@@ -112,7 +131,8 @@ def discover_units(
     reference the types declared in their own package spec, so a synthetic
     spec carrying only the subprogram declaration would not compile. Units
     across trees can share a package name, so the first of each name wins
-    (a batch directory cannot hold two of the same package).
+    (a batch directory cannot hold two of the same package). ``limit`` of 0
+    or less means every discovered unit.
     """
     units: list[dict[str, Any]] = []
     skipped_deps = 0
@@ -123,7 +143,7 @@ def discover_units(
             logger.warning("source directory not found, skipping: %s", source_dir)
             continue
         for spec_path in sorted(source_dir.glob("*.ads")):
-            if len(units) >= limit:
+            if limit > 0 and len(units) >= limit:
                 break
             body_path = spec_path.with_suffix(".adb")
             if not body_path.is_file():
@@ -160,9 +180,7 @@ def discover_units(
                 "has_contract": "with " in decl_match.group(0),
                 "spec": spec_text,
                 "body": body_text,
-                "source": (
-                    f"Ada-Algorithms:{spec_path.parent.name}/{spec_path.name}"
-                ),
+                "source": _source_label(spec_path),
             })
     logger.info(
         "Discovered %d standalone units (%d skipped for local dependencies,"
@@ -187,19 +205,28 @@ def os_environ() -> dict[str, str]:
     return dict(os.environ)
 
 
-def run_gnatprove(project_dir: Path) -> tuple[bool, str]:
-    """Prove everything in the project. Returns (all_proved, summary)."""
+def run_gnatprove(project_dir: Path, timeout_s: int = 600) -> tuple[bool, str]:
+    """Prove everything in the project. Returns (all_proved, summary).
+
+    A run that hits the timeout yields ``(False, "")`` on purpose. The
+    partial summary of a killed run cannot be trusted: a package listed as
+    proved may still have had checks outstanding when the prover died, and
+    the empty summary makes every package in the batch fall through to
+    "not proved", so a timeout drops the batch instead of half-verifying it.
+    """
     gpr = project_dir / "main.gpr"
     if not gpr.exists():
         gpr.write_text(_GPR, encoding="utf-8")
     gnatprove = find_tool("gnatprove")
-    import subprocess
-
-    proc = subprocess.run(
-        [str(gnatprove), f"-P{gpr}", "-j0", "--level=1", "--mode=prove"],
-        cwd=project_dir, capture_output=True, text=True, timeout=600,
-        env=_alire_env(), check=False,
-    )
+    try:
+        proc = subprocess.run(
+            [str(gnatprove), f"-P{gpr}", "-j0", "--level=1", "--mode=prove"],
+            cwd=project_dir, capture_output=True, text=True, timeout=timeout_s,
+            env=_alire_env(), check=False,
+        )
+    except subprocess.TimeoutExpired:
+        logger.warning("gnatprove did not finish within %ds", timeout_s)
+        return False, ""
     out_file = project_dir / "obj" / "gnatprove" / "gnatprove.out"
     summary = out_file.read_text(encoding="utf-8", errors="replace") if out_file.exists() else ""
     output = proc.stdout + proc.stderr
@@ -241,6 +268,8 @@ def build_turns(units: list[dict[str, Any]], batch_size: int = 8) -> list[dict[s
     """Verify in batches and emit completion turns for the proved units."""
     records: list[dict[str, Any]] = []
     verified = 0
+    batches = max(1, -(-len(units) // batch_size))
+    progress = progress_mod.Progress("gnatprove batches", batches, log=logger)
     for start in range(0, len(units), batch_size):
         batch = units[start:start + batch_size]
         with tempfile.TemporaryDirectory(prefix="q3as-sparkv-") as tmp:
@@ -248,6 +277,11 @@ def build_turns(units: list[dict[str, Any]], batch_size: int = 8) -> list[dict[s
                 flags = batch_verify(batch, Path(tmp))
             except (TimeoutError, FileNotFoundError, OSError) as exc:
                 logger.warning("gnatprove batch failed (%s); skipping %d units", exc, len(batch))
+                progress.advance()
+                continue
+            except subprocess.SubprocessError as exc:
+                logger.warning("gnatprove batch errored (%s); skipping %d units", exc, len(batch))
+                progress.advance()
                 continue
         for unit in batch:
             if not flags.get(unit["package"]):
@@ -273,6 +307,8 @@ def build_turns(units: list[dict[str, Any]], batch_size: int = 8) -> list[dict[s
                     "group": group,
                 },
             })
+        progress.advance()
+    progress.close()
     logger.info("kept %d of %d units (gnatprove proved)", verified, len(units))
     return records
 
@@ -299,8 +335,8 @@ def main() -> int:
         help="Directory tree to take spec/body pairs from. Repeatable; defaults to the Ada-Algorithms SPARK2 trees.",
     )
     parser.add_argument(
-        "--limit", type=int, default=48,
-        help="maximum number of units to try (prover time scales with this)",
+        "--limit", type=int, default=0,
+        help="maximum number of units to try; 0 (default) takes every discovered unit",
     )
     parser.add_argument("--force", action="store_true", help="regenerate even when the inputs are unchanged")
     parser.add_argument("-v", "--verbose", action="store_true")
@@ -308,7 +344,7 @@ def main() -> int:
 
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO)
 
-    source_dirs = args.source_dir or list(DEFAULT_SOURCES)
+    source_dirs = args.source_dir or default_sources()
     spec = stage_state.make_spec(
         name="verified_spark",
         outputs=[args.output],

@@ -14,7 +14,9 @@ configured for reproducibility and early stopping.
 | `ast_qa` | AST-derived turns ([`parse_ada_ast.py`](../data/processing_scripts/parse_ada_ast.py)): body-from-spec completion, contract reading, **contract writing** (bare spec in, `Pre`/`Post`/`Global`/`Depends` declaration out), and constrained types. The parser emits these as `ast_impl`, `ast_contract`, `ast_contract_write` and `ast_type`; the builder records them under the single dataset kind `ast_qa`, which is the name that appears in `dataset_metadata.json` |
 | `toolchain_qa` | Question/answer turns from the AdaCore agent skills, including the proof-workflow references (triage of unproved checks, hint strength ordering, refactoring for proof, overflow patterns, command-line levels) |
 | `contract_synth` | gnatprove-verified synthetic contract turns ([`scripts/gen_contract_mutations.py`](../scripts/gen_contract_mutations.py)): contract writing, why-weakened-contracts-fail, and fix turns, plus body completion for the every-path-assignment family. Ten template families map one to one onto the eval proof blockers (overflow guards, out-parameter initialization plus postcondition, raise guards, loop invariants with overflow widening, `Depends` swaps, `Global` data flow, clamp ranges, even division). Groups are exempt from the AST-structural cap: the per-family shape repetition is the curriculum, every instance is prover-verified, and the whole family stays under 1% of the corpus |
-| `lab_pair` | Completion turns from the training-material labs: each lab ships a `prompt/` skeleton tree beside an `answer/` solution tree, and a turn presents the prompt file and answers with the solution. The format is the one the evaluation scores (declaration in, completed unit out); 47 labs, 129 turns |
+| `lab_pair` | Completion turns from the training-material labs: each lab ships a `prompt/` skeleton tree beside an `answer/` solution tree, and a turn presents the prompt file and answers with the solution. The format is the one the evaluation scores (declaration in, completed unit out); 47 labs. Each differing pair yields two turns, the completion and a diff-derived explanation of what the solution adds |
+| `assurance_qa` | Assurance-ladder QA from the SPARK Platinum sources' compliance and proof documentation (`Ada_CRDT` `docs/proof` + `docs/compliance`, adacovex `docs/usage` + `docs/archive`): what each level requires, why justified checks are held at zero, when a unit is skipped and how that is recorded, what a proof ledger states, and how CI gates on a level. The answers are the documentation's own text, STE-cleaned |
+| `spark_verified` | Real SPARK2 units the local prover accepts ([`scripts/gen_verified_spark.py`](../scripts/gen_verified_spark.py)): the subprogram declaration in, the proved subprogram body out. Unlike `contract_synth` the code is not template-authored, it comes from the Ada-Algorithms monorepo's 16 `SPARK2` trees, and gnatprove decides what trains |
 | `ast_defect` / `variant` | Defect and renamed-variant turns derived from ingested parser records (same split group as their source record) |
 
 ### How AST units are extracted
@@ -62,8 +64,9 @@ validate-defects`); any family that "compiles clean" fails the check.
 ## Parser outputs and provenance
 
 The parser modules write standalone JSONL files under `data/processed/`
-(`docs_chunks`, `ada_ast_units`, `contract_mutations` from `make
-parse-data` and `make gen-contracts`). `make build-dataset`
+(`docs_chunks` and `ada_ast_units` from `make parse-data`,
+`contract_mutations` from `make gen-contracts`, `verified_spark` from
+`make gen-verified-spark`). `make build-dataset`
 merges all of them via `--extra-turns`. The build metadata
 (`dataset_metadata.json`) records per-file ingestion counts under
 `extra_turns_files` (`records` / `ingested` / `defects` / `variants`) and
@@ -81,8 +84,8 @@ training-load time; their count is recorded under
 
 ### Rebuild skipping
 
-`parse-data`, `gen-contracts`, and `build-dataset` are `.PHONY` targets, so
-make runs them on every `make all`. Each stage therefore declares what it
+`parse-data`, `gen-contracts`, `gen-verified-spark`, and `build-dataset` are
+`.PHONY` targets, so make runs them on every `make all`. Each stage therefore declares what it
 reads in [`stage_state.py`](../data/processing_scripts/stage_state.py): the
 input trees (with the file suffixes the stage actually consumes), single input
 files, the scripts that produce it, and the parameters that change the
@@ -108,7 +111,9 @@ Four properties make the "fresh" verdict safe:
 
 `FORCE=1` (or `--force` on the scripts) rebuilds regardless, which is what to
 use after a toolchain change: `gnatprove` is a binary, not a hashed source
-input, so upgrading the prover does not invalidate `contract_mutations`.
+input, so upgrading the prover does not invalidate `contract_mutations` or
+`verified_spark`. Both gnatprove stages skip cleanly when the tool is absent
+(`make prove` installs it), keeping the output they already wrote.
 `make clean` removes the stamps along with the dataset, and keeps the
 downloaded model in `models/` (16 GB that `make check-model` would otherwise
 re-fetch; `make clean-model` removes it).
