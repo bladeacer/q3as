@@ -54,6 +54,18 @@ under `outputs/eval_results/<model>/<dataset>/` and a human-readable
 
 - **n is small** (19 samples per model). Treat percentages as directional;
   a 10-point swing is within noise.
+- **A reply that changes nothing scores on the base project.** Most ada-eval
+  base trees already carry a body for the target subprogram and already
+  compile, so a reply that only echoes the specification it was shown leaves a
+  working project in place and collects BUILD and TEST for it.
+  `outputs/generated_solutions/<label>/generation_meta.json` records
+  `changed_files` per sample, and
+  [`docs/eval-analysis-v0.8.0.md`](eval-analysis-v0.8.0.md) shows the split:
+  on the v0.8.0 run, 13 of 19 replies changed nothing and carried 12 of the 15
+  builds. Read BUILD, TEST and PROVE next to that count before calling a
+  number a model result. The same applies to BLEU-4 and exact match, which are
+  computed on the target file alone: where the base file and the canonical file
+  agree on that file, an echo scores 1.0.
 - **BUILD/TEST gains** are the primary fine-tuning signal; PROVE
   `unproved` with specific check kinds (overflow, postcondition) is a
   data-quality signal: the model writes near-correct code but not yet
@@ -63,6 +75,11 @@ under `outputs/eval_results/<model>/<dataset>/` and a human-readable
   [`eval/ada_eval_common.py`](../eval/ada_eval_common.py) classifies
   `proved_incorrectly` and `subprogram_not_found` as unproved rather than as
   errors, so an incorrect proof cannot inflate the proved rate.
+- **A BUILD failure can be a routing failure.**
+  [`eval/generate.py`](../eval/generate.py) maps a reply onto project files,
+  and a reply naming no usable file next to the target is written at the
+  target path. When a sample fails BUILD, read the generated file before
+  blaming the Ada.
 
 ## Running
 

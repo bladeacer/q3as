@@ -158,10 +158,14 @@ from ada-eval.
   path. Every ada-eval target is a spec (`.ads`), so a fallback block that
   opens a `package body` is routed to the sibling `.adb` (`body_sibling`),
   and only when the base tree already carries that mirror file; an explicit
-  `File:` entry still wins. Per-sample reply shape, changed-file count and
+  `File:` entry still wins. Known fault, scoped in [`plan.md`](plan.md): when
+  every `File:` entry is dropped (a reply naming only `main.gpr`, say), the
+  fallback still writes that block at the target path, which cost two samples
+  their BUILD on the v0.8.0 run. Per-sample reply shape, changed-file count and
   whether the routing fired go to `generation_meta.json` beside the packed
   JSONL, because none of it fits the ada-eval sample schema and all of it
-  changes how a build number reads.
+  changes how a build number reads: a reply that changes nothing leaves the
+  base project in place, and most ada-eval base trees already compile.
 - [`eval/baseline_eval.py`](eval/baseline_eval.py) - reference-based scoring:
   joins the `make generate` output to the ada-eval canonical solutions and
   reports BLEU-4, exact match, file-set match, and standard compliance per
@@ -367,13 +371,16 @@ q3as/
            result-data-v0.3.0.json
            result-data-v0.4.1.json
            result-data-v0.7.0.json
+           result-data-v0.8.0.json
            result-v0.1.0.md
            result-v0.3.0.md
            result-v0.4.1.md
            result-v0.7.0.md
+           result-v0.8.0.md
        architecture.md
        data-provenance.md
        datasets-and-training.md
+       eval-analysis-v0.8.0.md
        evaluation.md
        README.md
        toolchain-setup.md

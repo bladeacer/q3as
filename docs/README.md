@@ -14,6 +14,7 @@ run `make help` for the command list.
 | [Data provenance](data-provenance.md) | Data sources, licenses, eval-integrity guard |
 | [Toolchain setup](toolchain-setup.md) | Alire management, vendored index for outdated `alr` |
 | [Evaluation](evaluation.md) | Benchmark, metrics, interpretation, running |
+| [Evaluation analysis v0.8.0](eval-analysis-v0.8.0.md) | What the v0.8.0 run measured, split by samples the model changed |
 
 ## Versioned artifacts
 
@@ -42,6 +43,8 @@ benchmark, and say in prose why it is absent when the run was withdrawn.
    installed `alr` is too old for the pinned crates.
 4. [Evaluation](evaluation.md) and the [results index](results/README.md)
    before quoting a number, so the metric and its version travel together.
+   [Evaluation analysis v0.8.0](eval-analysis-v0.8.0.md) shows how the latest
+   run decomposes, including the part of it the model did not earn.
 
 ## Keeping these pages current
 
