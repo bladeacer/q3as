@@ -119,7 +119,7 @@ downloaded model in `models/` (16 GB that `make check-model` would otherwise
 re-fetch; `make clean-model` removes it).
 
 Effect on the full pipeline, measured on 16 cores over the whole corpus
-(6,421 Ada files, 4,268 pairs, 80,262 turns):
+(6,421 Ada files, 80,716 turns):
 
 | Step | Before | After |
 |---|---|---|
@@ -307,7 +307,8 @@ mechanisms keep the splits honest:
   shuffle indexes into the list; `training_summary.json` records which path a
   run took under `experiment.split_load`.
 - **Stored format**: the train table holds `input_ids` as int32 rather than
-  rendered text - 151 MB instead of 468 MB for 72,105 records, since a token
+  rendered text - 151 MB instead of 468 MB for 72,105 records (the v0.7.0
+  measurement; the ratio, not the absolute size, is the point), since a token
   id cannot exceed a 2^31 vocabulary. An `input_ids` column also marks the
   dataset as already processed, so trl and Unsloth skip their tokenization
   pass (4m07s per run, now under a second). This was checked, not assumed:
@@ -317,8 +318,8 @@ mechanisms keep the splits honest:
   same magnitude, so that is the bf16 non-determinism the caveat below
   describes. The eval splits stay as text, because the chunked eval callback
   tokenizes them itself, and they are not handed to `SFTTrainer` at all
-  (`eval_strategy` is `"no"`, so passing them in only made trl tokenize 4,071
-  val records per run for a dataset nothing read).
+  (`eval_strategy` is `"no"`, so passing them in only made trl tokenize every
+  val record per run for a dataset nothing read).
 - **Splits**: trains on `dataset_train.jsonl` by default; val loss is
   computed every 50 steps (`--eval-steps`); a fallback seeded carve-out
   protects custom single-file datasets.
@@ -331,8 +332,9 @@ mechanisms keep the splits honest:
 - **Evaluation cost**: that callback, not the training steps, sets the wall
   time of a run. It costs a measured 1.2 ms per token (a forward plus the
   final `lm_head` over the same tokens), which at the measured 0.63 s per
-  example is about 43 min for a full pass over the 4,071-example val split
-  and the same again for the 4,086-example test split. Ten evaluations is
+  example is about 43 min for a full pass over the 3,984-example val split
+  and about 43 min again for the 4,185-example test split (the v0.7.0
+  measurement, on splits of 4,071 and 4,186). Ten evaluations is
   about 7 h. The GPU is not the constraint and cannot be made
   one: it reports 95-100% utilization with its SM clock at 180 MHz of a
   3090 MHz maximum, drawing 55 W, so it is fed small kernels and idles
@@ -354,8 +356,8 @@ mechanisms keep the splits honest:
   the same order, so the curve compares like with like. `--eval-budget-min`
   (default 300) is a ceiling, not a control: the run projects its evaluation
   cost, logs it, and warns when the chosen sizes exceed it, but never
-  silently resizes anything. **Training data is untouched** - all 72,105
-  records are still trained on. `training_summary.json` records `val` next to
+  silently resizes anything. **Training data is untouched** - every train
+  record is still trained on. `training_summary.json` records `val` next to
   `val_total` and `test` next to `test_total`, so a reported loss cannot be
   read as a full-split loss. Losses from this version onward are therefore
   comparable run-to-run but not to the full-split figures in the v0.3.0
@@ -376,10 +378,10 @@ mechanisms keep the splits honest:
   `train_seconds` covers only the segment that this process ran. `--no-resume`
   skips the lookup, and raising `--max-steps` turns a finished run into a
   resumable one.
-- **Step budget and epochs**: one pass over the 72,105 train records is 9,013
+- **Step budget and epochs**: one pass over the 72,547 train records is 9,069
   optimizer steps at 8 records per step (batch 1 x 8 accumulation), so the
   default `--max-steps 500` is **0.06 of one epoch**. The startup log says so
-  (`Step budget: 500 step(s) of 9013 per epoch`). At the measured 13-21 s per
+  (`Step budget: 500 step(s) of 9069 per epoch`). At the measured 13-21 s per
   step on this card, an epoch is 30-48 h, so the usual advice to train 2-3
   epochs is a 60-140 h job here.
 - **Why the default is a fraction of an epoch**: iteration speed, not a claim

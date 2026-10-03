@@ -29,9 +29,16 @@ which commands to use. Regenerate the tree below with `make agents-tree`.
    and writes checkpoints plus a training summary (train/val/test loss
    histories) to `outputs/q3as/`.
 7. `make generate` produces Ada solutions with both models into
-   `outputs/generated_solutions/<label>/`.
-8. `make eval` and `make eval-pipeline` score them (BLEU, compilation, unit
-   tests, SPARK proofs) and write reports to `outputs/`; `make eval-report`
+   `outputs/generated_solutions/<label>/`, writing a `generation_meta.json`
+   sidecar per model (reply shape, files actually changed, spec/body routing)
+   that `make eval` reports next to the scores.
+8. `make eval-pipeline` scores them with ada-eval (compilation, unit tests,
+   SPARK proofs) into `outputs/eval_results/`, then `make eval` adds BLEU,
+   exact match and compliance from `outputs/eval_results.json` and prints the
+   pipeline tallies; that order matters, because `eval` reads the tallies
+   `eval-pipeline` writes and the other order reports the previous run's
+   numbers. `make eval-data` (a prerequisite of `make eval`) rebuilds the
+   derived benchmark JSONL it scores against. `make eval-report`
    writes the versioned summary to `docs/results/result-vX.Y.Z.md` (version from
    [`alire.toml`](alire.toml), bumped with `make bump-version`), including the
    train/val/test loss table and a training-trend verdict.
@@ -90,6 +97,12 @@ from ada-eval.
   training-material labs (`discover_lab_pairs`, `build_lab_pair_turns`) and
   `assurance_qa` from the SPARK Platinum repos' compliance docs
   (`load_spark_assurance_docs`, `build_spark_assurance_turns`).
+  `pair_files` keys a body on `(directory, stem)`, so a spec only ever pairs
+  with the body beside it (a stem-only key paired 138 specs with a foreign
+  body across the monorepo), and `_SKILL_DOC_PATTERNS` matches each
+  guidance repo's real layout (`skills/<name>/...`), which is how the
+  ada-spark proof references stopped being silently dropped (two of seven
+  documents were loaded before the fix; five of six now are).
 - [`data/processing_scripts/source_paths.py`](data/processing_scripts/source_paths.py)
   - resolves every source repo to its cache directory
   (`data/raw_repos/<owner>/<repo>`, with the legacy sibling location as
@@ -119,7 +132,7 @@ from ada-eval.
   script (Unsloth, 1024-token window, single-process dataset tokenization, LoRA
   adapters on Qwen3-8B). The train split streams from JSONL into an Arrow
   table of int32 `input_ids` under `data/processed/.tokenized/` (151 MB for
-  72,105 records against 468 MB of JSONL, and
+  72,105 records against 468 MB of JSONL (measured on the v0.7.0 dataset), and
   trl's own 4-minute tokenization pass is skipped because the column marks the
   dataset processed); the eval splits stay text for the chunked eval callback
   and are sampled by `--eval-sample` / `--test-sample` so a run's evaluation
@@ -139,19 +152,33 @@ from ada-eval.
   configures its own logger, because importing unsloth makes
   `logging.basicConfig` a no-op.
 - [`eval/generate.py`](eval/generate.py) - batch generation for the fine-tuned
-  and base models.
+  and base models. A reply becomes project files through
+  `parse_generated_files`: `File: <path>` entries when the model follows the
+  prompt's contract, otherwise a single fenced block at the sample's target
+  path. Every ada-eval target is a spec (`.ads`), so a fallback block that
+  opens a `package body` is routed to the sibling `.adb` (`body_sibling`),
+  and only when the base tree already carries that mirror file; an explicit
+  `File:` entry still wins. Per-sample reply shape, changed-file count and
+  whether the routing fired go to `generation_meta.json` beside the packed
+  JSONL, because none of it fits the ada-eval sample schema and all of it
+  changes how a build number reads.
 - [`eval/baseline_eval.py`](eval/baseline_eval.py) - reference-based scoring:
   joins the `make generate` output to the ada-eval canonical solutions and
   reports BLEU-4, exact match, file-set match, and standard compliance per
   model, plus the ada-eval BUILD/TEST/PROVE tallies
-  (`outputs/eval_results.json`). Exits non-zero when there is nothing to score;
+  (`outputs/eval_results.json`) and the reply-format shape read from
+  `generation_meta.json`. Refuses reference records with no solution files: a
+  hollow pack reports BLEU 0.0 with every standard `Unknown` and reads like a
+  model result. Exits non-zero when there is nothing to score;
   it never scores the training corpus.
 - [`eval/ada_eval_common.py`](eval/ada_eval_common.py) - the single
   build/test/prove tally shared by both eval modules and the report, plus the
   packed-dataset naming rules. Do not reimplement it: a third divergent copy is
   what made the published prove counts disagree with the comparison report.
 - [`eval/eval_pipeline.py`](eval/eval_pipeline.py) - BUILD/TEST/PROVE comparison
-  report between base and fine-tuned models via ada-eval.
+  report between base and fine-tuned models via ada-eval. It is the only writer
+  of `outputs/eval_results/`, so it must run before `make eval` prints its
+  tallies.
 - [`scripts/validate_defects.py`](scripts/validate_defects.py) - compiles the
   dataset's defect pairs with the real GNAT and checks the claimed compiler
   messages. Exit code is the contract: any "compiles clean" defect is a failure.
@@ -173,6 +200,15 @@ from ada-eval.
   "changed", so a failed check cannot destroy a good cache. `make fetch-sources`
   runs the default (reuse), `make check-sources` and `make update-sources` the
   two comparison modes.
+- [`scripts/pack_eval_data.py`](scripts/pack_eval_data.py) - rebuilds ada-eval's
+  `data/base/compacted/*.jsonl`, the derived JSONL that `baseline_eval` scores
+  against and that no fresh cache contains. Sets
+  `GIT_CEILING_DIRECTORIES` to the ada-eval checkout, because the packer is
+  git-aware and the cache sits inside this repository where `data/raw_repos/`
+  is ignored, so an unguarded pack succeeds while writing records with no
+  solution files; passes `force=True` for the same reason; then verifies that
+  every record carries files. `make eval-data` runs it and `make eval`
+  depends on it.
 - [`scripts/ada_env.sh`](scripts/ada_env.sh) - runs any command inside the Alire
   toolchain environment (`alr exec`); all Ada tool invocations go through it.
 - [`scripts/alire_env.py`](scripts/alire_env.py) - Python side of the same:
@@ -324,14 +360,17 @@ q3as/
            v0.5.0.md
            v0.6.0.md
            v0.7.0.md
+           v0.8.0.md
        results/
            README.md
            result-data-v0.1.0.json
            result-data-v0.3.0.json
            result-data-v0.4.1.json
+           result-data-v0.7.0.json
            result-v0.1.0.md
            result-v0.3.0.md
            result-v0.4.1.md
+           result-v0.7.0.md
        architecture.md
        data-provenance.md
        datasets-and-training.md
@@ -372,6 +411,7 @@ q3as/
        gen_eval_report.py
        gen_verified_spark.py
        make_probe_splits.py
+       pack_eval_data.py
        python_env.sh
        run_cap_experiment.sh
        validate_defects.py
@@ -382,11 +422,14 @@ q3as/
        test_code_variants.py
        test_defect_families.py
        test_eval_guard.py
+       test_eval_pipeline.py
        test_eval_report_training.py
        test_eval_scoring.py
        test_gen_contract_mutations.py
        test_generate.py
        test_lab_extraction.py
+       test_makefile.py
+       test_pack_eval_data.py
        test_parsers.py
        test_reporting.py
        test_stage_state.py

@@ -448,7 +448,16 @@ def load_simple_english_rules() -> str:
 # Per-repo skill-document discovery rules: dir name -> repo-relative glob
 # patterns for files whose content forms the guidance text.
 _SKILL_DOC_PATTERNS: dict[str, list[str]] = {
-    "ada-spark": ["SKILL.md", "agent-knowledge/*.md"],
+    # ada-spark keeps its agent skill under skills/<name>/, the same shape the
+    # other two repos use. The old repo-root patterns matched only
+    # agent-knowledge/ and silently dropped SKILL.md and all three references
+    # (spark-proof.md, toolchain.md, embedded-and-portability.md), which is
+    # where the SPARK proof guidance actually lives.
+    "ada-spark": [
+        "skills/*/SKILL.md",
+        "skills/*/references/*.md",
+        "agent-knowledge/*.md",
+    ],
     "SimpleEnglish": ["skills/*/SKILL.md", "skills/*/references/*.md"],
     "skills": ["plugins/*/skills/*/SKILL.md"],
 }
@@ -851,36 +860,36 @@ def os_walk_safe(root: Path):
 # --------------------------------------------------------------------------- #
 
 def pair_files(discovered: dict[str, list[Path]]) -> list[dict[str, Path | str | None]]:
-    """Pair .ads (specification) with .adb (body) files by package name.
+    """Pair .ads (specification) with .adb (body) files that sit beside it.
 
-    If a direct package-name match fails, falls back to filename convention
-    (e.g., ``foo.ads`` pairs with ``foo.adb``). Unpaired files are emitted
-    as standalone entries.
+    The pairing key is (directory, stem): a body only ever pairs with the
+    spec in its own directory. The old index was keyed on the stem alone, so
+    across a cache with many source trees a ``sorting/sort.ads`` could pair
+    with a ``search/sort.adb`` and the resulting ``code_pair`` turn would
+    show the model a spec and an unrelated body as one unit.
+    Unpaired files are emitted as standalone entries.
     """
     pairs: list[dict[str, Path | str | None]] = []
     ads_files = discovered.get("ads", [])
     adb_files = discovered.get("adb", [])
 
-    adb_index: dict[str, Path] = {p.stem: p for p in adb_files}
-    paired_adb: set[str] = set()
+    adb_index: dict[tuple[str, str], Path] = {
+        (p.parent.as_posix(), p.stem): p for p in adb_files
+    }
+    paired_adb: set[Path] = set()
 
     for ads_path in ads_files:
-        stem = ads_path.stem
-        adb_path = adb_index.get(stem)
+        adb_path = adb_index.get((ads_path.parent.as_posix(), ads_path.stem))
         package_name = extract_package_name(ads_path)
 
-        if adb_path and adb_path.name not in paired_adb:
-            paired_adb.add(adb_path.name)
+        if adb_path is not None and adb_path not in paired_adb:
+            paired_adb.add(adb_path)
             pairs.append({"spec": ads_path, "impl": adb_path, "package": package_name})
-        elif adb_path and adb_path.name in paired_adb:
-            alt_ads = [p for p in ads_files if p.stem == stem and p != ads_path]
-            if not alt_ads:
-                pairs.append({"spec": ads_path, "impl": None, "package": package_name})
         else:
             pairs.append({"spec": ads_path, "impl": None, "package": package_name})
 
     for adb_path in adb_files:
-        if adb_path.name not in paired_adb:
+        if adb_path not in paired_adb:
             package = extract_package_name(adb_path)
             pairs.append({"spec": None, "impl": adb_path, "package": package})
 
@@ -898,8 +907,11 @@ def extract_package_name(file_path: Path) -> str | None:
     except (UnicodeDecodeError, OSError):
         return file_path.stem
 
+    # Matches both `package Foo is` and `package body Foo is`. The old
+    # pattern required the word "package" twice, so every body file fell
+    # through to the filename stem.
     m = re.search(
-        r"(?:package\s+body\s+)?package\s+(\w+)\s+is",
+        r"package\s+(?:body\s+)?(\w+)\s+is",
         content,
         re.IGNORECASE,
     )
@@ -1104,6 +1116,18 @@ def _first_use(code: str, name: str, start: int, spans: list[tuple[int, int]]) -
         if not any(s <= pos < e for s, e in spans):
             return pos
     return None
+
+
+def _is_aggregate_component_use(code: str, end: int) -> bool:
+    """True when the identifier ending at *end* sits in aggregate position.
+
+    A record component is referenced as ``(Found => True, Content => I)``.
+    Renaming or deleting it there does not produce an "undefined" error:
+    GNAT resolves the aggregate against the subtype and says the name is not
+    a component of it. A family that claims ``error: "X" is undefined``
+    must therefore not pick such a name.
+    """
+    return re.match(r"\s*=>", code[end:]) is not None
 
 
 def _extract_with_clauses(code: str) -> list[str]:
@@ -1393,6 +1417,13 @@ def inject_defect(code: str, family: str) -> tuple[str, str, str] | None:
             tail_lines = [ln for ln in look_back.splitlines()[-3:]]
             if any(re.search(r"\b(?:procedure|function)\b[^;]*\(", ln) for ln in tail_lines):
                 continue
+            # A record component is used in aggregate position, where a bad
+            # name is reported as not a component of the aggregate subtype
+            # and not as undefined (validate-defects evidence: the
+            # Ada-Algorithms search_array variant, whose Result is assigned
+            # as (Found => True, Content => I)). Skip such a candidate.
+            if _is_aggregate_component_use(code, pos + len(name)):
+                continue
             broken = code[:pos] + typo + code[pos + len(name):]
             return (
                 broken,
@@ -1499,6 +1530,14 @@ def inject_defect(code: str, family: str) -> tuple[str, str, str] | None:
             # of the pattern or every assignment inflates the count.
             decl_count = len(re.findall(rf"^\s*{name}\s*:\s*(?:constant\s+)?[\w.]", code, re.MULTILINE))
             if decl_count != 1 or _first_use(code, name, dm.end(), spans) is None:
+                continue
+            # A record component used in aggregate position: removing its
+            # declaration makes GNAT report a missing component, not an
+            # undefined name (same evidence as the typo family).
+            first_use = _first_use(code, name, dm.end(), spans)
+            if first_use is not None and _is_aggregate_component_use(
+                code, first_use + len(name)
+            ):
                 continue
             line_start = code.rfind("\n", 0, dm.start()) + 1
             line_end = code.find("\n", dm.end())

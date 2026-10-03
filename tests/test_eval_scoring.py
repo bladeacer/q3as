@@ -304,3 +304,259 @@ class TestComplianceScoring:
     def test_no_keywords_gives_zero_not_an_error(self):
         result = be.check_ada_compliance("package P is end P;", "Ada 2012")
         assert result["compliance_score"] == 0.0
+
+
+# --------------------------------------------------------------------------- #
+# load_reference_index: refusing to score against a hollow benchmark
+# --------------------------------------------------------------------------- #
+#
+# `data/base/compacted/*.jsonl` is derived from ada-eval's expanded samples.
+# ada-eval's packer reads them with `git ls-files` when the path is inside a
+# worktree; this repository is one and `data/raw_repos/` is gitignored, so a
+# pack there produces records with no `canonical_solution` at all. Scoring
+# against those reports BLEU 0.0 with every standard `Unknown`, which reads
+# as a model result. The index must refuse them instead.
+
+class TestLoadReferenceIndex:
+    def _compacted(self, tmp_path, records, name="spark_learn.jsonl"):
+        d = tmp_path / "ada-eval" / "data" / "base" / "compacted"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / name).write_text(
+            "".join(json.dumps(r) + "\n" for r in records), encoding="utf-8"
+        )
+        return tmp_path / "ada-eval"
+
+    def _files(self, **files):
+        return {k: base64.b64encode(v.encode()).decode() for k, v in files.items()}
+
+    def test_indexes_records_with_solutions(self, tmp_path):
+        ada_eval = self._compacted(tmp_path, [{
+            "name": "s1",
+            "canonical_solution": self._files(**{"src/p.ads": "package P is end P;"}),
+        }])
+        index = be.load_reference_index(ada_eval)
+        assert list(index) == [("spark_learn", "s1")]
+
+    def test_drops_and_reports_records_without_files(self, tmp_path, caplog):
+        ada_eval = self._compacted(tmp_path, [{"name": "s1", "canonical_solution": {}}])
+        with caplog.at_level("ERROR"):
+            index = be.load_reference_index(ada_eval)
+        assert index == {}
+        assert "no canonical solution" in caplog.text
+
+    def test_hollow_record_does_not_hide_a_good_one(self, tmp_path):
+        ada_eval = self._compacted(tmp_path, [
+            {"name": "bad", "canonical_solution": {}},
+            {"name": "good", "canonical_solution": self._files(**{"src/p.ads": "x"})},
+        ])
+        assert list(be.load_reference_index(ada_eval)) == [("spark_learn", "good")]
+
+    def test_missing_directory_is_empty_and_warns(self, tmp_path, caplog):
+        with caplog.at_level("WARNING"):
+            assert be.load_reference_index(tmp_path / "absent") == {}
+        assert "No ada-eval reference data" in caplog.text
+
+    def test_malformed_lines_are_skipped(self, tmp_path):
+        d = tmp_path / "ada-eval" / "data" / "base" / "compacted"
+        d.mkdir(parents=True)
+        (d / "spark_learn.jsonl").write_text(
+            "{not json}\n"
+            + json.dumps({
+                "name": "s1",
+                "canonical_solution": self._files(**{"src/p.ads": "x"}),
+            }) + "\n",
+            encoding="utf-8",
+        )
+        assert list(be.load_reference_index(tmp_path / "ada-eval")) == [("spark_learn", "s1")]
+
+
+# --------------------------------------------------------------------------- #
+# Reply-shape reporting
+# --------------------------------------------------------------------------- #
+
+
+class TestGenerationMeta:
+    def _meta(self, tmp_path, payload):
+        d = tmp_path / "fine_tuned"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "generation_meta.json").write_text(json.dumps(payload), encoding="utf-8")
+        return tmp_path
+
+    def test_missing_sidecar_is_empty(self, tmp_path):
+        assert be.load_generation_meta(tmp_path, "fine_tuned") == {}
+
+    def test_corrupt_sidecar_is_empty_and_warns(self, tmp_path, caplog):
+        d = tmp_path / "fine_tuned"
+        d.mkdir(parents=True)
+        (d / "generation_meta.json").write_text("{oops", encoding="utf-8")
+        with caplog.at_level("WARNING"):
+            assert be.load_generation_meta(tmp_path, "fine_tuned") == {}
+        assert "Cannot read" in caplog.text
+
+    def test_non_dict_payload_is_empty(self, tmp_path):
+        assert be.load_generation_meta(self._meta(tmp_path, [1, 2]), "fine_tuned") == {}
+
+    def test_reads_the_sidecar(self, tmp_path):
+        payload = {"s1": {"reply_format": "file_blocks", "changed_files": 2}}
+        assert be.load_generation_meta(self._meta(tmp_path, payload), "fine_tuned") == payload
+
+
+class TestSummariseReplyShapes:
+    def test_counts_formats_over_scored_samples_only(self):
+        meta = {
+            "s1": {"reply_format": "file_blocks", "changed_files": 1},
+            "s2": {"reply_format": "fenced_block", "changed_files": 0},
+            "s3": {"reply_format": "file_blocks", "changed_files": 1},
+        }
+        summary = be.summarise_reply_shapes(meta, {"s1", "s2"})
+        assert summary["known"] == 2
+        assert summary["by_format"] == {"file_blocks": 1, "fenced_block": 1}
+
+    def test_counts_untouched_samples(self):
+        # A reply that only echoes the base file leaves the base project in
+        # place, so its build result is the base tree's, not the model's.
+        meta = {
+            "s1": {"reply_format": "file_blocks", "changed_files": 0},
+            "s2": {"reply_format": "fenced_block", "changed_files": 1},
+        }
+        assert be.summarise_reply_shapes(meta, {"s1", "s2"})["untouched"] == 1
+
+    def test_unknown_samples_are_not_counted(self):
+        summary = be.summarise_reply_shapes({"s1": {"reply_format": "file_blocks"}}, {"s9"})
+        assert summary == {"known": 0, "by_format": {}, "untouched": 0}
+
+    def test_missing_changed_files_counts_as_untouched(self):
+        summary = be.summarise_reply_shapes({"s1": {"reply_format": "raw_text"}}, {"s1"})
+        assert summary["untouched"] == 1
+
+
+class TestScoreModelReplyShapes:
+    def test_sidecar_reaches_the_result(self, tmp_path):
+        ada = "package P is\n   function F (X : Integer) return Integer is (X * 2);\nend P;\n"
+        refs = {("spark_learn", "s1"): {
+            "name": "s1",
+            "canonical_solution": {"src/p.ads": base64.b64encode(ada.encode()).decode()},
+        }}
+        gen_dir = tmp_path / "fine_tuned"
+        gen_dir.mkdir()
+        (gen_dir / "spark_spark_learn.jsonl").write_text(json.dumps({
+            "name": "s1",
+            "location": {"path": "src/p.ads"},
+            "generated_solution": {"src/p.ads": base64.b64encode(ada.encode()).decode()},
+        }) + "\n", encoding="utf-8")
+        (gen_dir / "generation_meta.json").write_text(json.dumps(
+            {"s1": {"reply_format": "file_blocks", "changed_files": 1}}
+        ), encoding="utf-8")
+        result = be.score_model("fine_tuned", tmp_path, refs)
+        assert result["reply_shapes"]["by_format"] == {"file_blocks": 1}
+        assert result["reply_shapes"]["untouched"] == 0
+
+    def test_no_sidecar_leaves_the_key_empty(self, tmp_path):
+        refs = {("spark_learn", "s1"): {
+            "name": "s1",
+            "canonical_solution": {"src/p.ads": base64.b64encode(b"x").decode()},
+        }}
+        gen_dir = tmp_path / "fine_tuned"
+        gen_dir.mkdir()
+        (gen_dir / "spark_spark_learn.jsonl").write_text(json.dumps({
+            "name": "s1",
+            "location": {"path": "src/p.ads"},
+            "generated_solution": {"src/p.ads": base64.b64encode(b"x").decode()},
+        }) + "\n", encoding="utf-8")
+        result = be.score_model("fine_tuned", tmp_path, refs)
+        assert result["reply_shapes"]["known"] == 0
+
+
+# --------------------------------------------------------------------------- #
+# print_stats_block
+# --------------------------------------------------------------------------- #
+
+
+class TestPrintStatsBlock:
+    def test_prints_every_kind_with_results(self, capsys):
+        be.print_stats_block({
+            "build": {"compiled": 10, "failed": 9, "total": 19},
+            "test": {"passed": 8, "failed": 11, "total": 19},
+            "prove": {"proved": 0, "unproved": 10, "error": 9, "total": 19},
+        })
+        out = capsys.readouterr().out
+        assert "Compilation: 10/19 (52.6%)" in out
+        assert "Unit Tests: 8/19 (42.1%)" in out
+        assert "SPARK Proof: 0/19 (0.0%)" in out
+
+    def test_missing_results_are_named_not_omitted(self, capsys):
+        # Silence read as "nothing failed" when it meant "nothing was
+        # measured": these tallies only exist after `make eval-pipeline`.
+        be.print_stats_block({
+            "build": {"compiled": 0, "failed": 0, "total": 0},
+            "test": {"passed": 0, "failed": 0, "total": 0},
+            "prove": {"proved": 0, "unproved": 0, "error": 0, "total": 0},
+        })
+        out = capsys.readouterr().out
+        assert out.count("no results") == 3
+        assert "make eval-pipeline" in out
+
+    def test_absent_kind_is_named(self, capsys):
+        be.print_stats_block({"build": {"compiled": 1, "total": 2}})
+        out = capsys.readouterr().out
+        assert "Compilation: 1/2 (50.0%)" in out
+        assert "Unit Tests: no results" in out
+
+    def test_empty_stats_never_divide_by_zero(self, capsys):
+        be.print_stats_block(common.empty_stats())
+        assert "no results" in capsys.readouterr().out
+
+
+# --------------------------------------------------------------------------- #
+# Small helpers that main() depends on
+# --------------------------------------------------------------------------- #
+
+
+class TestHelpers:
+    def test_base_model_label(self, tmp_path):
+        assert be.base_model_label(tmp_path / "qwen3-8b") == "base_qwen3-8b"
+
+    def test_dataset_of_strips_one_packed_prefix(self):
+        assert be._dataset_of(Path("spark_spark_learn.jsonl")) == "spark_learn"
+
+    def test_dataset_of_leaves_a_bare_name(self):
+        assert be._dataset_of(Path("learn.jsonl")) == "learn"
+
+    def test_compute_stats_reads_the_pipeline_directory(self, tmp_path, monkeypatch):
+        d = tmp_path / "eval_results" / "fine_tuned" / "spark_spark_learn"
+        d.mkdir(parents=True)
+        (d / "spark_spark_learn.jsonl").write_text(json.dumps({
+            "name": "s1",
+            "evaluation_results": [
+                {"eval": "build", "compiled": True},
+                {"eval": "test", "compiled": True, "passed_tests": False},
+                {"eval": "prove", "result": "error"},
+            ],
+        }) + "\n", encoding="utf-8")
+        monkeypatch.setattr(be, "EVAL_RESULTS_DIR", tmp_path / "eval_results")
+        stats = be.compute_stats_from_ada_eval("fine_tuned")
+        assert stats["build"]["compiled"] == 1
+        assert stats["test"]["passed"] == 0
+        assert stats["prove"]["error"] == 1
+
+    def test_eval_methodology_counts_samples(self, tmp_path, monkeypatch):
+        d = tmp_path / "ada-eval" / "data" / "base" / "compacted"
+        d.mkdir(parents=True)
+        (d / "spark_learn.jsonl").write_text("{}\n{}\n", encoding="utf-8")
+        (d / "spark_custom.jsonl").write_text("{}\n", encoding="utf-8")
+        monkeypatch.setattr(be, "ADA_EVAL_DIR", tmp_path / "ada-eval")
+        method = be.load_eval_methodology()
+        assert method["categories"]["spark_learn"]["sample_count"] == 2
+        assert method["categories"]["spark_custom"]["sample_count"] == 1
+
+    def test_eval_methodology_without_a_cache(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(be, "ADA_EVAL_DIR", tmp_path / "absent")
+        assert be.load_eval_methodology()["categories"] == {}
+
+    def test_check_tools_available_reports_missing(self, monkeypatch):
+        monkeypatch.setattr(be, "has_tool", lambda t: False)
+        assert be.check_tools_available(["prove"]) is False
+
+    def test_check_tools_available_passes(self, monkeypatch):
+        monkeypatch.setattr(be, "has_tool", lambda t: True)
+        assert be.check_tools_available(["build", "test"]) is True

@@ -166,12 +166,23 @@ def _dataset_of(path: Path) -> str:
 
 
 def load_reference_index(ada_eval_dir: Path) -> dict[tuple[str, str], dict[str, Any]]:
-    """Index the canonical solutions by (dataset, sample name)."""
+    """Index the canonical solutions by (dataset, sample name).
+
+    ``data/base/compacted`` is derived from ``expanded`` and is not version
+    controlled, so it can be missing after a fetch, or present but hollow
+    when ada-eval's git-aware packer ran inside a worktree that ignores the
+    cache (``data/raw_repos/`` is gitignored here, so ``git ls-files``
+    returns nothing). A hollow index is the dangerous case: every reference
+    is found, so scoring proceeds and reports BLEU 0.0 with every standard
+    ``Unknown`` instead of failing. Records without files are dropped and
+    reported, so the caller sees an empty index rather than silent zeros.
+    """
     compacted = ada_eval_dir / "data" / "base" / "compacted"
     index: dict[tuple[str, str], dict[str, Any]] = {}
     if not compacted.exists():
         logger.warning("No ada-eval reference data at %s", compacted)
         return index
+    hollow = 0
     for jsonl_file in sorted(compacted.glob("*.jsonl")):
         dataset = jsonl_file.stem
         try:
@@ -183,9 +194,18 @@ def load_reference_index(ada_eval_dir: Path) -> dict[tuple[str, str], dict[str, 
                         sample = json.loads(line)
                     except json.JSONDecodeError:
                         continue
+                    if not decode_files(sample.get("canonical_solution")):
+                        hollow += 1
+                        continue
                     index[(dataset, sample.get("name", ""))] = sample
         except OSError as exc:
             logger.warning("Cannot read reference %s: %s", jsonl_file, exc)
+    if hollow:
+        logger.error(
+            "%d reference(s) in %s carry no canonical solution files. The "
+            "compacted data was packed hollow; rebuild it with "
+            "`make eval-data` (see docs/evaluation.md).", hollow, compacted
+        )
     return index
 
 
@@ -359,6 +379,10 @@ def score_model(
         "samples_scored": scored,
         "samples_unmatched": unmatched,
         "reference_total": len(references),
+        "reply_shapes": summarise_reply_shapes(
+            load_generation_meta(generated_dir, label),
+            {s["name"] for s in per_sample},
+        ),
         "per_sample": per_sample,
     }
     if scored:
@@ -417,6 +441,51 @@ def load_eval_methodology() -> dict[str, Any]:
     return methodology
 
 
+def load_generation_meta(generated_dir: Path, label: str) -> dict[str, dict[str, Any]]:
+    """Read the per-sample sidecar eval/generate.py writes beside the JSONL.
+
+    It records the reply shape and how many files the reply actually
+    changed. Without it a sample the model declined to touch is
+    indistinguishable from one it solved: both are scored on a project tree,
+    and a reply that only echoes the base file leaves the base project in
+    place, which still builds.
+    """
+    path = generated_dir / label / "generation_meta.json"
+    if not path.exists():
+        return {}
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError) as exc:
+        logger.warning("Cannot read %s: %s", path, exc)
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def summarise_reply_shapes(
+    meta: dict[str, dict[str, Any]], scored_names: set[str]
+) -> dict[str, Any]:
+    """Format-compliance counts over the samples that were actually scored."""
+    shapes: dict[str, int] = {}
+    untouched = 0
+    known = 0
+    for name in scored_names:
+        entry = meta.get(name)
+        if entry is None:
+            continue
+        known += 1
+        shapes[entry.get("reply_format", "unknown")] = (
+            shapes.get(entry.get("reply_format", "unknown"), 0) + 1
+        )
+        if not entry.get("changed_files"):
+            untouched += 1
+    return {
+        "known": known,
+        "by_format": shapes,
+        "untouched": untouched,
+    }
+
+
 def print_stats_block(stats: dict[str, Any]) -> None:
     for key, label, numerator in (
         ("build", "Compilation", "compiled"),
@@ -427,6 +496,11 @@ def print_stats_block(stats: dict[str, Any]) -> None:
         total = block.get("total", 0)
         if total > 0:
             print(f"  {label}: {block.get(numerator, 0)}/{total} ({block[numerator] / total * 100:.1f}%)")
+        else:
+            # Silence here reads as "no failures" when it means "no data":
+            # these tallies come from outputs/eval_results/, which only
+            # `make eval-pipeline` writes.
+            print(f"  {label}: no results (run `make eval-pipeline` first)")
 
 
 def main() -> int:
@@ -514,6 +588,11 @@ def main() -> int:
             "bleu": "BLEU-4, add-one smoothed, brevity penalty, single reference",
             "exact_match": "normalised text equality on the subprogram's own source file",
             "compliance": "standard detected on the canonical solution, not on the model output",
+            "reply_shapes": (
+                "share of scored samples whose reply used the requested "
+                "'File: <path>' entries, and how many left every base file "
+                "unchanged (an unchanged project is scored as the base tree)"
+            ),
         },
     }
 
@@ -540,6 +619,15 @@ def main() -> int:
             print(f"  File-set match  : {model['file_set_match_rate'] * 100:.1f}%")
             print(f"  Std compliance  : {model['compliance']:.4f}")
             print(f"  Standards       : {model.get('standard_distribution', {})}")
+            shapes = model.get("reply_shapes") or {}
+            if shapes.get("known"):
+                formats = ", ".join(
+                    f"{fmt}={n}" for fmt, n in sorted(shapes["by_format"].items())
+                )
+                print(
+                    f"  Reply format    : {formats}"
+                    f" (untouched {shapes['untouched']}/{shapes['known']})"
+                )
         print_stats_block(model["ada_eval"])
 
     ft = per_model[FINE_TUNED_LABEL]

@@ -18,7 +18,8 @@ string, and is listed in the [results index](../results/README.md).
 
 | Version | What changed | Results |
 |---|---|---|
-| [0.7.0](v0.7.0.md) | Prover-verified SPARK2 turns from all 16 trees, lab explanation twins, assurance-ladder QA, answer-chunking fix | _not run_ |
+| [0.8.0](v0.8.0.md) | Spec/body routing repair in the harness, reply-format and no-op reporting, hollow-benchmark refusal, `make all` evaluation order, three extraction bug fixes, 406 -> 561 tests, extraction scope | _not run_ |
+| [0.7.0](v0.7.0.md) | Prover-verified SPARK2 turns from all 16 trees, lab explanation twins, assurance-ladder QA, answer-chunking fix | [result-v0.7.0.md](../results/result-v0.7.0.md) |
 | [0.6.0](v0.6.0.md) | Deeper extraction from existing sources: contract curriculum scaled 4x, lab prompt/answer turns, skills proof-workflow docs | _not run_ |
 | [0.5.0](v0.5.0.md) | Contract templates cover every eval proof blocker; `make update-sources` actually updates | _not run_ |
 | [0.4.1](v0.4.1.md) | Eval passes report a rate and ETA; smaller eval samples; an interrupted run resumes | _not run_ |
@@ -37,7 +38,9 @@ withdrawn; the reason is stated in its entry._
 - Numbers in a versioned changelog are the numbers that version measured.
   When a later version fixes how those numbers are produced, it says so; do
   not compare a figure from one version against the same figure from another
-  unless the later entry says the measurement is unaffected.
+  unless the later entry says the measurement is unaffected. `0.8.0` is the
+  case in point: it repairs the harness, so it re-scores the `0.7.0` adapter
+  to explain the difference rather than replacing the `0.7.0` result file.
 - Source-level changes in the repo history are not recorded here. This is the
   release log, not a commit log.
 

@@ -150,13 +150,11 @@ build (see below) still drops a similar volume.
 
 Current shipped dataset (AST_STRUCTURAL_CAP = 10), as recorded in
 `data/processed/dataset_metadata.json` at build time:
-- 80,262 turns; group-aware splits 72,105 train / 4,071 val / 4,086 test,
-- eval guard: 425 blocked signatures (394 subprograms: 207 exact,
-  187 structural; 31 prompts: 17 exact, 14 structural), 795 contaminated
-  groups dropped,
-- dedup before split: 52,535 duplicates removed (23,593 verbatim, 28,942
+- 80,716 turns; group-aware splits 72,547 train / 3,984 val / 4,185 test,
+- eval guard: 505 blocked signatures, 827 contaminated groups dropped,
+- dedup before split: 52,583 duplicates removed (verbatim plus 28,942
   AST-structural over the cap),
-- 2,369 empty-assistant records dropped (mostly spec-only units from the Ada-
+- 2,371 empty-assistant records dropped (mostly spec-only units from the Ada-
   Algorithms monorepo).
 
 Those totals move with the source cache: a rebuild after `make

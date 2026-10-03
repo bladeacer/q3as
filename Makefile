@@ -1,4 +1,4 @@
-.PHONY: help setup sync download build-dataset parse-data gen-contracts gen-verified-spark check-integrity check-links train generate eval eval-pipeline eval-report bump-version prove ast-deps ada-env test lint validate-defects agents-tree fetch-sources check-sources update-sources clean clean-model all check-model
+.PHONY: help setup sync download build-dataset parse-data gen-contracts gen-verified-spark check-integrity check-links train generate eval eval-data eval-pipeline eval-report bump-version prove ast-deps ada-env test lint validate-defects agents-tree fetch-sources check-sources update-sources clean clean-model all check-model
 
 # Prerequisite chain for the dataset: parser outputs (docs chunks, AST units,
 # contract turns) must exist before the builder runs. Every stage fingerprints
@@ -66,6 +66,8 @@ help: ## Show this help message
 	@echo "  make parse-data     - Run the parser modules into data/processed/ extra JSONL"
 	@echo "                        (doc chunking, libadalang/structural Ada AST extraction)"
 	@echo "  make gen-contracts  - Generate gnatprove-verified contract turns (FORCE=1)"
+	@echo "  make gen-verified-spark - Prove real SPARK2 units with gnatprove and keep"
+	@echo "                        the ones that discharge (FORCE=1)"
 	@echo "  make build-dataset  - Build the training dataset from Ada source trees"
 	@echo "                        (cache: adacovex, Ada_CRDT, Ada-83-TLALOC, and the"
 	@echo "                        RobertBoettcherSF Ada-Algorithms monorepo) plus the"
@@ -83,6 +85,7 @@ help: ## Show this help message
 	@echo "                        solutions (BLEU-4, exact match, compliance) plus ada-eval"
 	@echo "                        compilation/test/proof for both models"
 	@echo "  make eval-pipeline  - Run full ada-eval BUILD/TEST/PROVE pipeline"
+	@echo "  make eval-data      - Rebuild ada-eval's compacted benchmark JSONL (run by eval)"
 	@echo "  make eval-report    - Write versioned result summary to docs/results/"
 	@echo "  make validate-defects - GNAT-compile defect pairs and check the claimed messages"
 	@echo ""
@@ -120,6 +123,9 @@ update-sources: fetch-sources ## Re-fetch the repos whose commit moved, then reb
 	@echo ""
 	@echo "Sources refreshed and the dataset rebuilt from them. Run"
 	@echo "'make check-integrity' to confirm no evaluation content slipped in."
+
+eval-data: ## Rebuild ada-eval's compacted benchmark JSONL from its expanded samples
+	uv run python scripts/pack_eval_data.py
 
 download: ## Download and sanity-check the Qwen3-8B model
 	HF_HUB_DISABLE_XET=1 uv run python training/download_model.py --model-name Qwen/Qwen3-8B --cache-dir models/qwen3-8b
@@ -163,10 +169,10 @@ generate: ## Generate Ada code with the fine-tuned and base (local download) mod
 	uv run python eval/generate.py --model outputs/q3as --base-model models/qwen3-8b \
 		--max-new-tokens $(MAX_NEW_TOKENS) --max-prompt-chars $(MAX_PROMPT_CHARS)
 
-eval: ## Run baseline evaluation (BLEU + compilation/test/SPARK metrics, base comparison)
+eval: eval-data ## Run baseline evaluation (BLEU + compilation/test/SPARK metrics, base comparison)
 	uv run python eval/baseline_eval.py --model outputs/q3as --base-model models/qwen3-8b
 
-eval-pipeline: ## Run full ada-eval BUILD/TEST/PROVE pipeline
+eval-pipeline: ## Run full ada-eval BUILD/TEST/PROVE pipeline (writes the tallies `make eval` prints)
 	uv run python eval/eval_pipeline.py --evals build test prove
 
 eval-report: ## Write versioned result summary to docs/results/ (version from alire.toml)
@@ -202,7 +208,7 @@ test: ## Run the Python unit tests
 
 lint: ## Run ruff and mypy over the project sources, then check markdown links and the AGENTS tree
 	uv run ruff check data/processing_scripts/ scripts/ eval/ tests/ tools/
-	MYPYPATH=data/processing_scripts uv run mypy data/processing_scripts/build_dataset.py data/processing_scripts/parse_docs.py data/processing_scripts/parse_ada_ast.py data/processing_scripts/eval_guard.py data/processing_scripts/code_variants.py data/processing_scripts/stage_state.py data/processing_scripts/progress.py eval/ada_eval_common.py eval/baseline_eval.py scripts/alire_env.py scripts/bump_version.py scripts/build_libadalang.py scripts/gen_eval_report.py scripts/gen_agents_tree.py scripts/gen_contract_mutations.py scripts/gen_verified_spark.py scripts/fetch_repos.py scripts/collect_cap_results.py scripts/make_probe_splits.py tools/check-links.py
+	MYPYPATH=data/processing_scripts:scripts uv run mypy --ignore-missing-imports data/processing_scripts/build_dataset.py data/processing_scripts/parse_docs.py data/processing_scripts/parse_ada_ast.py data/processing_scripts/eval_guard.py data/processing_scripts/code_variants.py data/processing_scripts/stage_state.py data/processing_scripts/progress.py eval/ada_eval_common.py eval/baseline_eval.py eval/generate.py eval/eval_pipeline.py scripts/alire_env.py scripts/bump_version.py scripts/build_libadalang.py scripts/gen_eval_report.py scripts/gen_agents_tree.py scripts/gen_contract_mutations.py scripts/gen_verified_spark.py scripts/fetch_repos.py scripts/collect_cap_results.py scripts/make_probe_splits.py scripts/pack_eval_data.py tools/check-links.py
 	uv run python tools/check-links.py
 	uv run python scripts/gen_agents_tree.py --check
 
@@ -230,7 +236,11 @@ check-links: ## Check every markdown link/anchor resolves; fail on a link to a p
 agents-tree: ## Regenerate the project file tree section in AGENTS.md
 	uv run python scripts/gen_agents_tree.py
 
-all: check-model build-dataset train generate eval eval-pipeline eval-report ## Run full pipeline: download (if needed), build dataset, train, generate, evaluate, report
+# eval-pipeline runs before eval on purpose: baseline_eval prints the
+# BUILD/TEST/PROVE tallies, and they come from outputs/eval_results/, which
+# only eval_pipeline.py writes. The other order reports the previous run's
+# numbers (or none at all on a clean tree) as if they were this run's.
+all: check-model build-dataset train generate eval-pipeline eval eval-report ## Run full pipeline: download (if needed), build dataset, train, generate, evaluate, report
 	@echo ""
 	@echo "=== Full pipeline complete ==="
 	@echo "  Base model: models/qwen3-8b (local download of Qwen/Qwen3-8B)"

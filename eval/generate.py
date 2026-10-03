@@ -34,6 +34,7 @@ import re
 import subprocess
 import sys
 import time
+from collections.abc import Container
 from pathlib import Path
 from typing import Any
 
@@ -277,7 +278,66 @@ def _safe_source_path(raw: str) -> Path | None:
     return path
 
 
-def parse_generated_files(reply: str, default_path: Path) -> dict[Path, str]:
+_BODY_RE = re.compile(r"^\s*package\s+body\b", re.IGNORECASE)
+
+
+def opens_with_package_body(code: str) -> bool:
+    """True when a reply block's first code line opens a package body.
+
+    Comment and blank lines are skipped, because a gnatdoc preamble in front
+    of the clause is the normal shape in this corpus. Matching anywhere in
+    the block would be wrong: a reply carrying a whole project has a package
+    body *somewhere*, and the clause that decides where the block belongs is
+    the first one.
+    """
+    for line in code.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("--"):
+            continue
+        return bool(_BODY_RE.match(stripped))
+    return False
+
+
+def body_sibling(spec_path: Path, project_files: Container[Path] | None) -> Path | None:
+    """Return the body path a body-only reply belongs at, or None.
+
+    Every ada-eval sample targets a spec (``.ads``) file, and the fine-tune
+    often answers with the unit's *body*. Written to the spec it becomes a
+    ``package body`` inside a package spec, which GNAT rejects, so the
+    sample fails BUILD for a routing mistake rather than for wrong Ada. The
+    repair only fires when the base tree already carries the sibling body
+    (the mirror file), so it never invents a file the project did not have.
+    An unknown tree (``None``) gets no repair at all.
+    """
+    if spec_path.suffix != ".ads":
+        return None
+    sibling = spec_path.with_suffix(".adb")
+    if project_files is None or sibling not in project_files:
+        return None
+    return sibling
+
+
+def reply_format(reply: str) -> str:
+    """Classify a reply by the shape ``parse_generated_files`` reads.
+
+    ``file_blocks`` is the contract the eval prompt asks for. The other two
+    are the fallbacks; a model that only ever uses them cannot change a
+    project with more than one source file, so the rate is reported next to
+    BUILD/TEST/PROVE rather than left implicit.
+    """
+    if any(_safe_source_path(m.group("path")) is not None for m in _FILE_BLOCK_RE.finditer(reply)):
+        return "file_blocks"
+    return "fenced_block" if _FENCE_RE.search(reply) else "raw_text"
+
+
+_FENCE_RE = re.compile(r"```")
+
+
+def parse_generated_files(
+    reply: str,
+    default_path: Path,
+    project_files: Container[Path] | None = None,
+) -> dict[Path, str]:
     """Parse a model reply into {relative_path: full file content}.
 
     The expected reply format (requested by build_user_prompt) is one entry
@@ -299,6 +359,12 @@ def parse_generated_files(reply: str, default_path: Path) -> dict[Path, str]:
     one fenced block per answer): a reply without "File:" headers but with a
     fenced block maps that block to *default_path*; a reply with no fences is
     used verbatim at *default_path*, matching the pre-context behavior.
+
+    A fallback block that opens a package *body* is routed to the sibling
+    ``.adb`` instead (see ``body_sibling``), because the target is a spec and
+    a body cannot go there. ``project_files`` is the base tree's path set; it
+    is only consulted for that repair, so passing None keeps the old
+    behaviour exactly.
     """
     if not reply.strip():
         return {}
@@ -317,6 +383,10 @@ def parse_generated_files(reply: str, default_path: Path) -> dict[Path, str]:
         return overlay
     fenced = extract_ada_code(reply)
     if fenced:
+        body = body_sibling(default_path, project_files)
+        if body is not None and opens_with_package_body(fenced):
+            logger.info("Body-only reply for %s routed to %s", default_path, body)
+            return {body: fenced + "\n"}
         return {default_path: fenced + "\n"}
     return {default_path: reply.strip() + "\n"}
 
@@ -758,6 +828,7 @@ def run_generation_for_model(
     output_root.mkdir(parents=True, exist_ok=True)
     by_dataset: dict[str, int] = {}
     total = 0
+    meta: dict[str, dict[str, Any]] = {}
 
     for dataset_name, expanded_dir in datasets:
         samples = load_sample_prompts(expanded_dir)[: args.max_samples]
@@ -809,10 +880,29 @@ def run_generation_for_model(
             gen_path = Path(
                 location.get("path", "generated.adb") if isinstance(location, dict) else "generated.adb"
             )
-            for rel_path, content in parse_generated_files(ada_code, gen_path).items():
+            overlay_files = parse_generated_files(ada_code, gen_path, sources)
+            for rel_path, content in overlay_files.items():
                 if sources.get(rel_path) == content.encode("utf-8"):
                     continue  # identical echo of the base file - nothing to apply
                 generated_solution[rel_path] = content.encode("utf-8")
+            # Format compliance and how much the reply actually changed are
+            # not in the ada-eval sample schema, so they go in a sidecar that
+            # baseline_eval reads. Without them a harness-repaired sample and a
+            # sample the model declined to touch look identical in BUILD.
+            changed = sum(
+                1 for p, c in overlay_files.items()
+                if sources.get(p) != c.encode("utf-8")
+            )
+            meta[sample["name"]] = {
+                "reply_format": reply_format(ada_code),
+                "changed_files": changed,
+                # An entry at the mirror of the target path is the body
+                # routing repair; the target itself is untouched.
+                "routed_body": sorted(
+                    str(p) for p in overlay_files
+                    if p != gen_path and p.with_suffix(".ads") == gen_path
+                ),
+            }
 
             packed = sample_type(
                 name=sample["name"],
@@ -843,6 +933,15 @@ def run_generation_for_model(
         by_dataset[dataset_name] = count
         total += count
 
+    with open(output_root / "generation_meta.json", "w", encoding="utf-8") as f:
+        json.dump(meta, f, indent=1, sort_keys=True)
+    logger.info(
+        "Reply formats: %s",
+        ", ".join(
+            f"{fmt}={sum(1 for m in meta.values() if m['reply_format'] == fmt)}"
+            for fmt in sorted({m["reply_format"] for m in meta.values()})
+        ) or "none",
+    )
     return {"by_dataset": by_dataset, "total": total, "output_dir": str(output_root)}
 
 

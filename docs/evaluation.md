@@ -77,4 +77,20 @@ The pipeline resolves gnatprove/gprbuild through the Alire environment
 (see [Toolchain setup](toolchain-setup.md)) and seeds generation (seed 42)
 for reproducible sampling.
 
+`make eval` scores against ada-eval's canonical solutions, which live in
+`data/base/compacted/*.jsonl`. That directory is derived, not version
+controlled, so a fresh cache does not have it and
+`make update-sources` drops it. Rebuild it with ada-eval's own packer:
+
+```bash
+cd data/raw_repos/AdaCore/ada-eval && GIT_CEILING_DIRECTORIES="$PWD" uv run ada-eval pack
+```
+
+`GIT_CEILING_DIRECTORIES` is required. The packer is git-aware: it reads a
+sample's files with `git ls-files` when the path is inside a worktree, and
+the cache sits inside the q3as repository, where `data/raw_repos/` is
+ignored. Without the ceiling variable the packer succeeds and writes records
+whose `canonical_solution` and `sources` are empty, and `make eval` then
+reports BLEU 0.0 with every standard `Unknown` instead of failing.
+
 Navigation: [project README](../README.md) · [docs index](README.md) · [changelog index](changelogs/index.md) · [results index](results/README.md)

@@ -143,7 +143,7 @@ and generation uses 12,000 prompt characters and 512 new tokens per model.
 Override `DATASET_WORKERS`, `MAX_PROMPT_CHARS`, `MAX_NEW_TOKENS`, or
 `TRAIN_FLAGS` on the `make` command line when more memory is available. Notes:
 
-- **The 500-step budget is deliberate.** One pass over the 72,105 train
+- **The 500-step budget is deliberate.** One pass over the 72,547 train
   records is 9,013 steps at 8 records per step, so `--max-steps 500` is 0.06
   of one epoch. That is the point: an epoch is 30 to 48 h on this card, and a
   train, generate, evaluate loop that comes back in a few hours is what makes

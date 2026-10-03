@@ -667,3 +667,101 @@ class TestExtraTurnsIntegration:
             "records": 0, "ingested": 0, "defects": 0, "variants": 0,
             "empty_assistant": 0,
         }]
+
+
+# --------------------------------------------------------------------------- #
+# Aggregate-position declarations
+# --------------------------------------------------------------------------- #
+#
+# A record component is referenced in aggregate position, `(Found => True,
+# Content => I)`. Corrupting or deleting it there does not produce an
+# "undefined" error: GNAT resolves the aggregate against the subtype and
+# reports the name as not a component of it. Both families claim
+# `error: "X" is undefined`, so both must decline such a candidate.
+#
+# These shapes were invisible until `pair_files` stopped pairing a spec with a
+# foreign body: the ada-eval search_array solution declares `Content` in the
+# spec and assigns it as an aggregate in the body, so the two files only met
+# in a correctly paired project.
+
+AGGREGATE_SPEC = """\
+package Search_Array is
+
+   type Array_Of_Positives is array (Natural range <>) of Positive;
+
+   type Search_Result (Found : Boolean := False) is record
+      case Found is
+         when True =>
+            Content : Integer;
+
+         when False =>
+            null;
+      end case;
+   end record;
+
+end Search_Array;
+"""
+
+AGGREGATE_BODY = """\
+package body Search_Array is
+
+   procedure Search_Array
+     (A : Array_Of_Positives; Result : out Search_Result) is
+   begin
+      for I in A'Range loop
+         Result := (Found => True, Content => I);
+         return;
+      end loop;
+      Result := (Found => False);
+   end Search_Array;
+
+end Search_Array;
+"""
+
+
+class TestAggregateComponentDetection:
+    def test_component_position_is_detected(self):
+        code = "   Result := (Found => True, Content => I);"
+        pos = code.index("Content")
+        assert bd._is_aggregate_component_use(code, pos + len("Content"))
+
+    def test_ordinary_use_is_not_component_position(self):
+        code = "   Result := Aggregate (Content);"
+        pos = code.index("Content")
+        assert not bd._is_aggregate_component_use(code, pos + len("Content"))
+
+    def test_assignment_use_is_not_component_position(self):
+        code = "   Content := 42;"
+        pos = code.index("Content")
+        assert not bd._is_aggregate_component_use(code, pos + len("Content"))
+
+    def test_whitespace_before_the_arrow_is_tolerated(self):
+        code = "   Result := (Found => True, Content  =>  I);"
+        pos = code.index("Content")
+        assert bd._is_aggregate_component_use(code, pos + len("Content"))
+
+
+class TestTypoSkipsAggregateComponents:
+    def test_component_is_not_the_typo_candidate(self):
+        result = bd.inject_defect(AGGREGATE_BODY, "typo")
+        if result is not None:
+            _broken, _diagnosis, claimed = result
+            # Whatever it picked, the claim must be the undefined one, so the
+            # component must not be it.
+            assert '"Cnotent"' not in claimed
+
+    def test_picked_name_is_not_the_component(self):
+        result = bd.inject_defect(AGGREGATE_BODY, "typo")
+        if result is None:
+            return
+        broken, _diagnosis, _claimed = result
+        assert "(Found => True, Cnotent => I)" not in broken
+
+
+class TestScopingSkipsAggregateComponents:
+    def test_component_declaration_is_kept(self):
+        result = bd.inject_defect(AGGREGATE_BODY, "scoping")
+        if result is None:
+            return
+        broken, _diagnosis, claimed = result
+        assert "Content : Integer" not in broken or '"Content"' not in claimed

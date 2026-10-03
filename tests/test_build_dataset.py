@@ -496,3 +496,176 @@ class TestSteCleanMarkdown:
         for prose_part in out.split("```"):
             if not prose_part.startswith("\nada") and "; -j" not in prose_part:
                 assert "—" not in prose_part
+
+
+# --------------------------------------------------------------------------- #
+# pair_files: a spec only ever pairs with the body beside it
+# --------------------------------------------------------------------------- #
+#
+# The index used to be keyed on the file stem alone, so across a cache with
+# many source trees `sorting/sort.ads` could pair with `search/sort.adb` and
+# the resulting code_pair turn would present a spec and an unrelated body as
+# one unit. Measured on Ada-Algorithms alone: 138 such cross-directory pairs.
+
+
+class TestPairFiles:
+    def _tree(self, tmp_path):
+        (tmp_path / "sorting").mkdir()
+        (tmp_path / "search").mkdir()
+        spec = tmp_path / "sorting" / "sort.ads"
+        spec.write_text("package Sort is\nend Sort;\n", encoding="utf-8")
+        other_spec = tmp_path / "search" / "sort.ads"
+        other_spec.write_text("package Search_Sort is\nend Search_Sort;\n", encoding="utf-8")
+        body = tmp_path / "search" / "sort.adb"
+        body.write_text("package body Search_Sort is\nend Search_Sort;\n", encoding="utf-8")
+        return spec, other_spec, body
+
+    def test_same_stem_in_another_directory_is_not_paired(self, tmp_path):
+        spec, _other_spec, body = self._tree(tmp_path)
+        pairs = bd.pair_files({"ads": [spec], "adb": [body]})
+        # The spec is emitted unpaired, and the unrelated body separately.
+        assert pairs == [
+            {"spec": spec, "impl": None, "package": "Sort"},
+            {"spec": None, "impl": body, "package": "Search_Sort"},
+        ]
+
+    def test_body_in_the_same_directory_is_paired(self, tmp_path):
+        (tmp_path / "src").mkdir()
+        spec = tmp_path / "src" / "p.ads"
+        spec.write_text("package P is\nend P;\n", encoding="utf-8")
+        body = tmp_path / "src" / "p.adb"
+        body.write_text("package body P is\nend P;\n", encoding="utf-8")
+        pairs = bd.pair_files({"ads": [spec], "adb": [body]})
+        assert pairs == [{"spec": spec, "impl": body, "package": "P"}]
+
+    def test_unpaired_body_is_emitted_standalone(self, tmp_path):
+        body = tmp_path / "lonely.adb"
+        body.write_text("package body L is\nend L;\n", encoding="utf-8")
+        pairs = bd.pair_files({"ads": [], "adb": [body]})
+        assert pairs == [{"spec": None, "impl": body, "package": "L"}]
+
+    def test_spec_without_a_body(self, tmp_path):
+        spec = tmp_path / "lonely.ads"
+        spec.write_text("package L is\nend L;\n", encoding="utf-8")
+        pairs = bd.pair_files({"ads": [spec], "adb": []})
+        assert pairs == [{"spec": spec, "impl": None, "package": "L"}]
+
+    def test_two_specs_one_body_each_get_their_own(self, tmp_path):
+        for name in ("a", "b"):
+            (tmp_path / f"{name}.ads").write_text(f"package {name} is\nend {name};\n", encoding="utf-8")
+            (tmp_path / f"{name}.adb").write_text(f"package body {name} is\nend {name};\n", encoding="utf-8")
+        pairs = bd.pair_files({
+            "ads": sorted(tmp_path.glob("*.ads")),
+            "adb": sorted(tmp_path.glob("*.adb")),
+        })
+        assert all(p["spec"] and p["impl"] for p in pairs)
+        assert {p["spec"].stem for p in pairs} == {"a", "b"}
+
+    def test_no_cross_directory_pair_in_a_mixed_tree(self, tmp_path):
+        for directory in ("x", "y", "z"):
+            (tmp_path / directory).mkdir()
+            for name in ("one", "two"):
+                (tmp_path / directory / f"{name}.ads").write_text(
+                    f"package {directory}_{name} is\nend {directory}_{name};\n", encoding="utf-8"
+                )
+                (tmp_path / directory / f"{name}.adb").write_text(
+                    f"package body {directory}_{name} is\nend {directory}_{name};\n", encoding="utf-8"
+                )
+        pairs = bd.pair_files({
+            "ads": sorted(tmp_path.rglob("*.ads")),
+            "adb": sorted(tmp_path.rglob("*.adb")),
+        })
+        for pair in pairs:
+            if pair["spec"] and pair["impl"]:
+                assert pair["spec"].parent == pair["impl"].parent
+
+    def test_empty_input(self):
+        assert bd.pair_files({}) == []
+
+    def test_package_name_from_a_body_file(self, tmp_path):
+        # `package body Foo is` used to miss the regex entirely and fell back
+        # to the filename stem.
+        body = tmp_path / "whatever.adb"
+        body.write_text("package body Foo is\nend Foo;\n", encoding="utf-8")
+        assert bd.extract_package_name(body) == "Foo"
+
+    def test_package_name_from_a_spec_file(self, tmp_path):
+        spec = tmp_path / "whatever.ads"
+        spec.write_text("package Foo is\nend Foo;\n", encoding="utf-8")
+        assert bd.extract_package_name(spec) == "Foo"
+
+    def test_package_name_falls_back_to_the_stem(self, tmp_path):
+        empty = tmp_path / "no_declaration.ads"
+        empty.write_text("-- nothing here\n", encoding="utf-8")
+        assert bd.extract_package_name(empty) == "no_declaration"
+
+    def test_package_name_ignores_leading_prose(self, tmp_path):
+        body = tmp_path / "prose.adb"
+        body.write_text("-- See the notes.\npackage body Foo is\nend Foo;\n", encoding="utf-8")
+        assert bd.extract_package_name(body) == "Foo"
+
+# --------------------------------------------------------------------------- #
+# _collect_skill_docs: the guidance that reaches the system prompt
+# --------------------------------------------------------------------------- #
+#
+# ada-spark keeps its agent skill under skills/<name>/, the layout the other
+# two repos already used. The repo-root patterns matched only agent-knowledge/
+# and silently dropped SKILL.md plus the three reference files, which is where
+# the SPARK proof guidance actually lives.
+
+
+class TestSkillDocPatterns:
+    def _repo(self, tmp_path, files):
+        for rel in files:
+            path = tmp_path / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(f"# {rel}\n", encoding="utf-8")
+        return tmp_path
+
+    def test_ada_spark_skill_and_references_are_found(self, tmp_path):
+        root = self._repo(tmp_path, [
+            "skills/ada-spark/SKILL.md",
+            "skills/ada-spark/references/spark-proof.md",
+            "skills/ada-spark/references/toolchain.md",
+            "skills/ada-spark/references/embedded-and-portability.md",
+            "agent-knowledge/ada-spark-best-practices.md",
+        ])
+        found = {p.name for p in bd._collect_skill_docs(root, "ada-spark")}
+        assert found == {
+            "SKILL.md", "spark-proof.md", "toolchain.md",
+            "embedded-and-portability.md", "ada-spark-best-practices.md",
+        }
+
+    def test_ada_sark_reference_documents_are_not_dropped(self, tmp_path):
+        # The regression: these two are the proof guidance itself.
+        root = self._repo(tmp_path, [
+            "skills/ada-spark/references/spark-proof.md",
+            "skills/ada-spark/references/toolchain.md",
+        ])
+        found = {p.name for p in bd._collect_skill_docs(root, "ada-spark")}
+        assert {"spark-proof.md", "toolchain.md"} <= found
+
+    def test_unknown_repo_yields_nothing(self, tmp_path):
+        assert bd._collect_skill_docs(tmp_path, "no-such-repo") == []
+
+    def test_missing_layout_yields_nothing(self, tmp_path):
+        # No crash, no invented paths.
+        assert bd._collect_skill_docs(tmp_path, "ada-spark") == []
+
+    def test_every_pattern_repo_has_a_pattern(self):
+        assert set(bd._SKILL_DOC_PATTERNS) == {"ada-spark", "SimpleEnglish", "skills"}
+
+    def test_patterns_are_repo_relative_not_absolute(self):
+        for patterns in bd._SKILL_DOC_PATTERNS.values():
+            for pattern in patterns:
+                assert not pattern.startswith("/"), pattern
+
+    def test_simple_english_layout_still_works(self, tmp_path):
+        root = self._repo(tmp_path, ["skills/ste/SKILL.md", "skills/ste/references/rules.md"])
+        assert {p.name for p in bd._collect_skill_docs(root, "SimpleEnglish")} == {
+            "SKILL.md", "rules.md",
+        }
+
+    def test_skills_layout_still_works(self, tmp_path):
+        root = self._repo(tmp_path, ["plugins/gnatprove/skills/prove/SKILL.md"])
+        assert {p.name for p in bd._collect_skill_docs(root, "skills")} == {"SKILL.md"}
