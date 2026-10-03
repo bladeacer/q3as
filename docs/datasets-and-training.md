@@ -119,7 +119,7 @@ downloaded model in `models/` (16 GB that `make check-model` would otherwise
 re-fetch; `make clean-model` removes it).
 
 Effect on the full pipeline, measured on 16 cores over the whole corpus
-(6,514 Ada files, 4,337 pairs, 77,758 turns):
+(6,421 Ada files, 4,268 pairs, 80,262 turns):
 
 | Step | Before | After |
 |---|---|---|
@@ -236,9 +236,11 @@ mechanisms keep the splits honest:
    **What the cap removed, measured by kind.** The cap experiment scored loss,
    not coverage, so the shipped corpus was audited afterwards (the same
    instrumented build the metadata comes from, classifying every turn and every
-   drop). Prose turns are untouched: doc QA, doc sections, and toolchain QA
-   carry no Ada fence, so they have no structural signature and only
-   byte-identical records are ever dropped (5,344 of 5,346 survived).
+   drop; the counts below are that audit, taken on the 77,758-turn build of
+   v0.4.1, so they do not track the current total). Prose turns are untouched:
+   doc QA, doc sections, and toolchain QA carry no Ada fence, so they have no
+   structural signature and only byte-identical records are ever dropped (5,344
+   of 5,346 survived).
    `contract_synth` groups are exempt by prefix: the per-family shape
    repetition is the curriculum, every instance is gnatprove-verified, and the
    family is a fixed ~700-turn budget rather than an unbounded extractor, so
@@ -287,7 +289,7 @@ mechanisms keep the splits honest:
   tokenization uses one process, the data loader uses no workers, and
   checkpoints omit optimizer state. The `make` pipeline also uses one
   dataset worker and saves the LoRA adapter without a merged 16-bit export.
-- **Host RAM**: the 423 MB train split is streamed from JSONL into a cached
+- **Host RAM**: the 468 MB train split is streamed from JSONL into a cached
   Arrow table (`data/processed/.tokenized/`) one record at a time. The
   previous loader held three copies of the split at once (parsed records,
   chat-templated strings, then the Arrow table). Peak anonymous memory fell
@@ -305,7 +307,7 @@ mechanisms keep the splits honest:
   shuffle indexes into the list; `training_summary.json` records which path a
   run took under `experiment.split_load`.
 - **Stored format**: the train table holds `input_ids` as int32 rather than
-  rendered text - 136 MB instead of 426 MB for 65,809 records, since a token
+  rendered text - 151 MB instead of 468 MB for 72,105 records, since a token
   id cannot exceed a 2^31 vocabulary. An `input_ids` column also marks the
   dataset as already processed, so trl and Unsloth skip their tokenization
   pass (4m07s per run, now under a second). This was checked, not assumed:
@@ -315,7 +317,7 @@ mechanisms keep the splits honest:
   same magnitude, so that is the bf16 non-determinism the caveat below
   describes. The eval splits stay as text, because the chunked eval callback
   tokenizes them itself, and they are not handed to `SFTTrainer` at all
-  (`eval_strategy` is `"no"`, so passing them in only made trl tokenize 3,709
+  (`eval_strategy` is `"no"`, so passing them in only made trl tokenize 4,071
   val records per run for a dataset nothing read).
 - **Splits**: trains on `dataset_train.jsonl` by default; val loss is
   computed every 50 steps (`--eval-steps`); a fallback seeded carve-out
@@ -328,9 +330,10 @@ mechanisms keep the splits honest:
   final state at stop time, not a reloaded best checkpoint.
 - **Evaluation cost**: that callback, not the training steps, sets the wall
   time of a run. It costs a measured 1.2 ms per token (a forward plus the
-  final `lm_head` over the same tokens), which is 37.1 min for a full pass
-  over the 3,709-example val split and 35.6 min for the test split. Ten
-  evaluations is 6.8 h. The GPU is not the constraint and cannot be made
+  final `lm_head` over the same tokens), which at the measured 0.63 s per
+  example is about 43 min for a full pass over the 4,071-example val split
+  and the same again for the 4,086-example test split. Ten evaluations is
+  about 7 h. The GPU is not the constraint and cannot be made
   one: it reports 95-100% utilization with its SM clock at 180 MHz of a
   3090 MHz maximum, drawing 55 W, so it is fed small kernels and idles
   between them. Batching the eval forwards was measured and rejected: batch 4
@@ -346,12 +349,12 @@ mechanisms keep the splits honest:
   evaluation time still to come.
 - **Sampled evaluation**: `--eval-sample` (default 256) and `--test-sample`
   (default 512) cap what the callback scores, cutting the projection from
-  6.92 h to 31 min. The test split is scored once, so it draws twice the
+  about 7 h to 31 min. The test split is scored once, so it draws twice the
   per-point sample. Every evaluation point scores the *same* seeded subset in
   the same order, so the curve compares like with like. `--eval-budget-min`
   (default 300) is a ceiling, not a control: the run projects its evaluation
   cost, logs it, and warns when the chosen sizes exceed it, but never
-  silently resizes anything. **Training data is untouched** - all 65,809
+  silently resizes anything. **Training data is untouched** - all 72,105
   records are still trained on. `training_summary.json` records `val` next to
   `val_total` and `test` next to `test_total`, so a reported loss cannot be
   read as a full-split loss. Losses from this version onward are therefore
@@ -373,17 +376,26 @@ mechanisms keep the splits honest:
   `train_seconds` covers only the segment that this process ran. `--no-resume`
   skips the lookup, and raising `--max-steps` turns a finished run into a
   resumable one.
-- **Step budget and epochs**: one pass over the 65,809 train records is 8,226
+- **Step budget and epochs**: one pass over the 72,105 train records is 9,013
   optimizer steps at 8 records per step (batch 1 x 8 accumulation), so the
   default `--max-steps 500` is **0.06 of one epoch**. The startup log says so
-  (`Step budget: 500 step(s) of 8226 per epoch`). At the measured 13-21 s per
+  (`Step budget: 500 step(s) of 9013 per epoch`). At the measured 13-21 s per
   step on this card, an epoch is 30-48 h, so the usual advice to train 2-3
-  epochs is a 60-140 h job here. It is a legitimate target, not a comfortable
-  one: what the 500-step runs actually show is an under-trained model (train
-  loss was still falling at step 90, 2.405 at step 10 to 0.359 at step 90,
-  with a val loss of 0.3615 at step 50). Raise `--max-steps` for a long run,
-  which now resumes from the last checkpoint, and let `--early-stopping-patience`
-  decide when to stop.
+  epochs is a 60-140 h job here.
+- **Why the default is a fraction of an epoch**: iteration speed, not a claim
+  about the converged model. A short run plus `make generate`, `make eval`, and
+  `make eval-pipeline` comes back in about 3.5 h, which is what makes the next
+  thing to improve findable while the dataset and the curriculum are still
+  moving. The cost is stated plainly: the 500-step runs are under-trained
+  models (train loss was still falling at step 90, 2.405 at step 10 to 0.359
+  at step 90, with a val loss of 0.3615 at step 50). Treat a 500-step result as
+  a signal about direction, not as a finished model. Raise `--max-steps` for a
+  long run, which resumes from the last checkpoint rather than starting over,
+  and let `--early-stopping-patience` decide when to stop. Two consequences of
+  the short default to keep in mind: early stopping cannot fire inside 500
+  steps (patience 10 evaluations at one every 50 steps needs an eleventh point,
+  step 550), so the budget is always spent in full; and the adapter saved is
+  the state at step 500, not a best-checkpoint reload.
 - **Sequence packing**: not applicable here, and not for want of trying. The
   reason packing is normally wanted is padding: with
   `per_device_train_batch_size=1` there is no padding at all, so there is

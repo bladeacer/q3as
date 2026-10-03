@@ -50,11 +50,11 @@ build log rather than taking on faith).
 | [Ada-83-TLALOC](https://github.com/ViMoBr/Ada-83-TLALOC) | `data/raw_repos/ViMoBr/Ada-83-TLALOC` | Ada 83-era source (legacy patterns). Training use explicitly permitted by the author ([forum post](https://forum.ada-lang.io/t/fine-tuning-8b-ai-model-on-ada-spark/4746/3)) | GPL-3.0-or-later w/ GCC runtime exception; tests CC-BY-SA-4.0 |
 | [ada-eval](https://github.com/AdaCore/ada-eval) | `data/raw_repos/AdaCore/ada-eval` | **Eval-proper only** (see below). Used for benchmark generation/evaluation and the guard; the training pipeline never passes it as an input; also the uv path dependency for eval tooling | Apache-2.0 |
 | [AdaCore/learn](https://github.com/AdaCore/learn) | `data/raw_repos/AdaCore/learn` | Course material: doc-QA and heading-chunked doc sections | CC-BY-4.0 |
-| [AdaCore/training_material](https://github.com/AdaCore/training_material) | `data/raw_repos/AdaCore/training_material` | AdaCore training courses (RST): doc-QA and heading-chunked doc sections. Description follows the repo README: collection of Ada/SPARK teaching courses in ReStructured Text | CC-BY-4.0 |
+| [AdaCore/training_material](https://github.com/AdaCore/training_material) | `data/raw_repos/AdaCore/training_material` | AdaCore training courses (RST): doc-QA and heading-chunked doc sections. Description follows the repo README: collection of Ada/SPARK teaching courses in ReStructured Text. The labs ship a `prompt/` tree beside an `answer/` tree, which is where `lab_pair` completion and diff-derived explanation turns come from | CC-BY-4.0 |
 | [agent-sh/ada-spark](https://github.com/agent-sh/ada-spark) | `data/raw_repos/agent-sh/ada-spark` | Current-toolchain guidance in system prompts | MIT |
 | [AminBlg/SimpleEnglish](https://github.com/AminBlg/SimpleEnglish) | `data/raw_repos/AminBlg/SimpleEnglish` | STE writing rules and word map (paraphrased, no spec text) | MIT |
 | [AdaCore/skills](https://github.com/AdaCore/skills) | `data/raw_repos/AdaCore/skills` | Toolchain QA (gnatprove, alire, gnatdoc, gnattest, gnatfuzz) | Apache-2.0 |
-| [RobertBoettcherSF/Ada-Algorithms](https://github.com/RobertBoettcherSF/Ada-Algorithms) | `data/raw_repos/RobertBoettcherSF/Ada-Algorithms` | Ada/SPARK algorithm implementations in a single monorepo (distributed systems, graph algorithms, image processing, compression, SPARK-verified sheets, parsers): thousands of files across category directories. The 16 `SPARK2` topic trees are also the source of the prover-verified `spark_verified` turns. Fetched as one archive. The author approved training use; that approval is not recorded in the repository (the README carries no LLM-usage disclosure). The MIT text is the repository's `LICENSE` | MIT |
+| [RobertBoettcherSF/Ada-Algorithms](https://github.com/RobertBoettcherSF/Ada-Algorithms) | `data/raw_repos/RobertBoettcherSF/Ada-Algorithms` | Ada/SPARK algorithm implementations in a single monorepo (distributed systems, graph algorithms, image processing, compression, SPARK-verified sheets, parsers): thousands of files across category directories. The 16 `SPARK2` topic trees are also the source of the prover-verified `spark_verified` turns. Fetched as one archive. [The author approved training use outside the repository](https://forum.ada-lang.io/t/fine-tuning-8b-ai-model-on-ada-spark/4746/6), so that approval is not recorded in the cached tree (its README carries no LLM-usage disclosure). The MIT text is the repository's `LICENSE` | MIT |
 
 Licensing summary: Apache-2.0 and MIT code is redistributable with attribution;
 CC-BY-4.0 course material is used with attribution; the GPL-licensed
@@ -62,7 +62,18 @@ Ada-83-TLALOC code is used for model training only (weights are not source-code
 redistribution) and is covered by the author's explicit permission. The
 RobertBoettcherSF Ada-Algorithms monorepo is MIT (its `LICENSE` file, in the
 cached copy under `data/raw_repos/`) with the author's green light
-for training use, a permission granted outside the repository.
+for training use ([forum post](https://forum.ada-lang.io/t/fine-tuning-8b-ai-model-on-ada-spark/4746/6)),
+a permission granted outside the repository.
+
+Each license above was read from the cached repository's own license file, not
+from the GitHub API: the fetcher records a `license_spdx` field when the API
+answers, and it is `null` for AdaCore/learn, AdaCore/skills,
+AdaCore/training_material, agent-sh/ada-spark, bladeacer/Ada_CRDT,
+RobertBoettcherSF/Ada-Algorithms, and ViMoBr/Ada-83-TLALOC. The evidence sits
+next to the code in the cache: a `LICENSE` file in each of those trees
+(`LICENSES/` with GPL-3.0-or-later, the GCC runtime exception 3.1, and
+CC-BY-SA-4.0 for Ada-83-TLALOC). The project credits in the
+[README](../README.md#project-credits) repeat this table; keep the two in step.
 
 ## Toolchain inputs (not training data)
 
@@ -91,12 +102,14 @@ splits.
 
 ## ada-eval is eval-proper
 
-Everything under the cached ada-eval's `data/base/{expanded,compacted}`
-directories are the same 19 samples q3as is scored on (`spark_learn`,
-`spark_custom`, `spark_human_eval_silver`), and each record's
-`canonical_solution` is the literal answer key. `data/generated` and
-`data/evaluated` hold completions for those very prompts. Training on any
-of it would let the model memorize the benchmark.
+Everything under the cached ada-eval's `data/base/expanded` tree is the same
+19 samples q3as is scored on (`spark_learn` 13, `spark_custom` 2,
+`spark_human_eval_silver` 4), and each sample's `solution/` project is the
+literal answer key. A fresh cache ships only that directory. Running ada-eval
+locally adds `data/base/compacted` (the same samples as JSONL) plus
+`data/generated` and `data/evaluated` (completions and scores for those very
+prompts); the guard hashes those too when they exist. Training on any of it
+would let the model memorize the benchmark.
 
 The sample-authoring recipe in the ada-eval README ("Adding a new Sample")
 is documentation we follow when extending the benchmark, not data.
@@ -137,19 +150,21 @@ build (see below) still drops a similar volume.
 
 Current shipped dataset (AST_STRUCTURAL_CAP = 10), as recorded in
 `data/processed/dataset_metadata.json` at build time:
-- 80,233 turns; group-aware splits 72,124 train / 4,083 val / 4,026 test,
+- 80,262 turns; group-aware splits 72,105 train / 4,071 val / 4,086 test,
 - eval guard: 425 blocked signatures (394 subprograms: 207 exact,
   187 structural; 31 prompts: 17 exact, 14 structural), 795 contaminated
   groups dropped,
-- dedup before split: 52,476 duplicates removed (23,544 verbatim, 28,932
+- dedup before split: 52,535 duplicates removed (23,593 verbatim, 28,942
   AST-structural over the cap),
-- 2,366 empty-assistant records dropped (mostly spec-only units from the Ada-
+- 2,369 empty-assistant records dropped (mostly spec-only units from the Ada-
   Algorithms monorepo).
 
-The guard counts shift slightly between builds because dedup and the cap
-change which duplicate of a guarded group is seen first; `make
-check-integrity` re-verifies the whole pipeline from content, so it stays
-the source of truth, not these numbers.
+Those totals move with the source cache: a rebuild after `make
+update-sources` changes the turn, split, dedup, and empty-assistant lines
+here. The guard blocklist is derived from the ada-eval samples alone, so it
+only changes when ada-eval itself moves, and `make check-integrity`
+re-verifies the whole pipeline from content rather than trusting this page.
+Read the numbers out of `dataset_metadata.json` when the two disagree.
 
 The guard drops whole *groups*, not individual records: one contaminated
 turn removes every sibling turn derived from the same unit, so a group count
@@ -163,8 +178,9 @@ layer of defense.
 
 ## Rules for contributors
 
-1. Never train on ada-eval `canonical_solution`, `base/`, `tests/`,
-   `prompt.md`, or compacted records.
+1. Never train on ada-eval's `solution/` (the `canonical_solution` of a
+   compacted record), `base/`, `tests/`, `prompt.md`, `comments.md`, or any
+   compacted, generated, or evaluated record.
 2. After any change to data sources or the dataset, run
    `make check-integrity` (must exit 0) alongside `make validate-defects`.
    3. **When adding a new data source:** add its URL to `CORE_REPOS` in

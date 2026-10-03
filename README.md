@@ -27,38 +27,32 @@ Full index, with a reading order: [docs/README.md](docs/README.md).
 
 ## Project Credits
 
-This project builds on and draws data from the following upstream projects. Licensing and provenance details are in [docs/data-provenance.md](docs/data-provenance.md).
+This project builds on and draws data from the following upstream projects.
+Every one of them is fetched into the gitignored archive cache
+`data/raw_repos/<owner>/<repo>` by `make fetch-sources`, and each cache entry
+records the upstream commit it came from (`make check-sources` reports what
+moved upstream, `make update-sources` re-fetches it). The licenses below were
+read from each cached repository's own `LICENSE` file; the authoritative
+version of this table, with the cache paths, the per-source detail, and the
+eval-integrity rules, is [docs/data-provenance.md](docs/data-provenance.md).
 
-Core sources (fetched into the local archive cache `data/raw_repos/<owner>/<repo>` by `make fetch-sources`):
+| Source | What q3as takes from it | License |
+|---|---|---|
+| [bladeacer/adacovex](https://github.com/bladeacer/adacovex) | Ada/SPARK coverage, proof, and CLI tool. Source with contract specifications becomes code, defect, and AST turns; `docs/usage` and `docs/archive` become assurance-ladder QA | Apache-2.0 |
+| [bladeacer/Ada_CRDT](https://github.com/bladeacer/Ada_CRDT) | Conflict-free replicated data types for Ada/SPARK. Spec/body pairs add diversity; `docs/proof` and `docs/compliance` become assurance-ladder QA | MIT |
+| [ViMoBr/Ada-83-TLALOC](https://github.com/ViMoBr/Ada-83-TLALOC) | Ada 83 compiler and test suite: Ada 83-era source for legacy patterns. [The author has given explicit permission to use this code for model training](https://forum.ada-lang.io/t/fine-tuning-8b-ai-model-on-ada-spark/4746/3) | GPL-3.0-or-later with GCC runtime exception; tests CC-BY-SA-4.0 |
+| [AdaCore/ada-eval](https://github.com/AdaCore/ada-eval) | LLM evaluation framework for Ada/SPARK. It provides the 19-sample benchmark and is **eval-proper**: never training data. It is also the source of the eval-integrity guard and the uv path dependency for the eval tooling | Apache-2.0 |
+| [AdaCore/learn](https://github.com/AdaCore/learn) | AdaCore course material. Ada code blocks become documentation-QA turns, and the sections become doc-section turns | CC-BY-4.0 |
+| [AdaCore/training_material](https://github.com/AdaCore/training_material) | AdaCore training courses (RST): code blocks and sections become documentation turns, and the labs ship `prompt/` and `answer/` trees that become completion and explanation turns | CC-BY-4.0 |
+| [agent-sh/ada-spark](https://github.com/agent-sh/ada-spark) | Agent skill for idiomatic, current Ada/SPARK, distilled into the system prompts | MIT |
+| [AminBlg/SimpleEnglish](https://github.com/AminBlg/SimpleEnglish) | ASD-STE100-style writing rules and word map, paraphrased (no spec text). It governs every generated explanation | MIT |
+| [AdaCore/skills](https://github.com/AdaCore/skills) | Official AdaCore toolchain skills (gnatprove, alire, gnatdoc, gnattest, gnatfuzz), which become toolchain QA turns | Apache-2.0 |
+| [RobertBoettcherSF/Ada-Algorithms](https://github.com/RobertBoettcherSF/Ada-Algorithms) | One monorepo of Ada/SPARK algorithm implementations (distributed systems, graph algorithms, image processing, compression, SPARK-verified sheets, parsers, and more) in category directories, several thousand files. The code is AI assisted. The 16 `SPARK2` topic trees are proved with gnatprove, and only the subprograms the prover discharges become training turns. [The author approved training use outside the repository](https://forum.ada-lang.io/t/fine-tuning-8b-ai-model-on-ada-spark/4746/6) | MIT |
 
-- **[bladacer/adacovex](https://github.com/bladeacer/adacovex)**
-  - Ada/SPARK coverage/proof/CLI tool; source with contract specifications. *(Apache-2.0)*
-- **[bladeacer/Ada_CRDT](https://github.com/bladeacer/Ada_CRDT)**
-  - Conflict-free replicated data types for Ada/SPARK. *(MIT)*
-- **[ViMoBr/Ada-83-TLALOC](https://github.com/ViMoBr/Ada-83-TLALOC)**
-  - Ada 83 compiler and test suite; [the author has given explicit permission to use this code for model training.](https://forum.ada-lang.io/t/fine-tuning-8b-ai-model-on-ada-spark/4746/3 ) *(GPL-3.0-or-later with GCC runtime exception; tests CC-BY-SA-4.0)*
-- **[AdaCore/ada-eval](https://github.com/AdaCore/ada-eval)**
-  - LLM evaluation framework for Ada/SPARK; provides our benchmark (and is treated as eval-proper, never as training data) . *(Apache-2.0)*
-- **[AdaCore/learn](https://github.com/AdaCore/learn)**
-  - AdaCore course material; Ada code blocks and sections become documentation-QA turns. *(CC-BY-4.0)*
-- **[AdaCore/training_material](https://github.com/AdaCore/training_material)**
-  - AdaCore training courses (RST); Ada code blocks become documentation-QA turns. *(CC-BY-4.0)*
-- **[agent-sh/ada-spark](https://github.com/agent-sh/ada-spark)**
-  - Agent skill for idiomatic, current Ada/SPARK; embedded into system prompts. *(MIT)*
-- **[AminBlg/SimpleEnglish](https://github.com/AminBlg/SimpleEnglish)**
-  - ASD-STE100-style writing skill; governs all generated explanations. *(MIT)*
-- **[AdaCore/skills](https://github.com/AdaCore/skills)**
-  - Official AdaCore toolchain skills (gnatprove, alire, gnatdoc, gnattest, gnatfuzz); become toolchain QA turns. *(Apache-2.0)*
-
-- **[RobertBoettcherSF/Ada-Algorithms](https://github.com/RobertBoettcherSF/Ada-Algorithms)**
-  - A single monorepo of the author's Ada/SPARK algorithm implementations
-  (distributed systems, graph algorithms, image processing, compression,
-  SPARK-verified sheets, parsers, and more), organised into category
-  directories. Their code is AI assisted. The 16 `SPARK2` topic trees are
-  proved with gnatprove, and only the subprograms the prover discharges
-  become training turns.
-  [The author has given explicit permission to use this code for model training.](https://forum.ada-lang.io/t/fine-tuning-8b-ai-model-on-ada-spark/4746/6)
-  *(MIT)*. 
+The Ada toolchain q3as parses and proves with is a separate set of inputs that
+never reach the model: `libadalang` (Apache-2.0 WITH LLVM-exception) and the
+GNAT tools resolved through Alire. They are listed with their licenses in
+[data provenance](docs/data-provenance.md#toolchain-inputs-not-training-data). 
 
 ## Quick Start
 
@@ -97,13 +91,20 @@ cp .env.dev .env
 # Download and sanity-check the base model
 uv run python training/download_model.py
 
-# Build the dataset (cached sources listed above; see make build-dataset for the exact source list)
-uv run python data/processing_scripts/build_dataset.py --input-dir data/raw/
+# Build the dataset. Use the Make target: it wires the cached source trees,
+# the doc and guidance directories, and the parser outputs together.
+make build-dataset
 
-# Build the dataset with custom extra directories
-uv run python data/processing_scripts/build_dataset.py --input-dir data/raw/ --extra-input-dir /path/to/project1 --extra-input-dir /path/to/project2
+# The builder underneath it, if you want to point it somewhere else. The
+# upstream sources live in the archive cache, not in data/raw/, so a run with
+# --input-dir alone reads nothing.
+uv run python data/processing_scripts/build_dataset.py \
+  --input-dir data/raw/ \
+  --extra-input-dir data/raw_repos/bladeacer/adacovex \
+  --extra-input-dir data/raw_repos/RobertBoettcherSF/Ada-Algorithms
 
-# Run training (console output is appended to training.log for post-mortem debugging)
+# Run training (console output is appended to training.log for post-mortem
+# debugging; make train additionally passes --skip-merged-save)
 uv run python training/train_unsloth.py
 
 # Generate Ada code with both base and fine-tuned models
@@ -128,23 +129,31 @@ present):
 | Step | Duration |
 |---|---|
 | `make build-dataset` (parse-data + contracts cached) | 2 to 5 min |
-| `make train` (500 steps, batch 1 x grad-accum 8) | ~4.5 h, ~30 s/step; the dominant cost |
+| `make train` (500 steps, batch 1 x grad-accum 8) | ~2.5 h measured: ~14 s/step plus ~30 min of evaluation passes; the dominant cost |
 | `make generate` (19 + 19 samples, both models) | ~28 min |
 | `make eval-pipeline` (build/test/prove, 19 + 19) | ~4 min |
 | `make eval` (BLEU + compliance) | ~1 min |
 | `make eval-report` | seconds |
 
-`make all` takes roughly 5 hours. The default pipeline is tuned for an 8 GB
-GPU and an 8 GB host: dataset preparation uses one worker, training uses a
-1024-token window and one tokenization process, the adapter-only output skips
-the merged 16-bit export, and generation uses 12,000 prompt characters and
-512 new tokens per model. Override `DATASET_WORKERS`, `MAX_PROMPT_CHARS`,
-`MAX_NEW_TOKENS`, or `TRAIN_FLAGS` on the `make` command line when more
-memory is available. Notes:
+`make all` takes roughly 3.5 hours with the default 500-step budget. The
+default pipeline is tuned for an 8 GB GPU and an 8 GB host: dataset
+preparation uses one worker per core, training uses a 1024-token window and one
+tokenization process, the adapter-only output skips the merged 16-bit export,
+and generation uses 12,000 prompt characters and 512 new tokens per model.
+Override `DATASET_WORKERS`, `MAX_PROMPT_CHARS`, `MAX_NEW_TOKENS`, or
+`TRAIN_FLAGS` on the `make` command line when more memory is available. Notes:
 
-- Early stopping cannot fire before step 550 at the default cadence
-  (patience 10, eval every 50 steps, 500 max steps), so plan for the
-  full training budget.
+- **The 500-step budget is deliberate.** One pass over the 72,105 train
+  records is 9,013 steps at 8 records per step, so `--max-steps 500` is 0.06
+  of one epoch. That is the point: an epoch is 30 to 48 h on this card, and a
+  train, generate, evaluate loop that comes back in a few hours is what makes
+  the next thing to improve findable. A 500-step run is an under-trained model
+  on purpose (train loss was still falling when the budget ran out). Raise
+  `--max-steps` for a long run; it resumes from the last checkpoint, so raising
+  it on an existing output directory continues rather than restarts.
+- Early stopping cannot fire inside a 500-step run: patience is 10
+  evaluations at one every 50 steps, so the eleventh point would be step 550.
+  Plan for the whole budget, or lower `--max-steps` to end sooner.
 - A cold start adds the Qwen3-8B download (~16 GB) and the first
   `make fetch-sources` (one monolithic Ada-Algorithms tarball); both depend on
   bandwidth. One-time extras: `uv sync` and `make prove` (Alire

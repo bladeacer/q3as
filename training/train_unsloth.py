@@ -100,10 +100,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--gradient-accumulation", type=int, default=8, help="Gradient accumulation steps (effective batch = batch-size x this).")
     parser.add_argument(
         "--max-steps", type=int, default=500,
-        help="Maximum training steps. One epoch over 65,809 records at 8 "
-        "records per step is 8,226 steps, so the default 500 is 0.06 of an "
+        help="Maximum training steps. One epoch over 72,105 records at 8 "
+        "records per step is 9,013 steps, so the default 500 is 0.06 of an "
         "epoch: at ~14 s per step on this card, two full epochs is about 64 h. "
-        "Raise it for a long run, which now resumes from the last checkpoint.",
+        "The short default is deliberate (a train plus generate plus eval loop "
+        "returns in a few hours, so the next thing to improve is findable) and "
+        "leaves the model under-trained. Raise it for a long run, which "
+        "resumes from the last checkpoint.",
     )
     parser.add_argument("--save-steps", type=int, default=100, help="Save a checkpoint every N steps.")
     parser.add_argument(
@@ -147,8 +150,8 @@ def parse_args() -> argparse.Namespace:
         help="Examples drawn from the val split for each during-training "
         "early-stopping evaluation. 0 uses the whole split. A pass costs "
         "about 0.6 s per example on this hardware, so a full pass over the "
-        "3,709-example split is 37 min and the 10 evaluation points of a "
-        "500-step run would be 6.2 h. The default scores 256 of them, which "
+        "4,071-example split is 43 min and the 10 evaluation points of a "
+        "500-step run would be 7 h. The default scores 256 of them, which "
         "is about 3 min per point.",
     )
     parser.add_argument(

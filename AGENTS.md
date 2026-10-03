@@ -69,8 +69,9 @@ hashes every eval subprogram and prompt in normalized and alpha-renamed
 structural forms and `build_dataset` does not pass ada-eval as a training source
 and still drops any matching record group before splitting. `make
 check-integrity` must exit 0 after any dataset change. Never train on
-`canonical_solution`, `base/`, `tests/`, `prompt.md`, or compacted
-records from ada-eval.
+`solution/` (a compacted record's `canonical_solution`), `base/`, `tests/`,
+`prompt.md`, `comments.md`, or any compacted, generated, or evaluated record
+from ada-eval.
 
 ## Where the important files live
 
@@ -117,7 +118,8 @@ records from ada-eval.
 - [`training/train_unsloth.py`](training/train_unsloth.py) - QLoRA training
   script (Unsloth, 1024-token window, single-process dataset tokenization, LoRA
   adapters on Qwen3-8B). The train split streams from JSONL into an Arrow
-  table of int32 `input_ids` under `data/processed/.tokenized/` (136 MB, and
+  table of int32 `input_ids` under `data/processed/.tokenized/` (151 MB for
+  72,105 records against 468 MB of JSONL, and
   trl's own 4-minute tokenization pass is skipped because the column marks the
   dataset processed); the eval splits stay text for the chunked eval callback
   and are sampled by `--eval-sample` / `--test-sample` so a run's evaluation
@@ -127,7 +129,10 @@ records from ada-eval.
   halfway continues from its last checkpoint by default (`--no-resume` opts
   out): checkpoints keep the optimizer, scheduler, and RNG state, and the eval
   points already scored ride along in the trainer state, so early stopping and
-  the loss curve survive the interruption. Table keys cover split content,
+  the loss curve survive the interruption. The 500-step default is 0.06 of one
+  epoch on purpose, so a full generate-and-evaluate loop comes back in hours;
+  see the step budget section of docs/datasets-and-training.md before changing
+  it. Table keys cover split content,
   chat template, tokenizer vocabulary, truncation length, and a pipeline
   version; tables a run did not touch are pruned. The no-val-file
   fallback carve keeps records in memory and says so in the summary. It
