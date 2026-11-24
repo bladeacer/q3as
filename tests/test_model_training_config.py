@@ -7,6 +7,7 @@ GPU. unsloth is stubbed because importing it costs over a GB of host RAM.
 
 from __future__ import annotations
 
+import importlib.machinery
 import sys
 import types
 from pathlib import Path
@@ -16,7 +17,9 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "training"))
 
 if "unsloth" not in sys.modules:
-    sys.modules["unsloth"] = types.ModuleType("unsloth")
+    stub = types.ModuleType("unsloth")
+    stub.__spec__ = importlib.machinery.ModuleSpec("unsloth", loader=None)
+    sys.modules["unsloth"] = stub
 
 import train_unsloth as tr
 
@@ -89,10 +92,19 @@ class TestExplicitOverrides:
         # SFTConfig rejects unknown fields. main() filters these trainer-only
         # keys out; keep the list pinned here so a new one is not forgotten.
         config = config_for(monkeypatch)
+        # main() adds these two private keys just before the model load.
+        config["_load_path"] = "models/example"
+        config["_spec"] = object()
         trainer_only = {
             "model_name", "model_key", "lora_rank", "lora_alpha", "backend",
             "offload_embedding", "trust_remote_code", "target_modules",
-            "max_seq_length",
+            "max_seq_length", "_load_path", "_spec",
         }
         assert trainer_only <= config.keys()
         assert {"packing", "packing_strategy"} <= config.keys()
+
+        from trl import SFTConfig
+
+        accepted = set(SFTConfig.__dataclass_fields__)
+        leaked = set(config) - trainer_only - accepted
+        assert not leaked, f"unknown SFTConfig fields: {sorted(leaked)}"

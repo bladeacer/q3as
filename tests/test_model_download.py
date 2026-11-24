@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -91,12 +92,106 @@ class TestCompleteness:
     def test_absent_directory_is_incomplete(self, tmp_path):
         assert not dm.is_model_present(tmp_path / "absent")
 
+    def test_cached_repo_must_match_the_expected_repo(self, tmp_path):
+        cache = tmp_path / "qwen3-8b"
+        cache.mkdir()
+        _meta(cache)
+        _sharded(cache)
+        (cache / "download_metadata.json").write_text(
+            json.dumps({"model_name": "unsloth/Qwen3-8B"}), encoding="utf-8"
+        )
+        assert dm.is_model_present(cache)  # layout alone still looks complete
+        assert not dm.is_model_present(cache, "unsloth/Qwen3-8B-unsloth-bnb-4bit")
+        assert dm.is_model_present(cache, "unsloth/Qwen3-8B")
+        assert dm.cached_repo(cache) == "unsloth/Qwen3-8B"
+
+    def test_missing_metadata_is_accepted_with_a_warning(self, tmp_path):
+        # Older caches have no metadata; do not force a re-download of a
+        # complete model just because a newer field was added.
+        cache = tmp_path / "legacy"
+        cache.mkdir()
+        _meta(cache)
+        _sharded(cache)
+        assert dm.is_model_present(cache, "org/any")
+
     def test_corrupt_index_is_incomplete(self, tmp_path):
         cache = tmp_path / "corrupt"
         cache.mkdir()
         _meta(cache)
         (cache / "model.safetensors.index.json").write_text("{bad", encoding="utf-8")
         assert not dm.is_model_present(cache)
+
+
+class TestSanityCheckConfigShapes:
+    def test_reads_flat_config(self):
+        config = types.SimpleNamespace(num_hidden_layers=36, hidden_size=4096)
+        assert dm.config_dimensions(config) == (36, 4096)
+
+    def test_reads_nested_text_config(self):
+        # Qwen3_5Config keeps the text model under text_config.
+        config = types.SimpleNamespace(
+            model_type="qwen3_5",
+            text_config=types.SimpleNamespace(num_hidden_layers=32, hidden_size=2560),
+        )
+        assert dm.config_dimensions(config) == (32, 2560)
+
+    def test_missing_dimensions_are_not_fatal(self):
+        assert dm.config_dimensions(types.SimpleNamespace(model_type="mystery")) == (None, None)
+
+    def test_light_sanity_forwards_trust_remote_code(self, monkeypatch, tmp_path):
+        import torch
+        import transformers
+        from safetensors.torch import save_file
+
+        cache = tmp_path / "custom"
+        cache.mkdir()
+        _meta(cache)
+        save_file({"weight": torch.zeros(1)}, cache / "model.safetensors")
+        seen: dict[str, object] = {}
+
+        def fake_from_pretrained(path, **kwargs):
+            seen.update(kwargs)
+            return types.SimpleNamespace(
+                model_type="spark2_5", num_hidden_layers=36, hidden_size=2560
+            )
+
+        class FakeTokenizer:
+            def __len__(self):
+                return 100
+
+        monkeypatch.setattr(
+            transformers.AutoConfig, "from_pretrained", fake_from_pretrained
+        )
+        monkeypatch.setattr(
+            transformers.AutoTokenizer, "from_pretrained", lambda *a, **k: FakeTokenizer()
+        )
+        assert dm.sanity_check_light(cache, trust_remote_code=True) is True
+        assert seen["trust_remote_code"] is True
+
+    def test_light_sanity_passes_for_a_nested_config(self, monkeypatch, tmp_path):
+        import torch
+        import transformers
+        from safetensors.torch import save_file
+
+        cache = tmp_path / "nested"
+        cache.mkdir()
+        _meta(cache)
+        save_file({"weight": torch.zeros(1)}, cache / "model.safetensors")
+        monkeypatch.setattr(
+            transformers.AutoConfig, "from_pretrained",
+            lambda *a, **k: types.SimpleNamespace(
+                model_type="qwen3_5",
+                text_config=types.SimpleNamespace(num_hidden_layers=32, hidden_size=2560),
+            ),
+        )
+        class FakeTokenizer:
+            def __len__(self):
+                return 100
+
+        monkeypatch.setattr(
+            transformers.AutoTokenizer, "from_pretrained", lambda *a, **k: FakeTokenizer()
+        )
+        assert dm.sanity_check_light(cache) is True
 
 
 class TestArgResolution:
@@ -129,3 +224,11 @@ class TestArgResolution:
         args = self._args(monkeypatch, "--check-only")
         assert args.check_only is True
         assert args.force is False
+
+    def test_trust_remote_code_comes_from_the_registry(self, monkeypatch):
+        assert self._args(monkeypatch, "--model", "spark-x2.6-4b").trust_remote_code is True
+        assert self._args(monkeypatch, "--model", "qwen3-8b").trust_remote_code is False
+
+    def test_explicit_no_trust_remote_code_wins(self, monkeypatch):
+        args = self._args(monkeypatch, "--model", "spark-x2.6-4b", "--no-trust-remote-code")
+        assert args.trust_remote_code is False

@@ -346,6 +346,10 @@ q3as/
        project-id
    data/
        processed/
+           .smoke/
+               test.jsonl
+               train.jsonl
+               val.jsonl
            .stages/
                ada_ast_units.json
                contract_mutations.json
@@ -467,6 +471,7 @@ q3as/
        test_reporting.py
        test_stage_state.py
        test_train_data.py
+       test_verified_spark_discovery.py
    tools/
        check-links.py
    trainer_output/

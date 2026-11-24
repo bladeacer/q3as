@@ -134,6 +134,14 @@ def parse_args() -> argparse.Namespace:
         help="Force re-download even if model already exists.",
     )
     parser.add_argument(
+        "--trust-remote-code", dest="trust_remote_code", action="store_true", default=None,
+        help="Allow the model's custom modeling_*.py in the sanity check.",
+    )
+    parser.add_argument(
+        "--no-trust-remote-code", dest="trust_remote_code", action="store_false",
+        help="Refuse custom model code even when the registry allows it.",
+    )
+    parser.add_argument(
         "--check-only", action="store_true", default=False,
         help="Exit 0 when the model is complete, 1 when not; never downloads.",
     )
@@ -159,19 +167,46 @@ def resolve_args(args: argparse.Namespace) -> argparse.Namespace:
     args.model_name = repo
     args.cache_dir = Path(cache_dir)
     args.model_key = spec.key
+    if args.trust_remote_code is None:
+        args.trust_remote_code = spec.trust_remote_code
     return args
 
 
-def is_model_present(cache_dir: Path) -> bool:
+def cached_repo(cache_dir: Path) -> str | None:
+    """The repo id recorded in an existing download, if any."""
+    metadata_path = cache_dir / "download_metadata.json"
+    if not metadata_path.is_file():
+        return None
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+    name = metadata.get("model_name")
+    return str(name) if name else None
+
+
+def is_model_present(cache_dir: Path, expected_repo: str | None = None) -> bool:
     """Check if the model files already exist in cache_dir.
 
-    Returns True if all required files are present, False otherwise.
-    Verifies that the weight shards referenced by the safetensors index actually
-    exist on disk, so a partially downloaded model (metadata only) is not treated
-    as complete.
+    Returns True if all required files are present, False otherwise. Verifies
+    that the weight shards referenced by the safetensors index actually exist
+    on disk, so a partially downloaded model (metadata only) is not treated as
+    complete. When *expected_repo* is given, the cached download must also be
+    from that repo: the old BF16 Qwen3-8B cache looks complete but holds the
+    wrong weights for the 4-bit default.
     """
     if not cache_dir.exists():
         return False
+
+    if expected_repo:
+        actual = cached_repo(cache_dir)
+        if actual and actual != expected_repo:
+            logger.warning(
+                "Cache %s holds %s, but %s is required; treating it as missing. "
+                "Remove the directory first if you want to reclaim its disk space.",
+                cache_dir, actual, expected_repo,
+            )
+            return False
 
     existing_files = {f.name for f in cache_dir.rglob("*") if f.is_file()}
     missing_meta = _BASE_REQUIRED_FILES - existing_files
@@ -206,7 +241,7 @@ def download_model(model_name: str, cache_dir: Path, force: bool = False) -> dic
 
     cache_dir.mkdir(parents=True, exist_ok=True)
 
-    if not force and is_model_present(cache_dir):
+    if not force and is_model_present(cache_dir, model_name):
         logger.info(
             "Model already present at %s - skipping download. Use --force to re-download.",
             cache_dir,
@@ -263,11 +298,34 @@ def _read_existing_metadata(cache_dir: Path, model_name: str) -> dict[str, Any]:
     }
 
 
-def sanity_check_light(cache_dir: Path) -> bool:
+def config_dimensions(config: Any) -> tuple[int | None, int | None]:
+    """Layer count and hidden size from a flat or nested HF config.
+
+    Qwen3 and LFM2 keep ``num_hidden_layers`` / ``hidden_size`` at the top
+    level; Qwen3.5 wraps the text model in ``text_config``. These two values
+    are logging only, so a missing one must never fail the sanity check.
+    """
+    layers = getattr(config, "num_hidden_layers", None)
+    hidden = getattr(config, "hidden_size", None)
+    if layers is None or hidden is None:
+        for name in ("text_config", "language_config", "config"):
+            nested = getattr(config, name, None)
+            if nested is None:
+                continue
+            layers = layers if layers is not None else getattr(nested, "num_hidden_layers", None)
+            hidden = hidden if hidden is not None else getattr(nested, "hidden_size", None)
+            if layers is not None and hidden is not None:
+                break
+    return layers, hidden
+
+
+def sanity_check_light(cache_dir: Path, trust_remote_code: bool = False) -> bool:
     """Fast, terminating sanity check: tokenizer, config, shard headers.
 
     Parses only the safetensors headers (a few KB per shard), so it never
     loads weights into RAM and cannot hang on GPU or driver problems.
+    Custom-code repos (Spark, K2) need *trust_remote_code*, otherwise the
+    check blocks on an interactive prompt and fails on EOF.
     """
     logger.info("Running lightweight sanity check on model at %s ...", cache_dir)
     try:
@@ -275,14 +333,19 @@ def sanity_check_light(cache_dir: Path) -> bool:
         from transformers import AutoConfig, AutoTokenizer
 
         logger.info("Loading tokenizer ...")
-        tokenizer = AutoTokenizer.from_pretrained(str(cache_dir))
+        tokenizer = AutoTokenizer.from_pretrained(
+            str(cache_dir), trust_remote_code=trust_remote_code
+        )
         logger.info("Tokenizer ok: vocab size %d", len(tokenizer))
 
         logger.info("Loading config ...")
-        config = AutoConfig.from_pretrained(str(cache_dir))
+        config = AutoConfig.from_pretrained(
+            str(cache_dir), trust_remote_code=trust_remote_code
+        )
+        layers, hidden = config_dimensions(config)
         logger.info(
-            "Config ok - model_type: %s, layers: %d, hidden: %d",
-            config.model_type, config.num_hidden_layers, config.hidden_size,
+            "Config ok - model_type: %s, layers: %s, hidden: %s",
+            getattr(config, "model_type", "unknown"), layers, hidden,
         )
 
         shards = weight_files(cache_dir)
@@ -306,12 +369,12 @@ def sanity_check_light(cache_dir: Path) -> bool:
         logger.info("Lightweight sanity check PASSED (no GPU work performed).")
         return True
 
-    except Exception as exc:
-        logger.error("Lightweight sanity check failed: %s", exc, exc_info=True)
+    except Exception:
+        logger.exception("Lightweight sanity check failed")
         return False
 
 
-def sanity_check_deep(cache_dir: Path) -> bool:
+def sanity_check_deep(cache_dir: Path, trust_remote_code: bool = False) -> bool:
     """Verify the downloaded model can be loaded on the GPU and generate.
 
     Heavy: loads all weights onto the device and runs a short generation.
@@ -322,11 +385,13 @@ def sanity_check_deep(cache_dir: Path) -> bool:
     logger.info("Running deep sanity check on model at %s ...", cache_dir)
 
     try:
-        from transformers import AutoModelForCausalLM, AutoTokenizer
         import torch
+        from transformers import AutoModelForCausalLM, AutoTokenizer
 
         logger.info("Loading tokenizer ...")
-        tokenizer = AutoTokenizer.from_pretrained(str(cache_dir))
+        tokenizer = AutoTokenizer.from_pretrained(
+            str(cache_dir), trust_remote_code=trust_remote_code
+        )
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
             logger.warning("Set pad_token to eos_token")
@@ -336,6 +401,7 @@ def sanity_check_deep(cache_dir: Path) -> bool:
             str(cache_dir),
             dtype=torch.float16,
             device_map="auto",
+            trust_remote_code=trust_remote_code,
         )
 
         logger.info("Model loaded successfully on device: %s", next(model.parameters()).device)
@@ -366,8 +432,8 @@ def sanity_check_deep(cache_dir: Path) -> bool:
     except ImportError as exc:
         logger.warning("Deep sanity check skipped - missing dependency: %s", exc)
         return True
-    except Exception as exc:
-        logger.error("Deep sanity check failed: %s", exc, exc_info=True)
+    except Exception:
+        logger.exception("Deep sanity check failed")
         return False
 
 
@@ -376,6 +442,7 @@ def run_sanity(
     model_name: str,
     deep: bool,
     timeout_s: int,
+    trust_remote_code: bool = False,
 ) -> bool | None:
     """Run the configured sanity check; return True, False, or None.
 
@@ -388,7 +455,7 @@ def run_sanity(
     download pipeline always terminates.
     """
     if not deep:
-        return sanity_check_light(cache_dir)
+        return sanity_check_light(cache_dir, trust_remote_code)
 
     this_file = Path(__file__).resolve()
     child_cmd = [
@@ -396,6 +463,8 @@ def run_sanity(
         "--sanity-child", "--cache-dir", str(cache_dir),
         "--model-name", model_name, "--no-sanity-check",
     ]
+    if trust_remote_code:
+        child_cmd.append("--trust-remote-code")
     logger.info("Deep check runs in a child process (timeout: %ds) ...", timeout_s)
     try:
         proc = subprocess.run(
@@ -434,12 +503,12 @@ def main() -> int:
     if args.sanity_child:
         # Internal mode: run the deep check in this process and report the
         # result through the exit code.
-        passed = sanity_check_deep(args.cache_dir)
+        passed = sanity_check_deep(args.cache_dir, args.trust_remote_code)
         return 0 if passed else 1
 
     if args.check_only:
         # Presence probe for scripts (make check-model): never downloads.
-        if is_model_present(args.cache_dir):
+        if is_model_present(args.cache_dir, args.model_name):
             logger.info("Model present and complete at %s", args.cache_dir)
             return 0
         logger.warning("Model incomplete or missing at %s", args.cache_dir)
@@ -450,7 +519,7 @@ def main() -> int:
         args.model_name, args.cache_dir, args.model_key,
     )
 
-    if not args.force and is_model_present(args.cache_dir):
+    if not args.force and is_model_present(args.cache_dir, args.model_name):
         print(f"Model already exists at {args.cache_dir}. Use --force to re-download.")
         metadata = _read_existing_metadata(args.cache_dir, args.model_name)
     else:
@@ -464,7 +533,10 @@ def main() -> int:
 
     exit_code = 0
     if args.sanity_check:
-        passed = run_sanity(args.cache_dir, args.model_name, args.sanity_deep, args.sanity_timeout)
+        passed = run_sanity(
+            args.cache_dir, args.model_name, args.sanity_deep,
+            args.sanity_timeout, args.trust_remote_code,
+        )
         if passed is None:
             print("\nSanity check INCONCLUSIVE - it timed out, so readiness is unknown.")
             print("Training can still proceed; see the warning above for the manual check.")

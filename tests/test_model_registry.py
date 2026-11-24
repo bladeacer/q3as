@@ -48,13 +48,20 @@ class TestRegistryContents:
         assert spec.target_modules
         assert "lm_head" not in spec.target_modules
         assert "embed_tokens" not in spec.target_modules
-        # Nothing has been run on the reference machine with these settings.
-        assert spec.tested is False
+        # Only Spark has been smoke-run; the rest are still untested.
+        assert spec.tested is (key == "spark-x2.6-4b")
 
     def test_official_urls_match_the_repo_ids(self):
         for spec in mr.list_models():
             assert spec.official_url == f"https://huggingface.co/{spec.official_repo}"
             assert spec.train_url == f"https://huggingface.co/{spec.train_repo}"
+
+    def test_spark_uses_its_fused_projection_names(self):
+        targets = mr.get_model("spark-x2.6-4b").target_modules
+        assert "q_k_v_proj" in targets
+        assert "g_proj" in targets
+        assert "out_proj" in targets
+        assert "q_proj" not in targets  # Qwen's name, not Spark's
 
     def test_default_key_is_qwen3_8b(self):
         assert mr.DEFAULT_MODEL_KEY == "qwen3-8b"

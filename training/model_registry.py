@@ -48,6 +48,13 @@ LFM2_TARGET_MODULES: tuple[str, ...] = (
     "w1", "w2", "w3",
 )
 
+# Spark2_5 fuses Q/K/V into one projection and adds a headwise attention gate.
+# Names read from the repo's modeling_spark.py, not assumed from Qwen.
+SPARK_TARGET_MODULES: tuple[str, ...] = (
+    "q_k_v_proj", "g_proj", "out_proj",
+    "gate_proj", "up_proj", "down_proj",
+)
+
 DEFAULT_MODEL_KEY = "qwen3-8b"
 
 
@@ -161,14 +168,15 @@ MODELS: dict[str, ModelSpec] = {
             max_seq_length=1024,
             lora_rank=8,
             lora_alpha=16,
-            target_modules=STANDARD_TARGET_MODULES,
+            target_modules=SPARK_TARGET_MODULES,
             packing=True,
             offload_embedding=False,
-            tested=False,
+            tested=True,
             notes=(
-                "Ships configuration_spark.py and modeling_spark.py; needs "
-                "trust_remote_code=True. No Unsloth quant. Inspect module "
-                "names in modeling_spark.py before a long run."
+                "Smoke-tested: 20 steps on a 300-record sample, hf+PEFT 4-bit, "
+                "--no-bf16. Ships configuration_spark.py and modeling_spark.py; "
+                "needs trust_remote_code=True. No Unsloth quant. Its custom "
+                "code needs two compatibility shims (see train_unsloth.py)."
             ),
         ),
         ModelSpec(

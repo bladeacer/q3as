@@ -142,7 +142,11 @@ def discover_units(
         if not source_dir.is_dir():
             logger.warning("source directory not found, skipping: %s", source_dir)
             continue
-        for spec_path in sorted(source_dir.glob("*.ads")):
+        # The archive cache keeps each spec/body pair in its own project
+        # directory below SPARK2 (e.g. matrices/SPARK2/Ada-SPK-Matrix/x.ads).
+        # A flat glob silently found zero pairs on that layout and made the
+        # whole stage fail with "no verified units produced".
+        for spec_path in sorted(source_dir.rglob("*.ads")):
             if limit > 0 and len(units) >= limit:
                 break
             body_path = spec_path.with_suffix(".adb")

@@ -12,17 +12,18 @@ prints it from that file, so the registry is the single source of truth.
 |---|---|---|---|---|---|---|---|
 | `qwen3-8b` | Qwen 3 8B | [Qwen/Qwen3-8B](https://huggingface.co/Qwen/Qwen3-8B) | [unsloth/Qwen3-8B-unsloth-bnb-4bit](https://huggingface.co/unsloth/Qwen3-8B-unsloth-bnb-4bit) | native | Yes | Yes | No |
 | `qwen3.5-4b` | Qwen 3.5 4B | [Qwen/Qwen3.5-4B-Base](https://huggingface.co/Qwen/Qwen3.5-4B-Base) | [unsloth/Qwen3.5-4B-Base](https://huggingface.co/unsloth/Qwen3.5-4B-Base) | partial | No | Yes | No |
-| `spark-x2.6-4b` | Spark-X2.6-4B | [XHToken/Spark-X2.6-4B](https://huggingface.co/XHToken/Spark-X2.6-4B) | [XHToken/Spark-X2.6-4B](https://huggingface.co/XHToken/Spark-X2.6-4B) | generic | No | Yes | No |
+| `spark-x2.6-4b` | Spark-X2.6-4B | [XHToken/Spark-X2.6-4B](https://huggingface.co/XHToken/Spark-X2.6-4B) | [XHToken/Spark-X2.6-4B](https://huggingface.co/XHToken/Spark-X2.6-4B) | generic | No | Yes | Yes (smoke) |
 | `k2-horizon-7b` | K2 Horizon 7B | [IFM/K2-Horizon-7B](https://huggingface.co/IFM/K2-Horizon-7B) | [IFM/K2-Horizon-7B](https://huggingface.co/IFM/K2-Horizon-7B) | generic | No | Yes | No |
 | `lfm2.5-2.6b` | LFM 2.5 2.6B | [LiquidAI/LFM2.5-2.6B](https://huggingface.co/LiquidAI/LFM2.5-2.6B) | [LiquidAI/LFM2.5-2.6B](https://huggingface.co/LiquidAI/LFM2.5-2.6B) | unlikely | No | No | No |
 
-**Tested = No for every row.** The "Unsloth" column records what the loader is
-expected to do, not the result of a completed QLoRA run. No candidate other
-than the old BF16 Qwen3-8B configuration has been run on the reference machine
-yet, and the old configuration is not the default here: it used the original
-16 GB weights, while the default now uses Unsloth's 4-bit base. Flip a row to
-`Yes` only after a real `make train MODEL=<key>` run that reaches the summary
-file on the target hardware.
+**Tested means a smoke run reached `training_summary.json` on the reference
+machine, not that a full training run finished.** Spark-X2.6-4B is the only
+row with a test so far: a 20-step QLoRA run on a 300-record sample (`--no-bf16`)
+completed with test loss 1.70. The other four are untested, and even the new
+default Qwen3-8B configuration is untested because the earlier run used the
+old BF16 weights. The "Unsloth" column records what the loader is expected to
+do, not a measured result. Flip a row to `Yes` only after a real
+`make train MODEL=<key>` run that reaches the summary file.
 
 ## What the columns mean
 
@@ -70,8 +71,21 @@ compatibility need a first-run check. If loading fails, use
 `XHToken/Spark-X2.6-4B` ships `configuration_spark.py` and
 `modeling_spark.py` and declares an `auto_map`. It needs
 `trust_remote_code=True`, which the registry sets. There is no Unsloth quant.
-Check the projection names in `modeling_spark.py` against
-`STANDARD_TARGET_MODULES` before committing to a long run.
+Its attention fuses Q/K/V into `q_k_v_proj` and adds `g_proj`/`out_proj`, so
+the registry uses Spark-specific LoRA targets, not the Qwen list.
+
+A 20-step smoke run on a 300-record sample succeeded with the `hf` backend,
+`packing=True`, and `--no-bf16`; it saved
+`outputs/q3as-spark-smoke/lora_adapter` and a summary (loss 2.70 to 1.81, test
+loss 1.70). Three compatibility shims were needed with transformers 5.3 and
+PEFT 0.21, all in
+[`training/train_unsloth.py`](../training/train_unsloth.py): the custom code's
+pre-v5 `_tied_weights_keys` list, a meta-device `lm_head` left by tied
+embeddings, and a hard-coded cast to a 4-bit weight dtype (`uint8`) in
+`modeling_spark.py`. The loader also skips importing Unsloth on this backend,
+recasts LoRA adapters to the compute dtype, and exposes `hf_device_map` so
+accelerate does not try to move a quantized model. This is a smoke result only;
+a full run over the whole dataset has not been done.
 
 ### k2-horizon-7b
 

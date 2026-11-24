@@ -29,9 +29,13 @@ TRAIN_FLAGS ?= --skip-merged-save
 #   make train MODEL=qwen3.5-4b
 #   make download-models      (all registered models; skips cached ones)
 # Q3AS_MODEL in the environment supplies the same default for direct script runs.
-MODEL ?= $(shell uv run python training/model_registry.py --default)
-MODEL_KEYS := $(shell uv run python training/model_registry.py --keys)
-BASE_MODEL := $(shell uv run python training/model_registry.py $(MODEL) --field cache_dir)
+# The registry is pure stdlib, so use system python3 here instead of `uv run`:
+# these variables are expanded by every make invocation and uv's startup cost
+# dominated a `make check-models` that only probes five cache directories.
+# Recursive expansion keeps the lookup out of targets that never use it.
+MODEL ?= $(shell python3 training/model_registry.py --default)
+MODEL_KEYS = $(shell python3 training/model_registry.py --keys)
+BASE_MODEL = $(shell python3 training/model_registry.py $(MODEL) --field cache_dir)
 
 # Rebuild a stage even when its fingerprint matches.
 FORCE_FLAG = $(if $(FORCE),--force,)
@@ -126,7 +130,7 @@ setup: ## One-shot bootstrap: fetch source repos into the cache, .env, uv sync, 
 	./setup.sh
 
 model-table: ## Print the model support table from the registry
-	uv run python training/model_registry.py --table
+	python3 training/model_registry.py --table
 
 download: ## Download and sanity-check one base model (MODEL=<key>, default qwen3-8b)
 	HF_HUB_DISABLE_XET=1 uv run python training/download_model.py --model $(MODEL)

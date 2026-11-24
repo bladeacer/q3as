@@ -75,13 +75,30 @@ except ImportError:  # package import (pytest importing training.train_unsloth)
 # restores the synchronous CPU->quantize->GPU path.
 os.environ.setdefault("HF_DEACTIVATE_ASYNC_LOAD", "1")
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
-# Import unsloth before transformers/trl so its patches apply.
+# Unsloth must be imported before trl only for the Unsloth backend. On the
+# HF+PEFT backend its patched SFTTrainer calls fix_untrained_tokens, which
+# reads lm_head weights that a 4-bit model holds on the meta device. main()
+# imports unsloth after resolving --backend, so a generic model gets plain trl.
 os.environ.setdefault("UNSLOTH_RETURN_LOGITS", "1")
 
-import unsloth  # noqa: F401
-from transformers import TrainerCallback, set_seed
-
 logger = logging.getLogger("q3as_train")
+
+
+def seed_everything(seed: int) -> None:
+    """Seed every RNG without importing transformers ahead of Unsloth.
+
+    transformers.set_seed does the same four calls; doing it here keeps the
+    Unsloth backend's import order intact (its patches must be applied before
+    trl/transformers are imported).
+    """
+    import numpy as np
+    import torch
+
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
 # Kept as a constant for callers that import it; the value comes from the
 # registry so a new default model does not need another edit here.
@@ -228,6 +245,11 @@ def parse_args() -> argparse.Namespace:
         help="Ignore any checkpoint in --output-dir and train from the base "
         "model. By default an interrupted run continues from its last "
         "checkpoint (weights, optimizer, LR schedule, and data cursor).",
+    )
+    parser.add_argument(
+        "--no-bf16", dest="bf16", action="store_false", default=True,
+        help="Disable bf16 autocast. Some custom-code 4-bit models need this: "
+        "PEFT skips its input dtype cast while autocast is active.",
     )
     parser.add_argument("--seed", type=int, default=42, help="Random seed.")
     parser.add_argument("--verbose", "-v", action="store_true", help="Enable debug logging.")
@@ -767,6 +789,72 @@ def setup_training_environment(args: argparse.Namespace, has_val: bool) -> dict[
     return config
 
 
+def install_legacy_tied_weights_compat() -> None:
+    """Let custom-code models written for transformers 4 load under v5.
+
+    Older `modeling_*.py` files declare `_tied_weights_keys = ["lm_head.weight"]`
+    (a list). transformers 5 expects a mapping and raises inside `post_init`
+    before any weights are read. Convert the list to the mapping it wants,
+    pointing every key at the model's input-embedding weight. Installed once,
+    only on the HF backend, and a no-op for models already using a dict.
+    """
+    from transformers import modeling_utils
+
+    original = modeling_utils.PreTrainedModel.get_expanded_tied_weights_keys
+    if getattr(original, "_q3as_compat", False):
+        return
+
+    def patched(self: Any, all_submodels: bool = False) -> Any:
+        tied = getattr(self, "_tied_weights_keys", None)
+        if isinstance(tied, (list, tuple)):
+            target: str | None = None
+            try:
+                embedding = self.get_input_embeddings()
+                for name, param in self.named_parameters():
+                    if param is embedding.weight:
+                        target = name
+                        break
+            except Exception:  # noqa: BLE001  (best-effort compatibility shim)
+                target = None
+            self._tied_weights_keys = {key: target for key in tied} if target else {}
+        return original(self, all_submodels)
+
+    patched._q3as_compat = True  # type: ignore[attr-defined]
+    modeling_utils.PreTrainedModel.get_expanded_tied_weights_keys = patched
+    logger.info("Installed legacy _tied_weights_keys compatibility shim")
+
+
+def patch_custom_code_dtype_cast(config: dict[str, Any]) -> None:
+    """Fix Spark2.5's hard-coded cast to a quantized weight dtype.
+
+    modeling_spark.py does ``hidden_states.to(self.mlp.gate_proj.weight.dtype)``
+    before attention. With bnb 4-bit that weight is uint8, so every attention
+    matmul fails with "baddbmm_cuda not implemented for Byte". Rewrite the one
+    line in both the local model directory and transformers' dynamic-module
+    cache to keep the activation dtype. No other model needs this.
+    """
+    if config["_spec"].key != "spark-x2.6-4b":
+        return
+    old = "hidden_states.to(self.mlp.gate_proj.weight.dtype)"
+    new = "hidden_states.to(hidden_states.dtype)"
+    candidates = [Path(config["_load_path"]) / "modeling_spark.py"]
+    cache_root = Path.home() / ".cache" / "huggingface" / "modules" / "transformers_modules"
+    if cache_root.is_dir():
+        candidates.extend(sorted(cache_root.glob("*/modeling_spark.py")))
+    patched = 0
+    for path in candidates:
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        if old in text:
+            path.write_text(text.replace(old, new), encoding="utf-8")
+            patched += 1
+            logger.warning("Patched quantized-dtype cast in %s", path)
+    if not patched:
+        logger.warning("Spark dtype-cast patch found no matching line; training may fail")
+
+
 def load_training_model(config: dict[str, Any]) -> tuple[Any, Any]:
     """Load the selected base model and tokenizer with 4-bit QLoRA.
 
@@ -782,12 +870,12 @@ def load_training_model(config: dict[str, Any]) -> tuple[Any, Any]:
     if config["backend"] == "unsloth":
         from unsloth import FastLanguageModel
 
-        common = dict(
-            model_name=load_path,
-            max_seq_length=config["max_seq_length"],
-            load_in_4bit=True,
-            token=hf_token,
-        )
+        common = {
+            "model_name": load_path,
+            "max_seq_length": config["max_seq_length"],
+            "load_in_4bit": True,
+            "token": hf_token,
+        }
         if config["offload_embedding"]:
             try:
                 model, tokenizer = FastLanguageModel.from_pretrained(
@@ -805,10 +893,13 @@ def load_training_model(config: dict[str, Any]) -> tuple[Any, Any]:
 
     # Generic transformers + PEFT path. Needed for custom-code models and for
     # hybrid layers (e.g. LFM2) where Unsloth's fused MHA kernels do not apply.
+    patch_custom_code_dtype_cast(config)
     import torch
     from peft import LoraConfig, get_peft_model
     from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
+    if config["trust_remote_code"]:
+        install_legacy_tied_weights_compat()
     compute_dtype = torch.bfloat16 if config["bf16"] else torch.float16
     bnb_config = BitsAndBytesConfig(
         load_in_4bit=True,
@@ -839,6 +930,59 @@ def load_training_model(config: dict[str, Any]) -> tuple[Any, Any]:
             task_type="CAUSAL_LM",
         ),
     )
+    # PEFT can initialise LoRA weights with the dtype of a bnb 4-bit base
+    # layer (uint8). Under bf16 autocast that fails at the first matmul.
+    # Recast just the adapter weights to the compute dtype and reinitialise
+    # them so the random values are meaningful in that dtype.
+    recast = 0
+    for module in model.modules():
+        adapters = getattr(module, "lora_A", None)
+        if not adapters:
+            continue
+        for adapter, layer in adapters.items():
+            if getattr(layer, "weight", None) is not None and layer.weight.dtype != compute_dtype:
+                module.lora_A[adapter].to(dtype=compute_dtype)
+                module.lora_B[adapter].to(dtype=compute_dtype)
+                # Reset by hand: PEFT's reset_lora_parameters signature
+                # changed across versions (adapter-only vs adapter + flag).
+                from torch import nn
+
+                nn.init.kaiming_uniform_(module.lora_A[adapter].weight, a=math.sqrt(5))
+                nn.init.zeros_(module.lora_B[adapter].weight)
+                recast += 1
+    if recast:
+        logger.info("Recast %d LoRA adapter weight pair(s) to %s", recast, compute_dtype)
+
+    # Some checkpoints declare tie_word_embeddings=True but still ship an
+    # lm_head.weight, and transformers leaves that one parameter on the meta
+    # device. Tie it to the input embedding ourselves; otherwise the Trainer's
+    # model.to(device) crashes before step 1.
+    base = getattr(getattr(model, "base_model", None), "model", None)
+    if base is not None:
+        embedding = base.get_input_embeddings().weight
+        for name, param in list(base.named_parameters()):
+            if param.device.type != "meta":
+                continue
+            if name == "lm_head.weight":
+                base.lm_head.weight = embedding
+                logger.warning(
+                    "Tied a meta-device lm_head.weight to the input embedding"
+                )
+            else:
+                raise RuntimeError(
+                    f"Parameter {name} is on the meta device after loading "
+                    f"{config['_load_path']}; no automatic mapping is known."
+                )
+        # accelerate.verify_device_map only skips model.to() when some child
+        # exposes a map with more than one entry. Everything is already on the
+        # right device, so declare a two-entry map pointing at GPU 0.
+        children = [name for name, _ in base.named_children()]
+        if children:
+            device = 0 if torch.cuda.is_available() else "cpu"
+            base_map = {"": device, children[0]: device}
+            base.hf_device_map = base_map
+            model.hf_device_map = base_map
+            logger.info("Exposed hf_device_map so the Trainer keeps the model in place")
     if config["offload_embedding"]:
         logger.warning("offload_embedding is Unsloth-only; ignored on the hf backend.")
     logger.info(
@@ -907,7 +1051,7 @@ def main() -> None:
 
     # Seed every RNG up front (transformers covers random/numpy/torch/CUDA);
     # SFTConfig also receives the seed for data-order reproducibility.
-    set_seed(args.seed)
+    seed_everything(args.seed)
 
     # Fail before the 8B model load, not after it: the stream path cannot know
     # the split is unusable until it has read it.
@@ -1002,15 +1146,29 @@ def main() -> None:
         )
 
     try:
-        from unsloth import is_bfloat16_supported
+        if config["backend"] == "unsloth":
+            import unsloth  # noqa: F401  (must patch trl before it is imported)
+            from unsloth import is_bfloat16_supported
+        else:
+            # No Unsloth patches: custom-code and hybrid architectures train
+            # through the stock trl SFTTrainer + PEFT model instead.
+            def is_bfloat16_supported() -> bool:
+                import torch
+
+                return bool(torch.cuda.is_available() and torch.cuda.is_bf16_supported())
+
+        from transformers import TrainerCallback
 
         bfloat_available = is_bfloat16_supported()
         logger.info("bfloat16 supported: %s", bfloat_available)
         # The probe used to be logged and then ignored, while the config
         # hard-coded bf16, so a CPU-only or pre-Ampere machine was configured
         # for a dtype the trainer cannot use.
-        config["bf16"] = bfloat_available
-        if not bfloat_available:
+        config["bf16"] = bfloat_available and args.bf16
+        if not config["bf16"]:
+            logger.warning("bf16 training is off; using fp32 compute for adapters")
+            config["fp16"] = False
+        elif not bfloat_available:
             config["fp16"] = True
             logger.warning(
                 "bfloat16 is unavailable; falling back to fp16 for training."
@@ -1305,6 +1463,8 @@ def main() -> None:
             # trl's field is max_length; max_seq_length is ours (tokenizer and
             # Unsloth loader). Leaving it in raises TypeError on trl >= 0.12.
             "max_seq_length",
+            # Private keys added by main() just before the model load.
+            "_load_path", "_spec",
         }
         training_args = SFTConfig(
             dataset_text_field="text",
