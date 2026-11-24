@@ -54,6 +54,13 @@ under `outputs/eval_results/<model>/<dataset>/` and a human-readable
 
 - **n is small** (19 samples per model). Treat percentages as directional;
   a 10-point swing is within noise.
+- **BUILD/TEST/PROVE are reported twice**, split by whether the reply changed a
+  base file: `split_tally_by_changed_files` in
+  [`eval/ada_eval_common.py`](../eval/ada_eval_common.py) joins each evaluated
+  sample to `generation_meta.json`, `make eval` prints
+  `Build split: 15/19 (3 of 4 changed, 12 of 15 unchanged)`, and every
+  `docs/results/result-vX.Y.Z.md` carries a "Samples the model changed" table.
+  A run without the sidecar renders "not recorded" instead of zeros.
 - **A reply that changes nothing scores on the base project.** Most ada-eval
   base trees already carry a body for the target subprogram and already
   compile, so a reply that only echoes the specification it was shown leaves a
@@ -76,10 +83,14 @@ under `outputs/eval_results/<model>/<dataset>/` and a human-readable
   `proved_incorrectly` and `subprogram_not_found` as unproved rather than as
   errors, so an incorrect proof cannot inflate the proved rate.
 - **A BUILD failure can be a routing failure.**
-  [`eval/generate.py`](../eval/generate.py) maps a reply onto project files,
-  and a reply naming no usable file next to the target is written at the
-  target path. When a sample fails BUILD, read the generated file before
-  blaming the Ada.
+  [`eval/generate.py`](../eval/generate.py) maps a reply onto project files.
+  A reply that used `File:` entries next to the target wins outright; a
+  headerless reply falls back to one fenced block at the target, and a
+  `package body` block is routed to the sibling `.adb` when the base tree
+  already has one. A reply that named *only* unusable paths leaves the base
+  project untouched and scores as the base project, which is why
+  `changed_files` has to be read next to any BUILD number. When a sample fails
+  BUILD, read the generated file before blaming the Ada.
 
 ## Running
 

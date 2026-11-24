@@ -1,4 +1,4 @@
-.PHONY: help setup sync download build-dataset parse-data gen-contracts gen-verified-spark check-integrity check-links train generate eval eval-data eval-pipeline eval-report bump-version prove ast-deps ada-env test lint validate-defects agents-tree fetch-sources check-sources update-sources clean clean-model all check-model
+.PHONY: help setup sync download download-models check-models model-table build-dataset parse-data gen-contracts gen-verified-spark check-integrity check-links train generate eval eval-data eval-pipeline eval-report bump-version prove ast-deps ada-env test lint validate-defects agents-tree fetch-sources check-sources update-sources clean clean-model all check-model
 
 # Prerequisite chain for the dataset: parser outputs (docs chunks, AST units,
 # contract turns) must exist before the builder runs. Every stage fingerprints
@@ -23,6 +23,15 @@ DATASET_WORKERS ?= 0
 MAX_NEW_TOKENS ?= 512
 MAX_PROMPT_CHARS ?= 12000
 TRAIN_FLAGS ?= --skip-merged-save
+
+# Which base model the whole pipeline uses. The registry is the single source
+# of truth for its repo, local cache dir, backend, and 8 GB VRAM settings:
+#   make train MODEL=qwen3.5-4b
+#   make download-models      (all registered models; skips cached ones)
+# Q3AS_MODEL in the environment supplies the same default for direct script runs.
+MODEL ?= $(shell uv run python training/model_registry.py --default)
+MODEL_KEYS := $(shell uv run python training/model_registry.py --keys)
+BASE_MODEL := $(shell uv run python training/model_registry.py $(MODEL) --field cache_dir)
 
 # Rebuild a stage even when its fingerprint matches.
 FORCE_FLAG = $(if $(FORCE),--force,)
@@ -54,9 +63,12 @@ help: ## Show this help message
 	@echo "  make setup          - One-shot bootstrap: fetch source repos into the archive"
 	@echo "                        cache, .env, Alire index, uv sync, Python headers"
 	@echo "  make sync           - Install/update all dependencies via uv sync"
-	@echo "  make download       - Download and sanity-check the Qwen3-8B model"
-	@echo "                        (Qwen/Qwen3-8B -> models/qwen3-8b)"
-	@echo "  make check-model    - Download the model only when it is missing"
+	@echo "  make model-table    - Print the model support table (repos, Unsloth status, tested)"
+	@echo "  make download       - Download and sanity-check one base model (default: qwen3-8b,"
+	@echo "                        Unsloth's 4-bit quant; MODEL=<key> selects another)"
+	@echo "  make download-models - Download all registered models that are not cached yet"
+	@echo "  make check-model    - Download the selected model only when it is missing"
+	@echo "  make check-models   - Check every registered model's cache, download what is missing"
 	@echo ""
 	@echo "  make fetch-sources  - Fetch source repos into the archive cache (data/raw_repos)"
 	@echo "  make check-sources  - Compare each cached repo's commit with upstream"
@@ -77,7 +89,8 @@ help: ## Show this help message
 	@echo "  make check-integrity - Fail if any split file contains ada-eval evaluation content"
 	@echo "  make check-links    - Check every markdown link/anchor resolves, and that no link points at a gitignored path"
 	@echo ""
-	@echo "  make train          - Run 8 GB-safe QLoRA fine-tuning with Unsloth (adapter-only);"
+	@echo "  make train          - Run 8 GB-safe QLoRA fine-tuning (adapter-only) for MODEL;"
+	@echo "                        pre-quantized base, sequence packing, embedding offload;"
 	@echo "                        continues from the last checkpoint when a run was"
 	@echo "                        interrupted (TRAIN_FLAGS=--no-resume to start over)"
 	@echo "  make generate       - Generate Ada code with bounded memory settings"
@@ -99,9 +112,10 @@ help: ## Show this help message
 	@echo "  make clean          - Remove generated outputs and caches (keeps models/)"
 	@echo "  make clean-model    - Also remove the downloaded base model (16 GB)"
 	@echo ""
-	@echo "Options: DATASET_WORKERS=<n> parser/build worker processes (default 0 ="
-	@echo "         one per CPU core; 1 = serial. Output is identical for any value),"
-	@echo "         FORCE=1 rebuild a stage even when its inputs are unchanged."
+	@echo "Options: MODEL=<key> base model from training/model_registry.py (default"
+	@echo "         qwen3-8b or Q3AS_MODEL), DATASET_WORKERS=<n> parser/build workers"
+	@echo "         (default 0 = one per CPU core; 1 = serial), FORCE=1 rebuild a"
+	@echo "         stage even when its inputs are unchanged."
 	@echo ""
 	@echo "Usage: make [target]   (default: help)"
 
@@ -110,6 +124,33 @@ sync: ## Install/update all dependencies
 
 setup: ## One-shot bootstrap: fetch source repos into the cache, .env, uv sync, Python headers
 	./setup.sh
+
+model-table: ## Print the model support table from the registry
+	uv run python training/model_registry.py --table
+
+download: ## Download and sanity-check one base model (MODEL=<key>, default qwen3-8b)
+	HF_HUB_DISABLE_XET=1 uv run python training/download_model.py --model $(MODEL)
+
+check-model: ## Download the selected model only when it is missing
+	@if HF_HUB_DISABLE_XET=1 uv run python training/download_model.py --model $(MODEL) --check-only >/dev/null 2>&1; then \
+		echo "Model $(MODEL) already present at $(BASE_MODEL) - skipping download."; \
+	else \
+		echo "Model $(MODEL) not found or incomplete at $(BASE_MODEL) - downloading..."; \
+		$(MAKE) download MODEL=$(MODEL); \
+	fi
+
+download-models: ## Download all registered models that are not cached yet
+	@for key in $(MODEL_KEYS); do \
+		echo "==> model: $$key"; \
+		$(MAKE) download MODEL=$$key || exit 1; \
+	done
+	@echo "All registered base models are present in models/."
+
+check-models: ## Check all registered model caches, downloading the missing ones
+	@for key in $(MODEL_KEYS); do \
+		echo "==> model: $$key"; \
+		$(MAKE) check-model MODEL=$$key || exit 1; \
+	done
 
 fetch-sources: ## Fetch source repos into the archive cache (data/raw_repos); no-op when cached
 	uv run python scripts/fetch_repos.py
@@ -126,17 +167,6 @@ update-sources: fetch-sources ## Re-fetch the repos whose commit moved, then reb
 
 eval-data: ## Rebuild ada-eval's compacted benchmark JSONL from its expanded samples
 	uv run python scripts/pack_eval_data.py
-
-download: ## Download and sanity-check the Qwen3-8B model
-	HF_HUB_DISABLE_XET=1 uv run python training/download_model.py --model-name Qwen/Qwen3-8B --cache-dir models/qwen3-8b
-
-check-model: ## Check if model exists; download if missing
-	@if uv run python training/download_model.py --check-only >/dev/null 2>&1; then \
-		echo "Model already present at models/qwen3-8b - skipping download."; \
-	else \
-		echo "Model not found or incomplete - running download..."; \
-		$(MAKE) download; \
-	fi
 
 build-dataset: parse-data gen-contracts gen-verified-spark ## Build the training dataset from cached Ada source trees
 	## Ada code sources (cache): adacovex, Ada_CRDT, Ada-83-TLALOC,
@@ -160,17 +190,17 @@ build-dataset: parse-data gen-contracts gen-verified-spark ## Build the training
 		$(FORCE_FLAG) \
 		$(foreach f,$(DATASET_EXTRA_TURNS),--extra-turns $(f))
 
-train: ## Run QLoRA fine-tuning with Unsloth on the local base model (models/qwen3-8b); full stdout captured to training.log
+train: ## Run 8 GB-safe QLoRA fine-tuning for MODEL; full stdout captured to training.log
 	@set -o pipefail; \
 	HF_HUB_DISABLE_XET=1 HF_DEACTIVATE_ASYNC_LOAD=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True $(EXPORT_HEADERS) \
-		uv run python -u training/train_unsloth.py $(TRAIN_FLAGS) 2>&1 | tee -a training.log
+		uv run python -u training/train_unsloth.py --model $(MODEL) $(TRAIN_FLAGS) 2>&1 | tee -a training.log
 
 generate: ## Generate Ada code with the fine-tuned and base (local download) models
-	uv run python eval/generate.py --model outputs/q3as --base-model models/qwen3-8b \
+	uv run python eval/generate.py --model outputs/q3as --base-model $(BASE_MODEL) \
 		--max-new-tokens $(MAX_NEW_TOKENS) --max-prompt-chars $(MAX_PROMPT_CHARS)
 
 eval: eval-data ## Run baseline evaluation (BLEU + compilation/test/SPARK metrics, base comparison)
-	uv run python eval/baseline_eval.py --model outputs/q3as --base-model models/qwen3-8b
+	uv run python eval/baseline_eval.py --model outputs/q3as --base-model $(BASE_MODEL)
 
 eval-pipeline: ## Run full ada-eval BUILD/TEST/PROVE pipeline (writes the tallies `make eval` prints)
 	uv run python eval/eval_pipeline.py --evals build test prove
@@ -243,7 +273,7 @@ agents-tree: ## Regenerate the project file tree section in AGENTS.md
 all: check-model build-dataset train generate eval-pipeline eval eval-report ## Run full pipeline: download (if needed), build dataset, train, generate, evaluate, report
 	@echo ""
 	@echo "=== Full pipeline complete ==="
-	@echo "  Base model: models/qwen3-8b (local download of Qwen/Qwen3-8B)"
+	@echo "  Base model: $(BASE_MODEL) (registry key $(MODEL))"
 	@echo "  Dataset: data/processed/dataset.jsonl"
 	@echo "  Fine-tuned checkpoints: outputs/q3as"
 	@echo "  Generated solutions: outputs/generated_solutions/"
@@ -255,9 +285,9 @@ clean: ## Remove generated outputs and caches (keeps the downloaded model)
 		data/processed/dataset_test.jsonl data/processed/.stages \
 		data/processed/.tokenized training.log
 	@echo "Cleaned outputs/, generated dataset, stage stamps, tokenized-split cache, and training.log."
-	@echo "models/qwen3-8b is kept: it is a 16 GB download that make check-model"
-	@echo "skips. Use 'make clean-model' to remove it as well."
+	@echo "models/ is kept: the base weights are a multi-GB download that make"
+	@echo "check-model skips. Use 'make clean-model' to remove all cached models."
 
-clean-model: clean ## Also remove the downloaded base model (16 GB)
+clean-model: clean ## Also remove every downloaded base model (models/)
 	rm -rf models/
-	@echo "Removed models/."
+	@echo "Removed models/ (all registered base models)."

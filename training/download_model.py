@@ -1,7 +1,10 @@
-"""download_model.py - Download and sanity-check the Qwen3-8B model from HuggingFace.
+"""download_model.py - Download and sanity-check a q3as base model from HuggingFace.
 
-Downloads the base model (Qwen3-8B) to a local cache directory and verifies
-that the model is complete and loadable before fine-tuning begins.
+Downloads the base weights named by the model registry (see
+[`model_registry.py`](model_registry.py)) to a local cache directory and
+verifies that the model is complete and loadable before fine-tuning begins.
+For the default key the repo is Unsloth's pre-quantized 4-bit base, not the
+16 GB BF16 original.
 
 If the model is already present in the cache directory, the download is skipped
 unless --force is passed.
@@ -16,6 +19,7 @@ Sanity checks:
 
 Usage:
     uv run python training/download_model.py
+    uv run python training/download_model.py --model qwen3.5-4b
     uv run python training/download_model.py --model-name Qwen/Qwen3-8B --cache-dir models/qwen3-8b
     uv run python training/download_model.py --no-sanity-check
     uv run python training/download_model.py --sanity-deep
@@ -28,6 +32,7 @@ import argparse
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 import warnings
@@ -35,6 +40,11 @@ from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
+
+try:  # script invocation (python training/download_model.py)
+    from model_registry import get_model
+except ImportError:  # package import (from run_download.py at the repo root)
+    from training.model_registry import get_model
 
 load_dotenv()
 
@@ -49,26 +59,54 @@ warnings.filterwarnings(
 
 logger = logging.getLogger("q3as_download")
 
-# Key files that must exist for the model to be considered fully downloaded
-_REQUIRED_FILES = {
-    "config.json",
-    "configuration.json",
-    "tokenizer.json",
-    "tokenizer_config.json",
-    "model.safetensors.index.json",
-    "special_tokens_map.json",
-}
+# Metadata that every candidate repo ships. The old check also demanded
+# configuration.json, special_tokens_map.json, and a sharded index. Unsloth's
+# 4-bit repos ship no configuration.json, Qwen3.5's mirror has no
+# special_tokens_map.json, and Qwen3-4B's quant is a single safetensors file,
+# so those three cannot be part of the contract.
+_BASE_REQUIRED_FILES = {"config.json", "tokenizer.json", "tokenizer_config.json"}
+
+_SHARD_RE = re.compile(r"model-\d{5}-of-\d{5}\.safetensors\Z")
+
+
+def weight_files(cache_dir: Path) -> list[str]:
+    """Every weight shard *cache_dir* must contain, in a stable order.
+
+    Three layouts occur across the supported models: a sharded index, one
+    ``model.safetensors``, and numbered shards without an index. An index is
+    authoritative when present, so a partial download is reported even if
+    stray shard files exist.
+    """
+    names = {f.name for f in cache_dir.rglob("*") if f.is_file()}
+    index_path = cache_dir / "model.safetensors.index.json"
+    if index_path.exists():
+        try:
+            index = json.loads(index_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return []
+        shards = set(index.get("weight_map", {}).values())
+        if not shards or not shards.issubset(names):
+            return []
+        return sorted(shards)
+    if "model.safetensors" in names:
+        return ["model.safetensors"] if (cache_dir / "model.safetensors").stat().st_size else []
+    return sorted(name for name in names if _SHARD_RE.fullmatch(name))
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Download and sanity-check the Qwen3-8B model.")
+    parser = argparse.ArgumentParser(description="Download and sanity-check a q3as base model.")
     parser.add_argument(
-        "--model-name", type=str, default="Qwen/Qwen3-8B",
-        help="HuggingFace model identifier to download.",
+        "--model", type=str, default=None,
+        help="Key from model_registry.py (default: Q3AS_MODEL or qwen3-8b). "
+        "Sets both the repo to download and the local cache directory.",
     )
     parser.add_argument(
-        "--cache-dir", type=Path, default=Path("models/qwen3-8b"),
-        help="Local directory to store the downloaded model.",
+        "--model-name", type=str, default=None,
+        help="Explicit HuggingFace repo id; overrides the registry's training repo.",
+    )
+    parser.add_argument(
+        "--cache-dir", type=Path, default=None,
+        help="Explicit local directory; overrides the registry's cache dir.",
     )
     parser.add_argument(
         "--sanity-check", dest="sanity_check", action="store_true", default=True,
@@ -105,6 +143,25 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def resolve_args(args: argparse.Namespace) -> argparse.Namespace:
+    """Turn registry keys and explicit overrides into one repo and one path.
+
+    A bare ``--model-name`` still works, but it gets a derived cache directory
+    so a custom repo is never written into the default model's cache.
+    """
+    spec = get_model(args.model)
+    if args.model_name:
+        repo = args.model_name
+        cache_dir = args.cache_dir or Path("models") / repo.rsplit("/", 1)[-1].lower()
+    else:
+        repo = spec.train_repo
+        cache_dir = args.cache_dir or spec.local_path
+    args.model_name = repo
+    args.cache_dir = Path(cache_dir)
+    args.model_key = spec.key
+    return args
+
+
 def is_model_present(cache_dir: Path) -> bool:
     """Check if the model files already exist in cache_dir.
 
@@ -117,23 +174,22 @@ def is_model_present(cache_dir: Path) -> bool:
         return False
 
     existing_files = {f.name for f in cache_dir.rglob("*") if f.is_file()}
-    if not _REQUIRED_FILES.issubset(existing_files):
+    missing_meta = _BASE_REQUIRED_FILES - existing_files
+    if missing_meta:
+        logger.info("Model incomplete: missing %s", ", ".join(sorted(missing_meta)))
         return False
 
-    index_path = cache_dir / "model.safetensors.index.json"
-    if index_path.exists():
-        try:
-            index = json.loads(index_path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            return False
-        shard_names = set(index.get("weight_map", {}).values())
-        if not shard_names.issubset(existing_files):
-            missing = shard_names - existing_files
-            logger.warning(
-                "Model metadata present but weight shards missing: %s",
-                ", ".join(sorted(missing)),
-            )
-            return False
+    shards = weight_files(cache_dir)
+    if not shards:
+        logger.warning("Model metadata present but no readable weight shards in %s", cache_dir)
+        return False
+    missing = [name for name in shards if not (cache_dir / name).is_file()]
+    if missing:
+        logger.warning(
+            "Model metadata present but weight shards missing: %s",
+            ", ".join(sorted(missing)),
+        )
+        return False
 
     return True
 
@@ -155,7 +211,7 @@ def download_model(model_name: str, cache_dir: Path, force: bool = False) -> dic
             "Model already present at %s - skipping download. Use --force to re-download.",
             cache_dir,
         )
-        return _read_existing_metadata(cache_dir)
+        return _read_existing_metadata(cache_dir, model_name)
 
     logger.info("Downloading model '%s' to %s using accelerated hf_transfer...", model_name, cache_dir)
 
@@ -184,7 +240,7 @@ def download_model(model_name: str, cache_dir: Path, force: bool = False) -> dic
     }
 
 
-def _read_existing_metadata(cache_dir: Path) -> dict[str, Any]:
+def _read_existing_metadata(cache_dir: Path, model_name: str) -> dict[str, Any]:
     """Read metadata from an already-downloaded model directory."""
     downloaded_files = list(cache_dir.rglob("*"))
     file_count = len([f for f in downloaded_files if f.is_file()])
@@ -199,7 +255,7 @@ def _read_existing_metadata(cache_dir: Path) -> dict[str, Any]:
             pass
 
     return {
-        "model_name": "Qwen/Qwen3-8B",
+        "model_name": model_name,
         "cache_dir": str(cache_dir),
         "file_count": file_count,
         "total_size_bytes": total_size,
@@ -229,20 +285,15 @@ def sanity_check_light(cache_dir: Path) -> bool:
             config.model_type, config.num_hidden_layers, config.hidden_size,
         )
 
-        index_path = cache_dir / "model.safetensors.index.json"
-        if not index_path.exists():
-            logger.error("Missing model.safetensors.index.json")
-            return False
-        index = json.loads(index_path.read_text(encoding="utf-8"))
-        shards = sorted(set(index.get("weight_map", {}).values()))
+        shards = weight_files(cache_dir)
         if not shards:
-            logger.error("Safetensors index has no weight_map entries")
+            logger.error("No complete safetensors weight layout in %s", cache_dir)
             return False
 
-        logger.info("Parsing headers of %d shards ...", len(shards))
+        logger.info("Parsing headers of %d shard(s) ...", len(shards))
         for shard in shards:
             shard_path = cache_dir / shard
-            if not shard_path.exists():
+            if not shard_path.is_file():
                 logger.error("Missing shard: %s", shard)
                 return False
             with safe_open(shard_path, framework="pt") as f:
@@ -373,6 +424,7 @@ def run_sanity(
 
 def main() -> int:
     args = parse_args()
+    args = resolve_args(args)
     # basicConfig first: it would otherwise overwrite an earlier setLevel(DEBUG).
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
@@ -393,11 +445,14 @@ def main() -> int:
         logger.warning("Model incomplete or missing at %s", args.cache_dir)
         return 1
 
-    logger.info("Starting Qwen3-8B model download pipeline...")
+    logger.info(
+        "Starting base model download pipeline: %s -> %s (%s)",
+        args.model_name, args.cache_dir, args.model_key,
+    )
 
     if not args.force and is_model_present(args.cache_dir):
         print(f"Model already exists at {args.cache_dir}. Use --force to re-download.")
-        metadata = _read_existing_metadata(args.cache_dir)
+        metadata = _read_existing_metadata(args.cache_dir, args.model_name)
     else:
         metadata = download_model(args.model_name, args.cache_dir, force=args.force)
         print(f"\nDownload complete: {metadata['file_count']} files -> {metadata['cache_dir']}")
@@ -415,7 +470,7 @@ def main() -> int:
             print("Training can still proceed; see the warning above for the manual check.")
         elif passed:
             print("\nSanity check PASSED - model is ready for fine-tuning.")
-            print("Run: uv run python training/train_unsloth.py")
+            print(f"Run: uv run python training/train_unsloth.py --model {args.model_key}")
         else:
             print("\nSanity check FAILED - inspect logs above for details.")
             exit_code = 1

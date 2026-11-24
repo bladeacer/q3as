@@ -1,14 +1,18 @@
 # AGENTS.md - q3as repository guide
 
-q3as fine-tunes Qwen3-8B on Ada and SPARK code with Unsloth QLoRA, then
+q3as fine-tunes a registry-selected base model on Ada and SPARK code with
+4-bit QLoRA (Unsloth for supported architectures, HF+PEFT otherwise), then
 evaluates the result with the ada-eval framework. This file maps the
 repository for coding agents: what lives where, how the pieces connect, and
 which commands to use. Regenerate the tree below with `make agents-tree`.
 
 ## Pipeline at a glance
 
-1. `make download` fetches the official `Qwen/Qwen3-8B` to `models/qwen3-8b/`
-   (Unsloth is the training framework only, never the weight source).
+1. `make download` fetches the model selected by `MODEL` from
+   [`training/model_registry.py`](training/model_registry.py) to `models/<key>/`.
+   The default is Unsloth's pre-quantized 4-bit `Qwen3-8B` base, not the
+   16 GB BF16 original. `make model-table` prints the support table and
+   `make download-models` fetches every registered model that is not cached.
 2. `make fetch-sources` fills the archive cache `data/raw_repos/<owner>/<repo>`
    (HTTP tarballs, no git, cached; core sources plus the RobertBoettcherSF
    `Ada-Algorithms` monorepo).
@@ -125,12 +129,22 @@ from ada-eval.
   so a multi-minute build does not look hung.
 - [`data/processing_scripts/`](data/processing_scripts) - dataset helpers live
   beside the builder.
-- [`training/download_model.py`](training/download_model.py) - HF model download
-  plus terminating sanity checks (light by default; deep GPU check runs in a
-  child process with a timeout so the pipeline can never hang).
+- [`training/model_registry.py`](training/model_registry.py) - single source for
+  each base model's official repo, training repo, cache dir, backend, LoRA
+  settings, packing, and `tested` flag. `MODEL=<key>` in the Makefile and
+  `--model` in the scripts select an entry; `make model-table` prints the
+  support table and [docs/models.md](docs/models.md) publishes it. Never
+  hard-code a model id or `models/<name>` path elsewhere.
+- [`training/download_model.py`](training/download_model.py) - registry-aware HF
+  model download plus terminating sanity checks (light by default; deep GPU
+  check runs in a child process with a timeout so the pipeline can never hang).
+  Accepts the unsloth 4-bit layout (no `configuration.json`) and single-file
+  safetensors repos.
 - [`training/train_unsloth.py`](training/train_unsloth.py) - QLoRA training
-  script (Unsloth, 1024-token window, single-process dataset tokenization, LoRA
-  adapters on Qwen3-8B). The train split streams from JSONL into an Arrow
+  script (registry-selected Unsloth or HF+PEFT backend, pre-quantized 4-bit
+  base, 1024-token window, sequence packing with the `wrapped` strategy,
+  optional embedding offload, single-process dataset tokenization, LoRA
+  adapters on the selected model). The train split streams from JSONL into an Arrow
   table of int32 `input_ids` under `data/processed/.tokenized/` (151 MB for
   72,105 records against 468 MB of JSONL (measured on the v0.7.0 dataset), and
   trl's own 4-minute tokenization pass is skipped because the column marks the
@@ -158,14 +172,16 @@ from ada-eval.
   path. Every ada-eval target is a spec (`.ads`), so a fallback block that
   opens a `package body` is routed to the sibling `.adb` (`body_sibling`),
   and only when the base tree already carries that mirror file; an explicit
-  `File:` entry still wins. Known fault, scoped in [`plan.md`](plan.md): when
-  every `File:` entry is dropped (a reply naming only `main.gpr`, say), the
-  fallback still writes that block at the target path, which cost two samples
-  their BUILD on the v0.8.0 run. Per-sample reply shape, changed-file count and
-  whether the routing fired go to `generation_meta.json` beside the packed
-  JSONL, because none of it fits the ada-eval sample schema and all of it
-  changes how a build number reads: a reply that changes nothing leaves the
-  base project in place, and most ada-eval base trees already compile.
+  `File:` entry still wins. The single-block fallback chain fires only when the
+  reply carried no `File:` header at all: falling through after every entry was
+  dropped wrote the project's `main.gpr` text into
+  `src/string_utils.ads` and cost two samples their BUILD on the v0.8.0 run,
+  so an all-dropped reply now leaves the base project alone. Per-sample reply
+  shape, changed-file count and whether the routing fired go to
+  `generation_meta.json` beside the packed JSONL, because none of it fits the
+  ada-eval sample schema and all of it changes how a build number reads: a
+  reply that changes nothing leaves the base project in place, and most
+  ada-eval base trees already compile.
 - [`eval/baseline_eval.py`](eval/baseline_eval.py) - reference-based scoring:
   joins the `make generate` output to the ada-eval canonical solutions and
   reports BLEU-4, exact match, file-set match, and standard compliance per
@@ -177,8 +193,12 @@ from ada-eval.
   it never scores the training corpus.
 - [`eval/ada_eval_common.py`](eval/ada_eval_common.py) - the single
   build/test/prove tally shared by both eval modules and the report, plus the
-  packed-dataset naming rules. Do not reimplement it: a third divergent copy is
-  what made the published prove counts disagree with the comparison report.
+  packed-dataset naming rules and `split_tally_by_changed_files`, which tallies
+  the same results twice: samples whose reply changed a base file and samples
+  it echoed (joined to `generation_meta.json` on the sample name; a run with no
+  sidecar returns nothing, so older versions render as not recorded rather than
+  as zero). Do not reimplement it: a third divergent copy is what made the
+  published prove counts disagree with the comparison report.
 - [`eval/eval_pipeline.py`](eval/eval_pipeline.py) - BUILD/TEST/PROVE comparison
   report between base and fine-tuned models via ada-eval. It is the only writer
   of `outputs/eval_results/`, so it must run before `make eval` prints its
@@ -365,6 +385,8 @@ q3as/
            v0.6.0.md
            v0.7.0.md
            v0.8.0.md
+           v0.9.0.md
+           v0.9.1.md
        results/
            README.md
            result-data-v0.1.0.json
@@ -382,6 +404,7 @@ q3as/
        datasets-and-training.md
        eval-analysis-v0.8.0.md
        evaluation.md
+       models.md
        README.md
        toolchain-setup.md
    eval/
@@ -436,6 +459,9 @@ q3as/
        test_generate.py
        test_lab_extraction.py
        test_makefile.py
+       test_model_download.py
+       test_model_registry.py
+       test_model_training_config.py
        test_pack_eval_data.py
        test_parsers.py
        test_reporting.py
@@ -446,6 +472,7 @@ q3as/
    trainer_output/
    training/
        download_model.py
+       model_registry.py
        train_unsloth.py
    .env.dev
    .gitignore
@@ -456,6 +483,8 @@ q3as/
    ast.gpr
    LICENSE
    Makefile
+   package-lock.json
+   package.json
    plan.md
    pyproject.toml
    README.md

@@ -110,6 +110,19 @@ class TestResultAggregation:
     def test_missing_directory_is_all_zero(self, tmp_path):
         assert common.aggregate_eval_results(tmp_path / "nope") == common.empty_stats()
 
+    def test_malformed_result_shapes_are_skipped(self, tmp_path):
+        # The reader is shared with the changed/unchanged split, so a record
+        # whose evaluation_results is not a list of results must not raise.
+        root = self._write(tmp_path, [
+            {"evaluation_results": {"eval": "build", "compiled": True}},
+            {"evaluation_results": ["not a result"]},
+            {"name": "s1", "evaluation_results": [{"eval": "build", "compiled": True}]},
+        ])
+        stats = common.aggregate_eval_results(root)
+
+        assert stats["build"] == {"compiled": 1, "failed": 0, "total": 1}
+        assert common.split_tally_by_changed_files(root, root / "nope.json") == {}
+
     def test_has_results_distinguishes_empty_from_zero(self):
         """The old truthiness test could not tell the two apart."""
         assert common.has_results(common.empty_stats()) is False
@@ -120,6 +133,200 @@ class TestResultAggregation:
         assert common.rate_pct({"total": 0, "compiled": 0}, "compiled") is None
         assert common.rate_pct({"total": 4, "compiled": 0}, "compiled") == 0.0
         assert common.rate_pct({"total": 4, "compiled": 1}, "compiled") == 25.0
+
+
+# --------------------------------------------------------------------------- #
+# split_tally_by_changed_files: BUILD split by whether the reply changed a file
+# --------------------------------------------------------------------------- #
+#
+# 18 of the 19 ada-eval base trees already contain a body for the target
+# subprogram and already compile, so a reply that echoes its input collects the
+# base project's build result. One total number for both groups is what let the
+# v0.8.0 run read as 15 builds when 12 of them were inherited.
+
+
+class TestSplitTallyByChangedFiles:
+    def _results(self, tmp_path, rows):
+        target = tmp_path / "spark_learn" / "out.jsonl"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(
+            "".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8"
+        )
+        return tmp_path
+
+    def _meta(self, tmp_path, payload):
+        meta = tmp_path / "generation_meta.json"
+        meta.write_text(json.dumps(payload), encoding="utf-8")
+        return meta
+
+    def _sample(self, name, compiled, passed, prove="unproved"):
+        return {
+            "name": name,
+            "evaluation_results": [
+                {"eval": "build", "compiled": compiled},
+                {"eval": "test", "compiled": compiled, "passed_tests": passed},
+                {"eval": "prove", "result": prove},
+            ],
+        }
+
+    def test_two_buckets(self, tmp_path):
+        root = self._results(tmp_path, [
+            self._sample("edited_a", True, True),
+            self._sample("edited_b", False, False),
+            self._sample("echoed_a", True, True),
+            self._sample("echoed_b", True, False),
+        ])
+        meta = self._meta(root, {
+            "edited_a": {"changed_files": 1},
+            "edited_b": {"changed_files": 2},
+            "echoed_a": {"changed_files": 0},
+            "echoed_b": {"changed_files": 0},
+        })
+
+        split = common.split_tally_by_changed_files(root, meta)
+
+        assert split["edited"]["build"] == {"compiled": 1, "failed": 1, "total": 2}
+        assert split["edited"]["test"] == {"passed": 1, "failed": 1, "total": 2}
+        assert split["unchanged"]["build"] == {"compiled": 2, "failed": 0, "total": 2}
+        assert split["unchanged"]["test"] == {"passed": 1, "failed": 1, "total": 2}
+
+    def test_proved_sample_lands_in_its_own_bucket(self, tmp_path):
+        root = self._results(tmp_path, [
+            self._sample("edited_a", True, True, "proved"),
+            self._sample("echoed_a", True, True, "unproved"),
+        ])
+        meta = self._meta(root, {
+            "edited_a": {"changed_files": 1},
+            "echoed_a": {"changed_files": 0},
+        })
+
+        split = common.split_tally_by_changed_files(root, meta)
+
+        assert split["edited"]["prove"]["proved"] == 1
+        assert split["unchanged"]["prove"]["proved"] == 0
+
+    def test_missing_sidecar_is_not_recorded(self, tmp_path):
+        # Not recorded must not render as a measured zero: older runs have no
+        # sidecar at all, and 0/0 reads as "nothing built and nothing echoed".
+        root = self._results(tmp_path, [self._sample("s1", True, True)])
+        assert common.split_tally_by_changed_files(root, root / "absent.json") == {}
+
+    def test_sidecar_that_matches_nothing_is_not_recorded(self, tmp_path):
+        root = self._results(tmp_path, [self._sample("s1", True, True)])
+        meta = self._meta(root, {"other": {"changed_files": 1}})
+        assert common.split_tally_by_changed_files(root, meta) == {}
+
+    def test_sample_in_results_but_not_in_the_sidecar_is_excluded(self, tmp_path, caplog):
+        root = self._results(tmp_path, [
+            self._sample("known", True, True),
+            self._sample("unknown", False, False),
+        ])
+        meta = self._meta(root, {"known": {"changed_files": 1}})
+
+        with caplog.at_level("WARNING"):
+            split = common.split_tally_by_changed_files(root, meta)
+
+        # Guessing a group for it would put a wrong number in the table.
+        assert split["edited"]["build"]["total"] == 1
+        assert split["unchanged"] == common.empty_stats()
+        assert "unknown" in caplog.text
+
+    def test_sidecar_entry_without_changed_files_is_unknown_not_unchanged(self, tmp_path):
+        root = self._results(tmp_path, [self._sample("s1", True, True)])
+        meta = self._meta(root, {"s1": {"reply_format": "file_blocks"}})
+
+        assert common.split_tally_by_changed_files(root, meta) == {}
+
+    def test_malformed_sidecar_is_not_recorded(self, tmp_path):
+        root = self._results(tmp_path, [self._sample("s1", True, True)])
+        meta = root / "generation_meta.json"
+        meta.write_text("{oops", encoding="utf-8")
+        assert common.split_tally_by_changed_files(root, meta) == {}
+
+    def test_no_results_tree_is_not_recorded(self, tmp_path):
+        meta = self._meta(tmp_path, {"s1": {"changed_files": 1}})
+        assert common.split_tally_by_changed_files(tmp_path / "nope", meta) == {}
+
+    def test_filters_by_requested_evals(self, tmp_path):
+        root = self._results(tmp_path, [self._sample("s1", True, True)])
+        meta = self._meta(root, {"s1": {"changed_files": 1}})
+
+        split = common.split_tally_by_changed_files(root, meta, ["build"])
+
+        assert split["edited"]["build"]["total"] == 1
+        assert split["edited"]["test"]["total"] == 0
+
+    def test_totals_agree_with_the_whole_run_tally(self, tmp_path):
+        """The split must partition the same results the plain tally reads."""
+        rows = [
+            self._sample("edited_a", True, True),
+            self._sample("edited_b", False, False),
+            self._sample("echoed_a", True, False),
+        ]
+        root = self._results(tmp_path, rows)
+        meta = self._meta(root, {
+            "edited_a": {"changed_files": 1},
+            "edited_b": {"changed_files": 1},
+            "echoed_a": {"changed_files": 0},
+        })
+
+        whole = common.aggregate_eval_results(root)
+        split = common.split_tally_by_changed_files(root, meta)
+
+        for kind in ("build", "test", "prove"):
+            assert (
+                split["edited"][kind]["total"] + split["unchanged"][kind]["total"]
+                == whole[kind]["total"]
+            )
+        assert (
+            split["edited"]["build"]["compiled"] + split["unchanged"]["build"]["compiled"]
+            == whole["build"]["compiled"]
+        )
+        assert (
+            split["edited"]["test"]["passed"] + split["unchanged"]["test"]["passed"]
+            == whole["test"]["passed"]
+        )
+        assert (
+            split["edited"]["prove"]["proved"] + split["unchanged"]["prove"]["proved"]
+            == whole["prove"]["proved"]
+        )
+
+
+class TestFormatBuildSplit:
+    def _tree(self, tmp_path, rows, meta_payload):
+        root = tmp_path / "eval_results" / "fine_tuned" / "spark_learn"
+        root.mkdir(parents=True)
+        (root / "out.jsonl").write_text(
+            "".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8"
+        )
+        gen_dir = tmp_path / "generated_solutions" / "fine_tuned"
+        gen_dir.mkdir(parents=True)
+        (gen_dir / "generation_meta.json").write_text(
+            json.dumps(meta_payload), encoding="utf-8"
+        )
+        return tmp_path
+
+    def _sample(self, name, compiled):
+        return {"name": name, "evaluation_results": [{"eval": "build", "compiled": compiled}]}
+
+    def test_states_both_groups(self, tmp_path, monkeypatch):
+        root = self._tree(
+            tmp_path,
+            [self._sample("a", True), self._sample("b", False), self._sample("c", True)],
+            {"a": {"changed_files": 1}, "b": {"changed_files": 1}, "c": {"changed_files": 0}},
+        )
+        monkeypatch.setattr(be, "EVAL_RESULTS_DIR", root / "eval_results")
+
+        line = be.format_build_split("fine_tuned", root / "generated_solutions")
+
+        assert line == "2/3 (1 of 2 changed, 1 of 1 unchanged)"
+
+    def test_no_sidecar_is_no_line(self, tmp_path, monkeypatch):
+        root = self._tree(tmp_path, [self._sample("a", True)], {"a": {"changed_files": 1}})
+        monkeypatch.setattr(be, "EVAL_RESULTS_DIR", root / "eval_results")
+        (root / "generated_solutions" / "fine_tuned" / "generation_meta.json").unlink()
+
+        assert be.format_build_split("fine_tuned", root / "generated_solutions") is None
 
 
 class TestBleu:

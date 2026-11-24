@@ -17,6 +17,7 @@ Full index, with a reading order: [docs/README.md](docs/README.md).
 | Doc | Contents |
 |---|---|
 | [Architecture](docs/architecture.md) | Pipeline overview and module map |
+| [Base models](docs/models.md) | Model support table, official repos, Unsloth status, VRAM settings |
 | [Datasets and training](docs/datasets-and-training.md) | Turn kinds, defect families, splits, training configuration |
 | [Data provenance](docs/data-provenance.md) | Data sources, licenses, eval-integrity guard |
 | [Toolchain setup](docs/toolchain-setup.md) | Alire management, vendored index for outdated `alr` |
@@ -88,8 +89,10 @@ uv sync
 # Set up Hugging Face credentials (see below)
 cp .env.dev .env
 
-# Download and sanity-check the base model
+# Download and sanity-check the base model (default: Unsloth's Qwen3-8B 4-bit base)
 uv run python training/download_model.py
+# make model-table lists the other keys; make download-models fetches all of them
+uv run python training/download_model.py --model qwen3.5-4b
 
 # Build the dataset. Use the Make target: it wires the cached source trees,
 # the doc and guidance directories, and the parser outputs together.
@@ -107,12 +110,14 @@ uv run python data/processing_scripts/build_dataset.py \
 # debugging; make train additionally passes --skip-merged-save)
 uv run python training/train_unsloth.py
 
-# Generate Ada code with both base and fine-tuned models
-# (--base-model defaults to the local download models/qwen3-8b, i.e. Qwen/Qwen3-8B)
+# Generate Ada code with both base and fine-tuned models. Make passes the
+# registry's cache dir; --base-model defaults to models/qwen3-8b for direct runs.
 uv run python eval/generate.py --model outputs/q3as --base-model models/qwen3-8b
 
 # Run full evaluation (BLEU + compilation/test/SPARK metrics, base comparison)
 uv run python eval/baseline_eval.py --model outputs/q3as --base-model models/qwen3-8b
+
+# Or select every model from one place: MODEL=<key> make download train generate eval
 
 # Run the full ada-eval BUILD/TEST/PROVE pipeline
 uv run python eval/eval_pipeline.py --evals build test prove
@@ -137,10 +142,11 @@ present):
 
 `make all` takes roughly 3.5 hours with the default 500-step budget. The
 default pipeline is tuned for an 8 GB GPU and an 8 GB host: dataset
-preparation uses one worker per core, training uses a 1024-token window and one
-tokenization process, the adapter-only output skips the merged 16-bit export,
-and generation uses 12,000 prompt characters and 512 new tokens per model.
-Override `DATASET_WORKERS`, `MAX_PROMPT_CHARS`, `MAX_NEW_TOKENS`, or
+preparation uses one worker per core, training uses the pre-quantized 4-bit
+base with a 1024-token window, sequence packing (wrapped strategy), embedding
+offload and one tokenization process, the adapter-only output skips the merged
+16-bit export, and generation uses 12,000 prompt characters and 512 new tokens
+per model. Override `DATASET_WORKERS`, `MAX_PROMPT_CHARS`, `MAX_NEW_TOKENS`, or
 `TRAIN_FLAGS` on the `make` command line when more memory is available. Notes:
 
 - **The 500-step budget is deliberate.** One pass over the 72,547 train
@@ -154,7 +160,8 @@ Override `DATASET_WORKERS`, `MAX_PROMPT_CHARS`, `MAX_NEW_TOKENS`, or
 - Early stopping cannot fire inside a 500-step run: patience is 10
   evaluations at one every 50 steps, so the eleventh point would be step 550.
   Plan for the whole budget, or lower `--max-steps` to end sooner.
-- A cold start adds the Qwen3-8B download (~16 GB) and the first
+- A cold start adds the Unsloth Qwen3-8B 4-bit download (~7.5 GB, instead of
+  the 16 GB BF16 original) and the first
   `make fetch-sources` (one monolithic Ada-Algorithms tarball); both depend on
   bandwidth. One-time extras: `uv sync` and `make prove` (Alire
   toolchain). `make ast-deps` is optional and adds a ~20 minute one-time
@@ -164,14 +171,16 @@ Override `DATASET_WORKERS`, `MAX_PROMPT_CHARS`, `MAX_NEW_TOKENS`, or
 
 ## Hugging Face Token Setup
 
-q3as downloads the **official [`Qwen/Qwen3-8B`](https://huggingface.co/Qwen/Qwen3-8B)** checkpoint. Unsloth is the training framework only (patched kernels and QLoRA); the weights are Qwen's original release, never an unsloth-provisioned copy. If the repo requires accepting a license, you need a Hugging Face access token.
+q3as downloads the **pre-quantized 4-bit base from [`unsloth/Qwen3-8B-unsloth-bnb-4bit`](https://huggingface.co/unsloth/Qwen3-8B-unsloth-bnb-4bit)**, which Unsloth derives from the official [`Qwen/Qwen3-8B`](https://huggingface.co/Qwen/Qwen3-8B) release. Loading the 16 GB BF16 original on the 8 GB card is not supported. The full model support table, including four more candidate bases and which ones have been tested, is in [docs/models.md](docs/models.md). If a repo requires accepting a license, you need a Hugging Face access token.
 
 The downloaded base model lives at `models/qwen3-8b` and is the single source of
 truth for the pipeline: training
 ([`train_unsloth.py`](training/train_unsloth.py)), generation
 ([`generate.py`](eval/generate.py)), and evaluation
-([`baseline_eval.py`](eval/baseline_eval.py)) all default to that local copy of
-`Qwen/Qwen3-8B`, so the same downloaded weights are used end to end.
+([`baseline_eval.py`](eval/baseline_eval.py)) all use that same local copy, so
+the same downloaded weights are used end to end. The key and cache path come
+from [`training/model_registry.py`](training/model_registry.py); `MODEL=<key>`
+selects another model for the whole `make` pipeline.
 
 1. Create a token at [https://huggingface.co/settings/tokens](https://huggingface.co/settings/tokens)
 2. Copy the placeholder environment file:

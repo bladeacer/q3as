@@ -355,10 +355,17 @@ def parse_generated_files(
     even when the model's Ada code is valid. Project files (main.gpr,
     main.adc) stay as shipped in the base tree.
 
-    Fallbacks keep single-file replies working (the fine-tune was trained on
-    one fenced block per answer): a reply without "File:" headers but with a
-    fenced block maps that block to *default_path*; a reply with no fences is
-    used verbatim at *default_path*, matching the pre-context behavior.
+    The fallbacks fire only for a reply that carried no "File:" header at all.
+    A reply that addressed files but named none of them usably (every header
+    rejected as unsafe, or every entry outside the target directory) gets an
+    empty overlay: the project is left exactly as shipped. Falling through
+    instead is what wrote main.gpr's text into ``src/string_utils.ads`` on the
+    v0.8.0 run, costing two samples their BUILD for a routing mistake.
+
+    Headerless replies keep working (the fine-tune was trained on one fenced
+    block per answer): a reply without "File:" headers but with a fenced block
+    maps that block to *default_path*; a reply with no fences is used verbatim
+    at *default_path*, matching the pre-context behavior.
 
     A fallback block that opens a package *body* is routed to the sibling
     ``.adb`` instead (see ``body_sibling``), because the target is a spec and
@@ -369,7 +376,9 @@ def parse_generated_files(
     if not reply.strip():
         return {}
     files: dict[Path, str] = {}
+    named: list[str] = []
     for match in _FILE_BLOCK_RE.finditer(reply):
+        named.append(match.group("path"))
         path = _safe_source_path(match.group("path"))
         if path is None:
             continue
@@ -381,6 +390,17 @@ def parse_generated_files(
         logger.warning("Ignoring model output for non-source files: %s", ", ".join(dropped))
     if overlay:
         return overlay
+    if named:
+        # Every entry was dropped. The reply did address files, so writing one
+        # of its blocks at the target path would put a project file, or
+        # nothing it meant to be, into the specification; leaving the base
+        # project in place is the only outcome that cannot break a build that
+        # was already working.
+        logger.warning(
+            "Reply named %d file(s), none usable next to %s: leaving %s untouched (%s)",
+            len(named), target_dir, default_path, ", ".join(sorted(named)),
+        )
+        return {}
     fenced = extract_ada_code(reply)
     if fenced:
         body = body_sibling(default_path, project_files)

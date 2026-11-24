@@ -35,7 +35,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "eval"))
 
-from ada_eval_common import UNPROVED_RESULTS
+from ada_eval_common import UNPROVED_RESULTS, rate_pct, split_tally_by_changed_files
 from bump_version import read_version
 
 logger = logging.getLogger(__name__)
@@ -43,11 +43,16 @@ logger = logging.getLogger(__name__)
 ROOT = Path(__file__).resolve().parents[1]
 RESULTS_DIR = ROOT / "docs" / "results"
 EVAL_RESULTS_DIR = ROOT / "outputs" / "eval_results"
+GENERATED_DIR = ROOT / "outputs" / "generated_solutions"
 BASELINE_JSON = ROOT / "outputs" / "eval_results.json"
 PIPELINE_REPORT = ROOT / "outputs" / "comparison_report.txt"
 TRAINING_SUMMARY = ROOT / "outputs" / "q3as" / "training_summary.json"
 
 MODELS = {"base_qwen3-8b": "base", "fine_tuned": "fine-tuned"}
+
+# The two groups a build number has to be split into: samples the model's reply
+# changed, and samples it left as it found them.
+CHANGE_GROUPS = (("edited", "changed"), ("unchanged", "unchanged"))
 
 # Same navigation footer on every page under docs/, so a reader can reach the
 # docs index, the changelog index and the results index from any of them. The
@@ -115,7 +120,7 @@ def collect_ada_eval_metrics(eval_dir: Path) -> dict[str, Any]:
                             errors += 1
         if samples == 0:
             continue
-        models[model_dir.name] = {
+        metrics: dict[str, Any] = {
             "samples": samples,
             "build": build,
             "build_pct": _percent(build, samples),
@@ -128,6 +133,15 @@ def collect_ada_eval_metrics(eval_dir: Path) -> dict[str, Any]:
             "unproved_checks": dict(unproved_checks.most_common(8)),
             "datasets": datasets,
         }
+        # The same tallies split by what the reply actually changed. Absent
+        # for a run without a generation sidecar, which renders as not
+        # recorded rather than as zero.
+        by_change = split_tally_by_changed_files(
+            model_dir, GENERATED_DIR / model_dir.name / "generation_meta.json"
+        )
+        if by_change:
+            metrics["by_change"] = by_change
+        models[model_dir.name] = metrics
     return models
 
 
@@ -343,6 +357,73 @@ def _fmt_pct(value: float | None) -> str:
     return f"{value:.1f}%" if value is not None else "n/a"
 
 
+def _change_count(stats: dict[str, Any] | None, block: str, numerator: str) -> str:
+    """One cell of the changed/unchanged table.
+
+    ``n/a`` rather than ``0/0`` when the group was not recorded: an older run
+    has no generation sidecar, and a zero there would read as a measurement.
+    """
+    if not stats:
+        return "n/a"
+    section = stats.get(block) or {}
+    return (
+        f"{section.get(numerator, 0)}/{section.get('total', 0)}"
+        f" ({_fmt_pct(rate_pct(section, numerator))})"
+    )
+
+
+def render_change_split(ada: dict[str, Any]) -> list[str]:
+    """Render BUILD/TEST/PROVE per model, split by whether the reply changed a file.
+
+    Most ada-eval base trees already carry a body for the target subprogram and
+    already compile, so a reply that echoes its input collects the base
+    project's build and test result. A single total number hides that, which is
+    how 12 of a run's 15 builds were inherited rather than earned.
+    """
+    lines = ["## Samples the model changed", ""]
+    recorded = [
+        (label, (ada.get(key) or {}).get("by_change") or {})
+        for key, label in MODELS.items()
+        if ada.get(key)
+    ]
+    # A run whose --base-model pointed somewhere else writes a label this
+    # script has no name for. Showing it under its own name beats dropping a
+    # model from the table.
+    recorded += [
+        (key, (metrics or {}).get("by_change") or {})
+        for key, metrics in sorted(ada.items())
+        if key not in MODELS and isinstance(metrics, dict)
+    ]
+    if not any(by_change for _label, by_change in recorded):
+        lines.append(
+            "_Not recorded: no `generation_meta.json` sidecar beside this run's "
+            "generations, so the samples the model changed cannot be told from "
+            "the samples it echoed._"
+        )
+        lines.append("")
+        return lines
+    lines.append("| Model | Group | Samples | Build | Test | Proved |")
+    lines.append("|---|---|---|---|---|---|")
+    for label, by_change in recorded:
+        for key, word in CHANGE_GROUPS:
+            stats = by_change.get(key)
+            samples = (stats or {}).get("build", {}).get("total", 0) if stats else None
+            lines.append(
+                f"| {label} | {word} "
+                f"| {samples if samples is not None else 'n/a'} "
+                f"| {_change_count(stats, 'build', 'compiled')} "
+                f"| {_change_count(stats, 'test', 'passed')} "
+                f"| {_change_count(stats, 'prove', 'proved')} |"
+            )
+    lines.append("")
+    lines.append(
+        "_A sample in the unchanged group was scored on the ada-eval base "
+        "project, because the reply left every base file as it was._"
+    )
+    lines.append("")
+    return lines
+
+
 def render_markdown(version: str, data: dict[str, Any]) -> str:
     """Render the per-version summary. Concise: tables, findings, artifacts."""
     lines: list[str] = []
@@ -380,6 +461,7 @@ def render_markdown(version: str, data: dict[str, Any]) -> str:
             f"| Prove errors | {base.get('prove_errors', 0)} | {ft.get('prove_errors', 0)} | |"
         )
         lines.append("")
+        lines.extend(render_change_split(ada))
 
         ft_unproved = ft.get("unproved_checks") or {}
         if ft_unproved:
@@ -446,6 +528,43 @@ def fmt_loss(value: Any) -> str:
     return f"{value:.4f}" if isinstance(value, (int, float)) else "n/a"
 
 
+def _fmt_count(value: int | None) -> str:
+    """Format an optional count for the index table (n/a when not recorded)."""
+    return str(value) if value is not None else "n/a"
+
+
+def _noop_replies(entry: dict[str, Any]) -> int | None:
+    """Fine-tuned replies that changed no base file, or None when not recorded.
+
+    Read from baseline_eval's reply-shape block: the changed/unchanged split
+    covers the samples ada-eval actually evaluated, this covers the samples it
+    scored against the canonical solution, and the two sets are not identical.
+    """
+    shapes = (
+        ((entry.get("baseline") or {}).get("per_model") or {})
+        .get("fine_tuned", {})
+        .get("reply_shapes")
+    ) or {}
+    count = shapes.get("untouched")
+    return count if isinstance(count, int) else None
+
+
+def _edited_build_pct(entry: dict[str, Any]) -> float | None:
+    """Build rate over the fine-tuned samples the model changed, or None.
+
+    This is the number the whole split exists for: a total build rate is
+    dominated by replies that left a compiling base project alone. It starts
+    at the version that recorded the sidecar, so earlier versions render n/a
+    rather than a recovered guess.
+    """
+    edited = (
+        ((entry.get("ada_eval") or {}).get("fine_tuned") or {}).get("by_change") or {}
+    ).get("edited")
+    if not edited:
+        return None
+    return rate_pct(edited.get("build") or {}, "compiled")
+
+
 def render_index(versions: list[dict[str, Any]]) -> str:
     """Render docs/results/README.md: index + last-3 comparison table."""
     lines: list[str] = []
@@ -498,6 +617,8 @@ def render_index(versions: list[dict[str, Any]]) -> str:
             ("Fine-tuned test %", lambda e: _fmt_pct(((e.get("ada_eval") or {}).get("fine_tuned") or {}).get("test_pct"))),
             ("Base build %", lambda e: _fmt_pct(((e.get("ada_eval") or {}).get("base_qwen3-8b") or {}).get("build_pct"))),
             ("Proved samples (FT)", lambda e: str(((e.get("ada_eval") or {}).get("fine_tuned") or {}).get("proved", 0))),
+            ("No-op replies (FT)", lambda e: _fmt_count(_noop_replies(e))),
+            ("Build on edited samples (FT)", lambda e: _fmt_pct(_edited_build_pct(e))),
             ("Test loss (FT)", lambda e: fmt_loss((e.get("training") or {}).get("test_loss"))),
             ("Training trend", lambda e: str(((e.get("training") or {}).get("trend") or {}).get("verdict", "n/a"))),
         ]

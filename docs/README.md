@@ -10,6 +10,7 @@ run `make help` for the command list.
 | Page | Contents |
 |---|---|
 | [Architecture](architecture.md) | Pipeline overview and module map |
+| [Base models](models.md) | Model support table, official repos, Unsloth status, VRAM settings |
 | [Datasets and training](datasets-and-training.md) | Turn kinds, defect families, splits, training configuration |
 | [Data provenance](data-provenance.md) | Data sources, licenses, eval-integrity guard |
 | [Toolchain setup](toolchain-setup.md) | Alire management, vendored index for outdated `alr` |
@@ -35,13 +36,15 @@ benchmark, and say in prose why it is absent when the run was withdrawn.
 ## Reading order
 
 1. [Architecture](architecture.md) for the shape of the pipeline.
-2. [Data provenance](data-provenance.md) before adding any data source, and
+2. [Base models](models.md) before switching the training base; the registry
+   there is what the download, train, generate, and eval targets read.
+3. [Data provenance](data-provenance.md) before adding any data source, and
    [datasets and training](datasets-and-training.md) before changing the
    dataset: the first says what may be ingested, the second what the builder
    does with it.
-3. [Toolchain setup](toolchain-setup.md) if an Ada tool is missing or the
+4. [Toolchain setup](toolchain-setup.md) if an Ada tool is missing or the
    installed `alr` is too old for the pinned crates.
-4. [Evaluation](evaluation.md) and the [results index](results/README.md)
+5. [Evaluation](evaluation.md) and the [results index](results/README.md)
    before quoting a number, so the metric and its version travel together.
    [Evaluation analysis v0.8.0](eval-analysis-v0.8.0.md) shows how the latest
    run decomposes, including the part of it the model did not earn.

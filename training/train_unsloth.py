@@ -1,13 +1,16 @@
-"""train_unsloth.py - QLoRA fine-tuning training script for q3as using Unsloth.
+"""train_unsloth.py - QLoRA fine-tuning training script for q3as.
 
-Trains the Qwen3-8B model on the q3as dataset.jsonl using 4-bit QLoRA
-quantization optimized for 8 GB VRAM. Uses the Unsloth library for efficient
-LoRA fine-tuning with the OpenAI/Qwen chat template format.
+Trains a model from the registry (see [`model_registry.py`](model_registry.py))
+on the q3as dataset using 4-bit QLoRA optimized for 8 GB VRAM. The default key
+is qwen3-8b, loaded from Unsloth's pre-quantized 4-bit base rather than the
+16 GB BF16 original. Sequence packing and embedding offload are on by default
+for that model; both can be turned off from the command line.
 
 By default this trains the LOCAL base model downloaded by download_model.py
-(models/qwen3-8b, Qwen/Qwen3-8B) so that training, generation, and
-evaluation all use exactly the same base weights. Passing a HuggingFace id
-via --model-name re-downloads/uses that revision instead.
+(models/<key>) so that training, generation, and evaluation all use exactly
+the same base weights. Passing a HuggingFace id via --model-name overrides
+the registry's repo. Models whose architecture Unsloth cannot accelerate use
+the plain transformers + PEFT backend instead.
 
 System RAM matters here as much as VRAM: an 8 GB card is paired with a small
 host, and the 423 MB train split used to be held in memory three times over
@@ -25,6 +28,8 @@ eval points already scored stay in the loss curve. See
 
 Usage:
     uv run python training/train_unsloth.py
+    uv run python training/train_unsloth.py --model qwen3.5-4b
+    uv run python training/train_unsloth.py --model lfm2.5-2.6b --no-packing
     uv run python training/train_unsloth.py --dataset data/processed/dataset.jsonl --lr 2e-4
     uv run python training/train_unsloth.py --model-name models/qwen3-8b
 """
@@ -59,6 +64,11 @@ from progress import Progress
 from stage_state import digest_file
 
 os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
+try:  # script invocation (python training/train_unsloth.py)
+    from model_registry import resolve_model
+except ImportError:  # package import (pytest importing training.train_unsloth)
+    from training.model_registry import resolve_model
+
 # transformers v5 materializes tensors on GPU before bitsandbytes quantization
 # (https://github.com/huggingface/transformers issues tracked upstream), OOMing
 # 8 GB GPUs when loading 8B models in 4-bit. Deactivating the async loader
@@ -73,7 +83,9 @@ from transformers import TrainerCallback, set_seed
 
 logger = logging.getLogger("q3as_train")
 
-DEFAULT_MODEL_PATH = "models/qwen3-8b"
+# Kept as a constant for callers that import it; the value comes from the
+# registry so a new default model does not need another edit here.
+DEFAULT_MODEL_PATH = resolve_model().cache_dir
 
 # Where the chat-templated Arrow tables are cached. Under data/processed
 # (gitignored) because they are derived from the split files next to them, and
@@ -110,14 +122,59 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--save-steps", type=int, default=100, help="Save a checkpoint every N steps.")
     parser.add_argument(
-        "--max-seq-length", type=int, default=1024,
-        help="Maximum training sequence length. Keep at 1024 or lower on an 8 GB GPU.",
+        "--max-seq-length", type=int, default=None,
+        help="Maximum training sequence length (default: registry value, 1024). "
+        "Keep at 1024, at most 2048, on an 8 GB GPU.",
     )
-    parser.add_argument("--lora-rank", type=int, default=8, help="LoRA rank.")
-    parser.add_argument("--lora-alpha", type=int, default=16, help="LoRA alpha.")
+    parser.add_argument("--lora-rank", type=int, default=None,
+                        help="LoRA rank (default: registry value, 8 for qwen3-8b).")
+    parser.add_argument("--lora-alpha", type=int, default=None,
+                        help="LoRA alpha (default: registry value, 16 for qwen3-8b).")
     parser.add_argument(
-        "--model-name", type=str, default=DEFAULT_MODEL_PATH,
-        help="Path to the local base model (downloaded by download_model.py) or a HuggingFace identifier.",
+        "--model", type=str, default=None,
+        help="Key from model_registry.py (default: Q3AS_MODEL or qwen3-8b). "
+        "Selects the repo, cache dir, backend, LoRA settings, and packing.",
+    )
+    parser.add_argument(
+        "--model-name", type=str, default=None,
+        help="Explicit local path or HuggingFace id; overrides the registry's repo.",
+    )
+    parser.add_argument(
+        "--backend", type=str, choices=("auto", "unsloth", "hf"), default="auto",
+        help="Loading backend. 'auto' uses the registry's choice; 'hf' forces "
+        "transformers + PEFT for a model Unsloth cannot accelerate.",
+    )
+    packing = parser.add_mutually_exclusive_group()
+    packing.add_argument(
+        "--packing", dest="packing", action="store_true", default=None,
+        help="Pack several short records into one sequence (registry default).",
+    )
+    packing.add_argument(
+        "--no-packing", dest="packing", action="store_false",
+        help="Disable sequence packing (one record per sequence).",
+    )
+    parser.add_argument(
+        "--packing-strategy", type=str, choices=("wrapped", "bfd"), default="wrapped",
+        help="'wrapped' (default) joins records with EOS and needs no FlashAttention "
+        "varlen; 'bfd' is faster but needs a supported flash attention variant.",
+    )
+    embed = parser.add_mutually_exclusive_group()
+    embed.add_argument(
+        "--offload-embedding", dest="offload_embedding", action="store_true", default=None,
+        help="Offload the embedding matrix to CPU (Unsloth backend only).",
+    )
+    embed.add_argument(
+        "--no-offload-embedding", dest="offload_embedding", action="store_false",
+        help="Keep embeddings on the GPU.",
+    )
+    remote = parser.add_mutually_exclusive_group()
+    remote.add_argument(
+        "--trust-remote-code", dest="trust_remote_code", action="store_true", default=None,
+        help="Allow a model's custom modeling_*.py to run (registry default).",
+    )
+    remote.add_argument(
+        "--no-trust-remote-code", dest="trust_remote_code", action="store_false",
+        help="Refuse custom model code.",
     )
     parser.add_argument("--output-dir", type=str, default="outputs/q3as", help="Output directory for checkpoints.")
     parser.add_argument(
@@ -596,6 +653,40 @@ def find_resume_checkpoint(output_dir: str | Path, max_steps: int) -> Path | Non
     return path
 
 
+def resolve_training_spec(args: argparse.Namespace) -> Any:
+    """Fill unspecified flags from the selected model's registry entry.
+
+    Called both by ``setup_training_environment`` (so the config is always
+    complete) and by ``main`` (which needs the spec before loading weights).
+    It is idempotent: an explicit CLI flag always wins over the registry.
+    """
+    local_override = args.model_name if args.model_name and Path(args.model_name).exists() else None
+    spec = resolve_model(args.model, repo=args.model_name, cache_dir=local_override)
+    args.model_name = spec.train_repo
+    if args.backend == "auto":
+        args.backend = spec.backend
+    if args.packing is None:
+        args.packing = spec.packing
+    if args.offload_embedding is None:
+        args.offload_embedding = spec.offload_embedding
+    if args.trust_remote_code is None:
+        args.trust_remote_code = spec.trust_remote_code
+    if args.lora_rank is None:
+        args.lora_rank = spec.lora_rank
+    if args.lora_alpha is None:
+        args.lora_alpha = spec.lora_alpha
+    if args.max_seq_length is None:
+        args.max_seq_length = spec.max_seq_length
+    if args.max_seq_length > 2048:
+        logger.warning(
+            "max_seq_length=%d exceeds the 2048 VRAM ceiling; an 8 GB card "
+            "will likely OOM. Registry recommendation is %d.",
+            args.max_seq_length, spec.max_seq_length,
+        )
+    args.spec = spec
+    return spec
+
+
 def setup_training_environment(args: argparse.Namespace, has_val: bool) -> dict[str, Any]:
     """Configure training hyperparameters for 8 GB VRAM QLoRA training.
 
@@ -605,6 +696,7 @@ def setup_training_environment(args: argparse.Namespace, has_val: bool) -> dict[
     final state, not the best one: ``load_best_model_at_end`` is off, so
     nothing is restored.
     """
+    spec = resolve_training_spec(args)
     config: dict[str, Any] = {
         "learning_rate": args.lr,
         "per_device_train_batch_size": args.batch_size,
@@ -618,6 +710,13 @@ def setup_training_environment(args: argparse.Namespace, has_val: bool) -> dict[
         "lora_rank": args.lora_rank,
         "lora_alpha": args.lora_alpha,
         "model_name": args.model_name,
+        "model_key": spec.key,
+        "backend": args.backend,
+        "packing": args.packing,
+        "packing_strategy": args.packing_strategy,
+        "offload_embedding": args.offload_embedding,
+        "trust_remote_code": args.trust_remote_code,
+        "target_modules": list(spec.target_modules),
         "output_dir": args.output_dir,
         "seed": args.seed,
         "data_seed": args.seed,
@@ -666,6 +765,127 @@ def setup_training_environment(args: argparse.Namespace, has_val: bool) -> dict[
             save_steps += eval_steps - save_steps % eval_steps
         config["save_steps"] = save_steps
     return config
+
+
+def load_training_model(config: dict[str, Any]) -> tuple[Any, Any]:
+    """Load the selected base model and tokenizer with 4-bit QLoRA.
+
+    ``unsloth`` uses FastLanguageModel (fused kernels, optional embedding
+    offload); ``hf`` is the escape hatch for architectures whose layers
+    Unsloth cannot accelerate. Both load from the local cache when it exists
+    so training and eval use the same weights.
+    """
+    spec = config["_spec"]
+    load_path = config["_load_path"]
+    hf_token = os.getenv("HF_TOKEN")
+
+    if config["backend"] == "unsloth":
+        from unsloth import FastLanguageModel
+
+        common = dict(
+            model_name=load_path,
+            max_seq_length=config["max_seq_length"],
+            load_in_4bit=True,
+            token=hf_token,
+        )
+        if config["offload_embedding"]:
+            try:
+                model, tokenizer = FastLanguageModel.from_pretrained(
+                    **common, offload_embedding=True
+                )
+                logger.info("Unsloth load with offload_embedding=True")
+                return model, tokenizer
+            except TypeError:
+                logger.warning(
+                    "This Unsloth version has no offload_embedding argument; "
+                    "loading without it. Upgrade unsloth to keep embeddings off-GPU."
+                )
+        model, tokenizer = FastLanguageModel.from_pretrained(**common)
+        return model, tokenizer
+
+    # Generic transformers + PEFT path. Needed for custom-code models and for
+    # hybrid layers (e.g. LFM2) where Unsloth's fused MHA kernels do not apply.
+    import torch
+    from peft import LoraConfig, get_peft_model
+    from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+
+    compute_dtype = torch.bfloat16 if config["bf16"] else torch.float16
+    bnb_config = BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_quant_type="nf4",
+        bnb_4bit_compute_dtype=compute_dtype,
+        bnb_4bit_use_double_quant=True,
+    )
+    model = AutoModelForCausalLM.from_pretrained(
+        load_path,
+        quantization_config=bnb_config,
+        torch_dtype=compute_dtype,
+        trust_remote_code=config["trust_remote_code"],
+        low_cpu_mem_usage=True,
+        device_map={"": 0} if torch.cuda.is_available() else None,
+        token=hf_token,
+    )
+    tokenizer = AutoTokenizer.from_pretrained(
+        load_path, trust_remote_code=config["trust_remote_code"], token=hf_token
+    )
+    model = get_peft_model(
+        model,
+        LoraConfig(
+            r=config["lora_rank"],
+            lora_alpha=config["lora_alpha"],
+            target_modules=list(spec.target_modules),
+            lora_dropout=0,
+            bias="none",
+            task_type="CAUSAL_LM",
+        ),
+    )
+    if config["offload_embedding"]:
+        logger.warning("offload_embedding is Unsloth-only; ignored on the hf backend.")
+    logger.info(
+        "Loaded %s with the hf+PEFT backend (target modules: %s)",
+        spec.key, ", ".join(spec.target_modules),
+    )
+    return model, tokenizer
+
+
+def attach_lora(config: dict[str, Any], model: Any) -> Any:
+    """Attach LoRA adapters to a model loaded through Unsloth."""
+    from unsloth import FastLanguageModel
+
+    return FastLanguageModel.get_peft_model(
+        model,
+        r=config["lora_rank"],
+        # Never train embed_tokens/lm_head: 622M parameters each on an 8 GB card.
+        target_modules=list(config["target_modules"]),
+        lora_alpha=config["lora_alpha"],
+        lora_dropout=0,
+        bias="none",
+        use_gradient_checkpointing="unsloth",
+        random_state=config["seed"],
+    )
+
+
+def chunked_eval_parts(model: Any) -> Any:
+    """The causal LM that exposes ``lm_head`` for the chunked eval.
+
+    Plain Qwen3 and LFM2 expose it at the top level; multimodal or wrapped
+    models keep it under ``model`` or ``model.language_model``. Fail loudly
+    with the supported paths rather than raising an opaque AttributeError
+    after several minutes of training.
+    """
+    base = model.get_base_model()
+    inner = getattr(base, "model", None)
+    candidates = [base, inner]
+    if inner is not None:
+        candidates.append(getattr(inner, "language_model", None))
+    for candidate in candidates:
+        if candidate is not None and hasattr(candidate, "lm_head") and hasattr(candidate, "model"):
+            return candidate
+    raise RuntimeError(
+        "Chunked eval needs a base model with .model and .lm_head. "
+        "Tried the top level, .model, and .model.language_model; inspect this "
+        "architecture and extend chunked_eval_parts before a long run."
+    )
 
 
 def main() -> None:
@@ -740,16 +960,49 @@ def main() -> None:
                 test_records = None
 
     config = setup_training_environment(args, has_val=val_path is not None)
+    spec = args.spec
+    local_path = spec.local_path
+    if local_path.exists():
+        config["_load_path"] = str(local_path)
+        logger.info("Loading local base model: %s", local_path)
+    else:
+        config["_load_path"] = spec.train_repo
+        logger.warning(
+            "Local model path %s does not exist - falling back to '%s'. "
+            "Run `make download MODEL=%s` first so training and eval use the same weights.",
+            local_path, spec.train_repo, spec.key,
+        )
+    config["_spec"] = spec
     logger.info(
-        "Training config: lr=%.6f, batch_size=%d, max_steps=%d, lora_rank=%d, "
-        "eval=%s, early_stopping_patience=%d",
-        args.lr, args.batch_size, args.max_steps, args.lora_rank,
-        config["eval_strategy"],
+        "Training config: model=%s, backend=%s, lr=%.6f, batch_size=%d, "
+        "max_steps=%d, lora_rank=%d, packing=%s, offload_embedding=%s, "
+        "max_seq_length=%d, eval=%s, early_stopping_patience=%d",
+        spec.key, config["backend"], args.lr, args.batch_size, args.max_steps,
+        args.lora_rank, config["packing"], config["offload_embedding"],
+        args.max_seq_length, config["eval_strategy"],
         args.early_stopping_patience if val_path else 0,
     )
+    if config["packing"]:
+        logger.info(
+            "Sequence packing is on: short records are concatenated into "
+            "%d-token rows with the '%s' strategy.",
+            args.max_seq_length, args.packing_strategy,
+        )
+        if args.packing_strategy == "bfd":
+            logger.warning(
+                "The 'bfd' strategy needs FlashAttention varlen to mask packed "
+                "document boundaries. Without it records can attend across each "
+                "other; use --packing-strategy wrapped if unsure."
+            )
+    if not spec.tested:
+        logger.warning(
+            "Model '%s' has no completed test run on record. Support settings "
+            "come from the registry, not from a verified run.",
+            spec.key,
+        )
 
     try:
-        from unsloth import FastLanguageModel, is_bfloat16_supported
+        from unsloth import is_bfloat16_supported
 
         bfloat_available = is_bfloat16_supported()
         logger.info("bfloat16 supported: %s", bfloat_available)
@@ -763,40 +1016,9 @@ def main() -> None:
                 "bfloat16 is unavailable; falling back to fp16 for training."
             )
 
-        # Resolve the base model path. Prefer the local download so training
-        # uses the exact same weights the download step verified.
-        model_name = config["model_name"]
-        if Path(model_name).exists():
-            logger.info("Loading local base model: %s", model_name)
-        else:
-            logger.warning(
-                "Local model path %s does not exist - falling back to HuggingFace id '%s'. "
-                "Run `make download` first to keep training/eval on the same base model.",
-                model_name, model_name,
-            )
-
-        model, tokenizer = FastLanguageModel.from_pretrained(
-            model_name=model_name,
-            max_seq_length=config["max_seq_length"],
-            load_in_4bit=True,
-            token=os.getenv("HF_TOKEN"),
-        )
-
-        model = FastLanguageModel.get_peft_model(
-            model,
-            r=config["lora_rank"],
-            # Attention + MLP projections only. Training embed_tokens/lm_head
-            # (622M params each) blows past 8 GB VRAM.
-            target_modules=[
-                "q_proj", "k_proj", "v_proj", "o_proj",
-                "gate_proj", "up_proj", "down_proj",
-            ],
-            lora_alpha=config["lora_alpha"],
-            lora_dropout=0,
-            bias="none",
-            use_gradient_checkpointing="unsloth",
-            random_state=config["seed"],
-        )
+        model, tokenizer = load_training_model(config)
+        if config["backend"] == "unsloth":
+            model = attach_lora(config, model)
 
         # Build the Arrow tables. Streaming keeps peak host memory near the
         # model load's own footprint; the lists only exist on the fallback
@@ -911,6 +1133,11 @@ def main() -> None:
             int(config["max_steps"]), per_epoch, train_count,
             int(config["max_steps"]) / per_epoch, records_per_step(config),
         )
+        if config["packing"]:
+            logger.info(
+                "Packing is on, so the step budget above counts source records, "
+                "not packed rows: an epoch is fewer optimizer steps than shown."
+            )
 
         # -----------------------------------------------------------------
         # Memory-safe eval loss. On this 8 GB card, HF Trainer's eval path
@@ -962,7 +1189,7 @@ def main() -> None:
                     if ids.shape[1] < 2:
                         progress.advance()
                         continue
-                    causal = mdl.get_base_model()  # Qwen3ForCausalLM (fast)
+                    causal = chunked_eval_parts(mdl)
                     hidden = causal.model(input_ids=ids).last_hidden_state[0]  # [seq, hidden]
                     for start in range(0, hidden.shape[0] - 1, chunk):
                         end = min(start + chunk, hidden.shape[0] - 1)
@@ -1070,10 +1297,18 @@ def main() -> None:
 
         # eval_strategy stays "no": evaluation is callback-driven so the
         # Trainer never materializes logits-sized eval batches.
+        # Keys the trainer needs but SFTConfig must not see. `packing` is a
+        # real SFTConfig field and stays in.
+        _non_sft_keys = {
+            "model_name", "model_key", "lora_rank", "lora_alpha", "backend",
+            "offload_embedding", "trust_remote_code", "target_modules",
+            # trl's field is max_length; max_seq_length is ours (tokenizer and
+            # Unsloth loader). Leaving it in raises TypeError on trl >= 0.12.
+            "max_seq_length",
+        }
         training_args = SFTConfig(
             dataset_text_field="text",
-            **{k: v for k, v in config.items()
-               if k not in ("model_name", "lora_rank", "lora_alpha")},
+            **{k: v for k, v in config.items() if k not in _non_sft_keys},
         )
 
         callbacks: list[Any] = []
@@ -1172,39 +1407,57 @@ def main() -> None:
 
         torch.cuda.empty_cache()
 
-        # Save a merged 16-bit model (base weights + LoRA) plus the adapter.
-        # The eval pipeline (eval/generate.py, eval/baseline_eval.py) loads
-        # this output with plain transformers, so the merged form is required.
-        # maximum_memory_usage caps how much VRAM merged weights may occupy
-        # before unsloth spills them to temporary_location on disk (the GPU
-        # still holds the 4-bit base at this point, so keep the cap low).
-
-        from unsloth import unsloth_save_model
-
-        if args.skip_merged_save:
-            logger.info("Skipping merged 16-bit save (--skip-merged-save)")
-        else:
-            unsloth_save_model(
-                model,
-                tokenizer,
-                save_directory=str(output_dir),
-                save_method="merged_16bit",
-                temporary_location="outputs/_unsloth_save_buffers",
-                maximum_memory_usage=0.15,
-            )
-            logger.info("Merged 16-bit model saved to %s", output_dir)
-
         adapter_dir = output_dir / "lora_adapter"
-        unsloth_save_model(
-            model,
-            tokenizer,
-            save_directory=str(adapter_dir),
-            save_method="lora",
-        )
+        if config["backend"] == "unsloth":
+            # Save a merged 16-bit model (base weights + LoRA) plus the adapter.
+            # maximum_memory_usage caps how much VRAM merged weights may occupy
+            # before unsloth spills them to temporary_location on disk.
+            from unsloth import unsloth_save_model
+
+            if args.skip_merged_save:
+                logger.info("Skipping merged 16-bit save (--skip-merged-save)")
+            else:
+                unsloth_save_model(
+                    model,
+                    tokenizer,
+                    save_directory=str(output_dir),
+                    save_method="merged_16bit",
+                    temporary_location="outputs/_unsloth_save_buffers",
+                    maximum_memory_usage=0.15,
+                )
+                logger.info("Merged 16-bit model saved to %s", output_dir)
+            unsloth_save_model(
+                model, tokenizer, save_directory=str(adapter_dir), save_method="lora"
+            )
+        else:
+            # A bnb 4-bit model cannot be merged in place without dequantizing,
+            # which does not fit the 8 GB ceiling. Save the adapter only; the
+            # eval loader applies it to the same local 4-bit base.
+            if not args.skip_merged_save:
+                logger.warning(
+                    "Merged export is unavailable on the hf backend with a 4-bit "
+                    "base; saving the LoRA adapter only. eval/generate.py "
+                    "loads adapter + base, so evaluation still works."
+                )
+            model.save_pretrained(str(adapter_dir))
+            tokenizer.save_pretrained(str(adapter_dir))
         logger.info("LoRA adapter saved to %s", adapter_dir)
 
         training_summary = {
-            "base_model": model_name,
+            "base_model": config["_load_path"],
+            "model": {
+                "key": spec.key,
+                "name": spec.name,
+                "official_repo": spec.official_repo,
+                "training_repo": spec.train_repo,
+                "architecture": spec.architecture,
+                "backend": config["backend"],
+                "prequantized_4bit": spec.prequantized_4bit,
+                "packing": config["packing"],
+                "offload_embedding": config["offload_embedding"],
+                "target_modules": list(config["target_modules"]),
+                "tested_in_registry": spec.tested,
+            },
             "dataset": str(args.dataset),
             "experiment": {
                 "skip_merged_save": args.skip_merged_save,
@@ -1246,7 +1499,8 @@ def main() -> None:
             "output_dir": str(output_dir),
             "test_metrics": test_metrics,
             "hyperparameters": {
-                k: v for k, v in config.items() if k != "model_name"
+                k: v for k, v in config.items()
+                if k not in ("model_name", "_load_path", "_spec")
             },
         }
         with open(output_dir / "training_summary.json", "w", encoding="utf-8") as f:

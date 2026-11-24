@@ -4,7 +4,7 @@ What each part of q3as does and how the pieces connect.
 
 ## Pipeline at a glance
 
-1. `make download` fetches the official [`Qwen/Qwen3-8B`](https://huggingface.co/Qwen/Qwen3-8B) to `models/qwen3-8b/`. Unsloth is the training framework only (patched kernels, QLoRA); the weights are always Qwen's original release.
+1. `make download` fetches the base model selected by `MODEL` from the registry in [`training/model_registry.py`](../training/model_registry.py) to `models/<key>/`. The default is Unsloth's pre-quantized 4-bit [`unsloth/Qwen3-8B-unsloth-bnb-4bit`](https://huggingface.co/unsloth/Qwen3-8B-unsloth-bnb-4bit), not the 16 GB BF16 original; `make model-table` lists the other candidates and [docs/models.md](models.md) records which ones have been tested.
 2. `make fetch-sources` fills the archive cache `data/raw_repos/<owner>/<repo>/`
    with HTTP tarballs of every source repository (core sources only;
    ada-eval, learn, skills, the Ada-Algorithms algorithm monorepo, etc.). No git metadata, cached
@@ -14,8 +14,9 @@ What each part of q3as does and how the pieces connect.
 4. `make build-dataset` walks the cached Ada source trees, ingests the
    parser outputs, and emits `data/processed/dataset.jsonl` plus
    `dataset_{train,val,test}.jsonl` (chat-format turns).
-5. `make train` runs QLoRA fine-tuning (Unsloth, 1024-token window, LoRA
-   adapters on Qwen3-8B) with seeded, val-monitored training and early
+5. `make train` runs QLoRA fine-tuning for the selected model (1024-token
+   window, sequence packing, embedding offload for Unsloth models) with seeded,
+   val-monitored training and early
    stopping; checkpoints and a training summary (train/val/test loss
    histories) land in `outputs/q3as/`.
 6. `make generate` produces Ada solutions with both models into
@@ -36,8 +37,9 @@ What each part of q3as does and how the pieces connect.
 | [`scripts/validate_defects.py`](../scripts/validate_defects.py) | GNAT-compiles defect pairs; exit code fails any family that "compiles clean" |
 | [`scripts/ada_env.sh`](../scripts/ada_env.sh) / [`scripts/alire_env.py`](../scripts/alire_env.py) | Alire toolchain entry points (shell / Python) |
 | [`scripts/build_libadalang.py`](../scripts/build_libadalang.py) | Builds and installs `libadalang.so` for the AST parser (`make ast-deps`) |
-| [`training/download_model.py`](../training/download_model.py) | HF download with terminating sanity checks (deep GPU check runs in a child process with a timeout) |
-| [`training/train_unsloth.py`](../training/train_unsloth.py) | QLoRA training: seed 42, train-split default, eval every 50 steps on a seeded `--eval-sample` subset (each pass logs a rate and ETA), early stopping (patience 10), test-split perplexity on a `--test-sample` subset; resumes from the last checkpoint when a run was interrupted (`--no-resume` opts out); streams splits from JSONL into a cached int32-`input_ids` Arrow table to bound host RAM; writes `training_summary.json` with train/eval loss histories and the split counts those losses were measured on |
+| [`training/model_registry.py`](../training/model_registry.py) | Single source for base-model repos, cache dirs, loader backend, LoRA settings, packing, and `tested` status; read by download, train, and the Makefile |
+| [`training/download_model.py`](../training/download_model.py) | Registry-aware HF download with terminating sanity checks (deep GPU check runs in a child process with a timeout) |
+| [`training/train_unsloth.py`](../training/train_unsloth.py) | QLoRA training: registry-selected backend (Unsloth or HF+PEFT), seed 42, train-split default, eval every 50 steps on a seeded `--eval-sample` subset (each pass logs a rate and ETA), early stopping (patience 10), test-split perplexity on a `--test-sample` subset; resumes from the last checkpoint when a run was interrupted (`--no-resume` opts out); streams splits from JSONL into a cached int32-`input_ids` Arrow table to bound host RAM; writes `training_summary.json` with train/eval loss histories and the split counts those losses were measured on |
 | [`eval/generate.py`](../eval/generate.py) | Batch generation for both models; prompts embed the full project tree; replies are parsed into restricted multi-file overlays (target dir only, no project-file overwrites, identical echoes skipped) |
 | [`eval/baseline_eval.py`](../eval/baseline_eval.py) | BLEU/compliance metrics and aggregation |
 | [`eval/eval_pipeline.py`](../eval/eval_pipeline.py) | ada-eval BUILD/TEST/PROVE comparison (see [Evaluation](evaluation.md)) |

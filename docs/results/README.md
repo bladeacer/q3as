@@ -20,6 +20,8 @@ Per-version summaries of every `make eval` / `make eval-pipeline` run. Metrics J
 | Fine-tuned test % | 52.6% | 42.1% | 57.9% |
 | Base build % | 36.8% | 36.8% | 42.1% |
 | Proved samples (FT) | 1 | 0 | 0 |
+| No-op replies (FT) | 13 | n/a | n/a |
+| Build on edited samples (FT) | n/a | n/a | n/a |
 | Test loss (FT) | 0.2118 | 0.2024 | 0.2242 |
 | Training trend | healthy | healthy | healthy |
 

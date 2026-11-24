@@ -53,7 +53,7 @@ _PROCESSING_SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "data" / "proces
 if str(_PROCESSING_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_PROCESSING_SCRIPTS_DIR))
 
-from ada_eval_common import aggregate_eval_results
+from ada_eval_common import aggregate_eval_results, split_tally_by_changed_files
 from alire_env import has_tool
 
 logger = logging.getLogger("q3as_eval")
@@ -406,6 +406,31 @@ def compute_stats_from_ada_eval(model_label: str, evals: list[str] | None = None
     return aggregate_eval_results(EVAL_RESULTS_DIR / model_label, evals)
 
 
+def format_build_split(model_label: str, generated_dir: Path) -> str | None:
+    """State the build count split by whether the reply changed a file, or None.
+
+    Most ada-eval base trees already carry a body for the target subprogram and
+    already compile, so `Build 15/19` is mostly the base project scoring itself.
+    Reads `15/19 (3 of 4 changed, 12 of 15 unchanged)`, and None when the run
+    recorded no sidecar, so the caller prints nothing rather than a zero.
+    """
+    split = split_tally_by_changed_files(
+        EVAL_RESULTS_DIR / model_label,
+        generated_dir / model_label / "generation_meta.json",
+    )
+    if not split:
+        return None
+    edited = (split.get("edited") or {}).get("build", {})
+    unchanged = (split.get("unchanged") or {}).get("build", {})
+    compiled = edited.get("compiled", 0) + unchanged.get("compiled", 0)
+    total = edited.get("total", 0) + unchanged.get("total", 0)
+    return (
+        f"{compiled}/{total}"
+        f" ({edited.get('compiled', 0)} of {edited.get('total', 0)} changed,"
+        f" {unchanged.get('compiled', 0)} of {unchanged.get('total', 0)} unchanged)"
+    )
+
+
 # --------------------------------------------------------------------------- #
 # Reporting helpers
 # --------------------------------------------------------------------------- #
@@ -593,6 +618,12 @@ def main() -> int:
                 "'File: <path>' entries, and how many left every base file "
                 "unchanged (an unchanged project is scored as the base tree)"
             ),
+            "build_split": (
+                "ada-eval BUILD counted separately over the samples the reply "
+                "changed and the samples it echoed; an echoed project is the "
+                "ada-eval base tree, not model output. Absent when the run "
+                "recorded no generation sidecar"
+            ),
         },
     }
 
@@ -628,6 +659,9 @@ def main() -> int:
                     f"  Reply format    : {formats}"
                     f" (untouched {shapes['untouched']}/{shapes['known']})"
                 )
+            split = format_build_split(label, args.generated_dir)
+            if split:
+                print(f"  Build split     : {split}")
         print_stats_block(model["ada_eval"])
 
     ft = per_model[FINE_TUNED_LABEL]

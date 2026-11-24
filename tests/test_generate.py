@@ -140,8 +140,10 @@ class TestParseGeneratedFiles:
         reply = "File: /etc/passwd\n```ada\nx\n```"
         files = gen.parse_generated_files(reply, Path("src/foo.ads"))
         assert Path("/etc/passwd") not in files
-        # The reply still has a fenced block, so it lands at the target path.
-        assert Path("src/foo.ads") in files
+        # The reply named a file, so it is addressed; an entry nothing usable
+        # survives must leave the project alone rather than write its block
+        # into the specification.
+        assert files == {}
 
     def test_parent_traversal_rejected(self):
         reply = "File: ../evil.ads\n```ada\nx\n```"
@@ -152,6 +154,43 @@ class TestParseGeneratedFiles:
         reply = "File: src/notes.txt\n```ada\nx\n```"
         files = gen.parse_generated_files(reply, Path("src/foo.ads"))
         assert Path("src/notes.txt") not in files
+        assert files == {}
+
+    def test_all_entries_dropped_leaves_the_project_alone(self):
+        # The v0.8.0 char_count shape: the reply carries one entry, for the
+        # project file, against a src/ target. Falling through to the
+        # single-block chain wrote main.gpr's text into
+        # src/string_utils.ads, and the sample failed BUILD for a routing
+        # mistake rather than for wrong Ada.
+        reply = "File: main.gpr\n```ada\nproject Main is\nend Main;\n```"
+        files = gen.parse_generated_files(reply, Path("src/string_utils.ads"))
+        assert files == {}
+
+    def test_a_mixed_reply_still_writes_the_usable_entry(self):
+        # Gating the fallback must not discard a reply that also named a
+        # usable file next to the target.
+        reply = (
+            "File: main.gpr\n```ada\nproject Main is end Main;\n```\n\n"
+            "File: src/foo.ads\n```ada\npackage Foo is end Foo;\n```"
+        )
+        files = gen.parse_generated_files(reply, Path("src/foo.ads"))
+        assert set(files) == {Path("src/foo.ads")}
+
+    def test_headerless_reply_still_falls_back(self):
+        # The three fallback steps, pinned so the gate cannot remove them:
+        # fenced block at the target, a package body routed to the sibling,
+        # and raw text at the target.
+        spec_reply = "Here is the fix:\n```ada\npackage Foo is end Foo;\n```"
+        files = gen.parse_generated_files(spec_reply, Path("src/foo.ads"))
+        assert set(files) == {Path("src/foo.ads")}
+
+        body_reply = "```ada\npackage body Foo is end Foo;\n```"
+        files = gen.parse_generated_files(body_reply, Path("src/foo.ads"), PROJECT_WITH_BODY)
+        assert set(files) == {Path("src/foo.adb")}
+
+        raw_reply = "The warning says R might be uninitialized."
+        files = gen.parse_generated_files(raw_reply, Path("src/foo.ads"))
+        assert set(files) == {Path("src/foo.ads")}
 
     def test_empty_reply_yields_empty_map(self):
         assert gen.parse_generated_files("", Path("src/foo.ads")) == {}
@@ -644,6 +683,19 @@ class TestGenerationMetaSidecar:
         assert self._meta(tmp_path)["absolute_value"]["routed_body"] == [
             "src/integer_utils.adb"
         ]
+
+    def test_all_dropped_reply_changes_nothing(self, tmp_path, monkeypatch, overlay_env):
+        # The reply named a file outside src/, so the base project is kept.
+        # The sidecar has to say so: the sample's BUILD then measures the base
+        # tree, not the model.
+        sample = _write_sample_tree(tmp_path)
+        reply = "File: main.gpr\n```ada\nproject Main is end Main;\n```"
+        _run_overlay(tmp_path, monkeypatch, sample.parent, reply)
+        meta = self._meta(tmp_path)["absolute_value"]
+        assert meta["changed_files"] == 0
+        assert meta["routed_body"] == []
+        # The project file must not have been replaced either.
+        assert _packed(tmp_path)[Path("main.gpr")] == "project Main is end Main;\n"
 
     def test_no_routing_recorded_for_a_spec_reply(self, tmp_path, monkeypatch, overlay_env):
         sample = _write_sample_tree(tmp_path)

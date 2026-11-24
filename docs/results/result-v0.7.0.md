@@ -12,6 +12,10 @@ Eval run captured 2026-10-03 05:59 UTC. Data: [`result-data-v0.7.0.json`](result
 | SPARK proved | 0 | 0 | |
 | Prove errors | 12 | 9 | |
 
+## Samples the model changed
+
+_Not recorded: no `generation_meta.json` sidecar beside this run's generations, so the samples the model changed cannot be told from the samples it echoed._
+
 Fine-tuned model proof blockers (check kinds left unproved):
 
 - `UNINITIALIZED` x3

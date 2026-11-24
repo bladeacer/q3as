@@ -220,6 +220,7 @@ case "$ONLY" in
 esac
 
 echo "Setup complete. Next steps:"
-echo "  1. make check-model    (download the base model, needs HF token)"
+echo "  1. make check-model    (download the selected base model, needs HF token)"
+echo "     make model-table   (list all registry models and their support status)"
 echo "  2. make build-dataset  (uses the cached sources from data/raw_repos)"
 echo "  3. make train"

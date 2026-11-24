@@ -18,6 +18,8 @@ string, and is listed in the [results index](../results/README.md).
 
 | Version | What changed | Results |
 |---|---|---|
+| [0.9.1](v0.9.1.md) | Unsloth 4-bit base by default, model registry and support table, model-agnostic training, packing with a safe wrapped strategy | _not run_ |
+| [0.9.0](v0.9.0.md) | A dropped `File:` entry can no longer be written into the target, and every number states the changed/unchanged split | _report not generated in this checkout_ |
 | [0.8.0](v0.8.0.md) | Spec/body routing repair in the harness, reply-format and no-op reporting, hollow-benchmark refusal, `make all` evaluation order, three extraction bug fixes, 406 -> 561 tests, extraction scope | [result-v0.8.0.md](../results/result-v0.8.0.md) |
 | [0.7.0](v0.7.0.md) | Prover-verified SPARK2 turns from all 16 trees, lab explanation twins, assurance-ladder QA, answer-chunking fix | [result-v0.7.0.md](../results/result-v0.7.0.md) |
 | [0.6.0](v0.6.0.md) | Deeper extraction from existing sources: contract curriculum scaled 4x, lab prompt/answer turns, skills proof-workflow docs | _not run_ |

@@ -1,310 +1,257 @@
-# plan.md - v0.9.0 scope
+# plan.md - v0.10.0 scope
 
-State of the 2026-10-03 session: v0.8.0 is measured
-([`result-v0.8.0.md`](docs/results/result-v0.8.0.md)), and the v0.7.0
-regression is recovered. The decomposed reading is in
-[`docs/eval-analysis-v0.8.0.md`](docs/eval-analysis-v0.8.0.md). No new data
-source is in scope here, and none is needed: every turn still comes from the
-cached repositories [`docs/data-provenance.md`](docs/data-provenance.md)
-lists.
+State of the 2026-10-04 session: v0.9.0 is measured, but its result report was
+not generated in this checkout, so the link to `docs/results/result-v0.9.0.md`
+is deliberately not written. The harness no longer
+writes a reply into the wrong file, and every number states the split between
+the samples the model changed and the samples it echoed. No new data source is
+in scope and none is needed: every turn still comes from the cached
+repositories [`docs/data-provenance.md`](docs/data-provenance.md) lists.
 
-The one-line summary: v0.8.0 scored 15/19 builds, 10/19 tests and its first
-proved sample, and 13 of 19 fine-tuned replies changed nothing, so most of
-that score is the ada-eval base project left in place. v0.9.0 closes the last
-harness fault that costs samples, and makes every future number state the
-split between samples the model changed and samples it echoed.
+The one-line summary of the audit below: the corpus contains **no
+demonstration of the reply format the benchmark scores on** (0 turns, measured,
+where the previous scope estimated 94), nothing in it trains the dimension the
+benchmark's unit tests measure, and a run is not yet an artefact that can be
+re-measured. The first two are data, the third is bookkeeping, and all three
+have to move before a build count means anything.
 
-## Measured state
+## What the audit found
 
-| Metric (fine-tuned) | v0.4.1 | v0.7.0 | v0.8.0 |
-|---|---|---|---|
-| Build | 16/19 | 10/19 | 15/19 |
-| Unit tests | 11/19 | 8/19 | 10/19 |
-| SPARK proved | 0 | 0 | 1 |
-| Prove errors | 3 | 9 | 2 |
-| Reply format `File:` | not recorded | 4/19 | 19/19 |
-| Replies that changed nothing | not recorded | not recorded | 13/19 |
-| Test loss | 0.2242 | 0.2024 | 0.2118 |
+Findings 1 to 4 are what the v0.9.0 numbers and the harness taught; findings 5
+to 7 are the state of the extraction track. Every volume below was counted in
+the cache on 2026-10-04, not estimated.
 
-| Group | Samples | Build | Test | Proved |
-|---|---|---|---|---|
-| Changed nothing | 13 | 12 | 8 | 0 |
-| Edited | 6 | 3 | 2 | 1 |
+### 1. The corpus has zero write-shaped turns
 
-Two facts drive this version. First, `char_count_1` and `char_count_2` fail
-BUILD because the harness wrote the project's `main.gpr` text into
-`src/string_utils.ads`. Second, 18 of 19 ada-eval base trees already contain a
-body for the target subprogram, so a reply that echoes its input keeps a
-compiling project and collects the score. `HumanEval_2_truncate_number` is the
-only sample with no body in its base tree, and it is the one the model
-implemented, tested and proved (6 of 6 checks, no `pragma Assume`).
+Counted over `data/processed/dataset_train.jsonl` (72,511 turns): an assistant
+message that carries a `File: <path>` line followed by a fenced block occurs
+**0 times**. Six user turns contain the string `File:`, and all six have it
+inside an Ada comment (`--  File: tests.adb`), not as a project listing. The
+previous scope said 94 of 72,464; that came from a looser match over exactly
+these comment lines.
 
-## To build in v0.9.0
+Consequences, both load-bearing:
 
-### 1. A dropped `File:` entry must never be written into the target
+- Reply-format compliance (19/19 `file_blocks` on the v0.8.0 run) is
+  prompt-following, not training. The model was never shown a turn in which
+  acting on a project is the answer.
+- The no-op reply mode is the default when the corpus contains no example of
+  editing a project: reproducing the specification it was shown is the only
+  behaviour with training signal behind it. 13 of 19 replies in the v0.8.0 run
+  changed nothing, and the 6 that did edit scored 3 builds and 2 tests.
 
-[`eval/generate.py`](eval/generate.py) `parse_generated_files` keeps only the
-entries next to the prompt's target directory, which is right: small models
-echo `main.gpr` and `main.adc`, and their reconstructed copies are corrupt. The
-fault is what happens next. When every entry was dropped, the function fell
-through to the single-block fallback, which writes the fenced block at the
-target path, so the one block the reply did contain (the project file) landed
-in the specification.
+### 2. Most of the score is the base project, and that is now measured everywhere
 
-Measured on the stored v0.8.0 generations: two samples name only
-`main.gpr`, both replies byte-identical, both fail BUILD, and both report
-`subprogram_not_found` on the prove side. The base model has no such reply, so
-its numbers do not move.
+18 of the 19 ada-eval base trees already carry a body for the target
+subprogram and already compile, so an echo collects BUILD and TEST for the base
+project. v0.9.0 reports the split in `make eval`, in
+`outputs/eval_results.json`, and in every `docs/results/result-vX.Y.Z.md`
+("Samples the model changed"), and the cross-version table carries
+"Build on edited samples (FT)" from this version on. The number to move is now
+stated in one place and cannot be read as a total.
 
-Rule to implement: the fallback chain fires only when the reply carries no
-`File:` header at all.
+### 3. A filtered evaluation run still tallies the previous run
 
-1. Collect the `_FILE_BLOCK_RE` matches and note whether any header matched,
-   regardless of whether the path survived `_safe_source_path`.
-2. Entries next to the target directory are the overlay, unchanged.
-3. Otherwise, if any header matched, return an empty overlay and log a warning
-   naming the dropped paths and the target. A reply that addressed files but
-   named none of them usably must leave the project alone.
-4. Otherwise (no header at all) run the existing chain: fenced block at the
-   target, `package body` opening routed to the sibling `.adb`, raw text at the
-   target.
+`eval/eval_pipeline.py` writes `outputs/eval_results/<model>/<dataset>/` and
+never clears it. `make eval-pipeline --dataset spark_learn` therefore leaves the
+last run's `spark_custom` results in place, and every tally in the project
+(`aggregate_eval_results`, `collect_ada_eval_metrics`, `make eval`) reads the
+whole tree, so a partial run reports a mixture of two runs. Nothing warns about
+it: the numbers look complete.
 
-Deliberately unchanged: the v0.8.0 body routing, an explicit `File:` entry
-winning over routing, and `reply_format` (a reply that names `main.gpr` still
-counts as `file_blocks`, which is accurate, the model did use the contract).
+### 4. A run is not an artefact that can be re-measured
 
-Expected effect when the stored run is re-scored: build 15 to 17, tests 10 to
-12, no-op replies 13 to 15, edited samples 6 to 4 (3 build, 2 tests, 1 proved).
-`HumanEval_2_truncate_number` is unaffected, so the proved sample stays.
+Three separate gaps, all of which cost this project a claim:
 
-Tests in [`tests/test_generate.py`](tests/test_generate.py):
+- the adapter is written to `outputs/q3as/` and never kept per version. The
+  v0.8.0 checkpoint was not on the machine that produced v0.9.0, so the v0.9.0
+  run is a **new adapter**, not a re-score of the v0.8.0 one, and no difference
+  against v0.8.0 can be attributed to the harness alone.
+- `generation_meta.json` is overwritten per run, so the per-sample split of an
+  older version cannot be recovered (v0.8.0's is only readable because it was
+  copied into its analysis page by hand).
+- generation is seeded (42) but CUDA kernels are not bitwise deterministic, so
+  even the same adapter would not reproduce a run digit for digit. A harness
+  fix therefore has to be argued from per-sample evidence, which is what the
+  v0.9.0 changelog does for the two `char_count` samples.
 
-- `test_absolute_path_rejected` and `test_non_source_suffix_rejected` assert
-  today's behaviour ("the reply still has a fenced block, so it lands at the
-  target path"). Both change to expect an empty overlay, and their names stay.
-- new `test_all_entries_dropped_leaves_the_project_alone`: the `char_count`
-  shape, one `File: main.gpr` entry against a `src/` target.
-- new `test_headerless_reply_still_falls_back`: pins the three fallback steps,
-  so the fix cannot silently remove the routing repair.
-- new sidecar test: an all-dropped reply records `changed_files: 0`.
+### 5. Nothing trains the unit-test dimension
 
-### 2. Every report states the changed and unchanged split
+Zero turns teach writing a test harness, and the benchmark scores unit tests.
+The cache has the material: **1,828** `tests.adb` files (1,809 in
+`Ada-Algorithms`, 19 in ada-eval), of which **747** name exactly one unit under
+test that is present in the same directory and are therefore pairable without
+guessing. The assertion idiom in those files is a **local** helper, not
+`Ada.Assertions`: 62,237 `Check (` call sites, 4,949 `Assert (`, 338 `Expect (`
+and 21 `Assert_Equal (`.
 
-One implementation, in [`eval/ada_eval_common.py`](eval/ada_eval_common.py),
-which already owns the build/test/prove tally and its result classification.
+### 6. Volume corrections to the v0.9.0 inventory
 
-- new `split_tally_by_changed_files(eval_results_dir, meta_path)` returning
-  `{"edited": <stats>, "unchanged": <stats>}` from the same `empty_stats`
-  buckets, joining per-sample results to `generation_meta.json` on the sample
-  name. It returns nothing usable when the sidecar is absent, so older runs
-  render as not recorded rather than as zero.
-- [`scripts/gen_eval_report.py`](scripts/gen_eval_report.py):
-  `collect_ada_eval_metrics` stores `by_change` per model; `render_markdown`
-  gains a "Samples the model changed" table (both models, samples, build, test,
-  proved); `render_index` gains "No-op replies (FT)" and "Build on edited
-  samples (FT)" in the last-three comparison. Missing data renders `n/a`
-  through the existing `_fmt_pct(None)` path.
-- [`eval/baseline_eval.py`](eval/baseline_eval.py): extend the `Reply format`
-  line, for example `Build 15/19 (3 of 4 changed, 12 of 15 unchanged)`.
+Counted again on 2026-10-04; where the earlier figure was wrong, the corrected
+one is given.
 
-Data available for the index row: the no-op count is in the stored
-`reply_shapes.untouched` for v0.8.0 (13) and absent for v0.4.1 and v0.7.0,
-whose sidecars were overwritten. Build-on-edited cannot be recovered for any
-earlier version, so that row starts at v0.9.0. Open decision: keep it in the
-cross-version table with `n/a` for older versions, or show it only in the
-per-version report.
-
-Tests: [`tests/test_eval_scoring.py`](tests/test_eval_scoring.py) for the new
-helper (both buckets, missing sidecar, unknown sample names, a sample that is
-in the results but not the sidecar), and
-[`tests/test_reporting.py`](tests/test_reporting.py) for the rendered section
-and its `n/a` path.
-
-### 3. Documentation reconciliation
-
-Stale at the time of writing, and what fixes it:
-
-| Place | Stale content | Fix |
+| Item | v0.9.0 scope said | Measured now |
 |---|---|---|
-| `docs/changelogs/v0.8.0.md` | Opens with "No model has been trained for this version yet" | Replace with the measured section, the grouped table, and a link to the analysis page |
-| `docs/changelogs/index.md` | v0.8.0 row says "not run" | Link `result-v0.8.0.md` |
-| `plan.md` | Scoped for v0.8.1, quotes the v0.7.0 regression as current state, says `untouched 9/19` where the run recorded 13 | This file |
-| `docs/evaluation.md` | No mention that an echo keeps the base project and scores on it | New bullet under "Reading the results" plus a link to the analysis page |
-| `docs/README.md` | Analysis page not indexed | Row in the reference table and in the reading order |
-| `AGENTS.md` | `eval/generate.py` bullet describes routing but not the fallback hazard | One sentence naming the hazard and pointing here |
+| Ada-83 suite `.ada` files | 4,142 | 4,142 |
+| `btests/` files | 1,515 | 1,515 `.ada` of 1,592 files |
+| `-- ERROR:` markers | 12,091 | 12,195 (12,048 inside `.ada`) |
+| files carrying `-- OBJECTIVE:` | 1,403 | 1,397 `.ada` (1,975 including the harness's own `.txt`) |
+| ctests/atests/ltests self-checking | 2,181 files | 2,998 files, `FAILED` in 2,576, `REPORT.TEST` in 5 |
+| `tests.adb` pairable with a unit under test | implied 1,858 | **747** |
+| tests harnesses using `Ada.Assertions.Assert` | 707 | 7 name it explicitly; 1,151 mention `Ada.Assertions`, 565 `use Ada.Assertions` |
+| tests harnesses inside `SPARK2` trees | 836 | 852 |
+| unparsed documentation sections | ~11,000 | 14,704 (Ada-Algorithms 10,904, adacovex 1,989, Ada_CRDT 1,118, skills 598, ada-spark 95) |
+| AdaDoc comment blocks above declarations | 721 declarations, ~20k words | **9,423 declarations, ~142k words** (6,271 / ~97k in Ada-Algorithms) |
+| `.gpr` files | 2,254 (4 read) | 2,515 in the cache, 2,260 in Ada-Algorithms (`-gnat2022` 1,023, `-gnata` 850) |
+| `training_material` Ada no builder reaches | 363 files | 683 Ada files total: 63 in `courses/ada_essentials/examples`, 69 in mini-projects, 28 in quizzes, 136 in `labs/` trees |
+| TLALOC `.finc` / `.sub` / `.dcl` | 169 / 112 / 44 | 169 / 112 / 44 (`.FINC`, `.SUB`, `.DCL`) |
+| SimpleEnglish raw model outputs | 430 | 435 `.txt` under `evals/results` |
 
-`docs/results/README.md` is generated by `render_index`, and
-`tests/test_reporting.py` fails when it differs from that output, so it is
-never hand-edited.
+Two of those corrections change a conclusion, not just a number:
 
-### 4. Publishing
+- the AdaDoc comment blocks are **13 times larger** than scoped, which moves
+  that item from "low volume, parser risk" to a real one;
+- the `training_material` labs have **no solution side**. The 17 `*.lab.rst`
+  instructions sit beside starter `source/` trees and nothing else, so there is
+  no gold answer to train against. Item 8 of the old scope rested on a
+  `labs/source/` versus `labs/solution/` twin that does not exist in the cache.
+  Its value drops to nothing until a solutions tree is added.
 
-`make bump-version PART=minor` moves 0.8.0 to 0.9.0 across
-[`alire.toml`](alire.toml), `alire-dev.toml`, `alire-ast.toml` and
-`pyproject.toml`; two tests in `tests/test_reporting.py` fail if those ever
-disagree. The dataset does not change in this version, so publishing is a
-re-score of the current adapter:
+### 7. The extraction track is still unfinished
 
-```bash
-make bump-version PART=minor
-make generate eval-pipeline eval eval-report
-make test lint check-integrity validate-defects agents-tree
-```
+The v0.7.0 changelog said it was finished. Findings 1 and 5 say otherwise:
+the corpus barely demonstrates the task the benchmark poses, and nothing in it
+demonstrates the dimension the benchmark scores for unit tests. The corrected
+volumes are above; ordered by value per unit of work they become the deferred
+list at the end of this file.
 
-`docs/changelogs/v0.9.0.md` states that this is a harness re-score of the
-v0.8.0 adapter, in the same terms v0.8.0 used for the v0.7.0 adapter, and
-`result-v0.8.0.md` stays as it was measured. The alternative is to retrain
-first, which costs about 2.6 hours and makes the v0.9.0 numbers cover a new
-adapter as well; the harness fix is worth 2 builds and 2 tests either way.
-
-## Scoped, not built: extraction
-
-The v0.7.0 changelog said the extraction track was finished. Two measured
-results say otherwise: the corpus barely demonstrates the task the benchmark
-poses, and nothing in it demonstrates the dimension the benchmark scores for
-unit tests. Every volume below was counted in the cache, not estimated.
-Ordered by value per unit of work against the v0.8.0 numbers.
+## To build in v0.10.0
 
 ### 1. Write-shaped turns for the evaluation prompt (highest value)
 
-Only 94 of 72,464 train turns (0.13%) have the shape of the evaluation prompt:
-a project listing in, updated files out. Separately, 5,274 turns (7.3%) are at
-least 95% covered by the 8-gram shingles of their own user turn, and those sit
-in the question kinds, where quoting the code under discussion is correct. So
-the no-op reply mode is not taught directly by restatement; it is the default
-when the corpus has no demonstration of acting, and the fix is the eval prompt's
-own shape.
+Finding 1. Scope: a `file_block_pair` turn kind, built from the pairs the
+builder already finds (2,009 `code_pair` units and 46,603 AST-derived units are
+available as content). The user turn is the project tree in
+`File: <path>` + fenced-block form, the assistant turn the same Ada emitted as
+one entry per changed file.
 
-Scope: a `file_block_pair` turn kind, built from the pairs the builder already
-finds. The user turn is the project tree in `File: <path>` + fenced-block form
-(exactly what `build_user_prompt` sends); the assistant turn is the same Ada
-the existing builders already extract, emitted as one entry per changed file.
-Reuse the pair, contract and variant builders for content and add only the
-framing. The v0.6.0 acceptance criterion ("reply-format compliance rises
-without harness repair") is met by other means: format compliance is already
-19/19. The criterion for this version is build and test counts on the samples
-the model changed, currently 3 of 6 and 2 of 6.
+The framing must be **one implementation**, not a copy: `build_user_prompt` in
+[`eval/generate.py`](eval/generate.py) already inserts
+`data/processing_scripts/` on `sys.path`, so the shared function belongs there
+and both the builder and the eval prompt call it. A second copy of that prompt
+text is how the v0.6.0 acceptance criterion ("format compliance rises without
+harness repair") would be met by luck rather than by construction.
 
-### 2. Unit-test turns from the harnesses already in the cache (1,858 files)
+Content comes from the existing pair, contract and variant builders; only the
+framing is new. Targets, in order: at least one turn per `code_pair` unit, and
+one turn per sampled AST unit that has both a spec and a body. The v0.9.0
+criterion for this item is unchanged and is now measurable: the no-op count and
+the build/test counts on the changed samples, both reported by `make eval`.
 
-Nothing in the corpus trains the unit-test dimension, and the benchmark scores
-it. `Ada-Algorithms` alone has 1,809 `tests.adb`/`tests.ads` files (836 inside
-`SPARK2` trees, 707 using `Ada.Assertions.Assert`), each a spec-under-test plus
-input aggregate plus `Assert (...)` pair:
+### 2. Unit-test turns from the harnesses already in the cache
 
-```ada
-Result : constant Input_Array := Sort (Input);
-   for I in Index loop
-      if I < Index'Last then Assert (Result (I) <= Result (I + 1)); end if;
-```
+Finding 5. Scope: a `gnattest_pair` turn kind pairing a unit's `.ads` (and its
+body when present) with the `tests.adb` beside it: 747 pairable harnesses in
+`Ada-Algorithms` by the measurement above, each naming exactly one unit.
 
-Scope: a `gnattest_pair` turn kind pairing a unit's `.ads` with the
-`tests.adb` beside it. `parse_ada_ast.pair_subprograms` already pairs
-`(package, kind, name)` correctly and can find the unit under test from the
-`with <Unit>;` clause, so the new code is the turn builder. The shape is the
-one `AdaCore/skills` documents in `test_skeletons.md` and
-`test-separate-drivers.md`, which are already loaded as guidance and never
-trained against. Caveat to check first: `Ada-Algorithms` is the one repo the
-eval guard already fires on, so expect the drop count in
-`dataset_metadata.json` to move.
+The previous scope said the only new code would be the turn builder, because
+`parse_ada_ast.pair_subprograms` "can find the unit under test from the
+`with <Unit>;` clause". It cannot: nothing in
+[`parse_ada_ast.py`](data/processing_scripts/parse_ada_ast.py) reads context
+clauses, on either the structural or the libadalang path. So a small
+`with`/`use` reader is part of this item. It does not need the AST: the clause
+is in the harness file's own text and the unit it names is checked against the
+same directory, which is also what makes the 747 unambiguous.
 
-### 3. Ada 83 conformance suite as error-diagnosis turns (4,142 files)
+Shape: the user turn is the unit under test plus a request to write its test
+harness; the assistant turn is the `tests.adb`. That is the shape the
+benchmark's TEST dimension scores, and the shape
+`AdaCore/skills`' `test_skeletons.md` and `test-separate-drivers.md` document,
+which are already loaded as guidance and never trained against.
 
-`Ada-83-TLALOC/acvc83_11/` holds the ACVC83 suite. `btests/` alone is 1,515
-files with **12,091** `-- ERROR:` markers stating the violated rule inline
-(`RAISE;  -- ERROR: NON-SPECIFIC RAISE OUTSIDE HANDLER.`) and 1,403 files
-carry `-- OBJECTIVE:` headers stating what an RM rule requires. The v0.8.0
-blocker histogram is `VC_OVERFLOW_CHECK` x5 and `UNINITIALIZED` x4 first, so
-diagnosis of a violated rule is the matching skill.
+Caveat to check first: `Ada-Algorithms` is the repository the eval guard fires
+on (827 contaminated groups dropped in the v0.9.0 build), so the drop count in
+`dataset_metadata.json` will move and `make check-integrity` must still exit 0.
 
-Scope: an `ada83_diag` turn kind. User = "this unit must be rejected by the
-compiler", assistant = the violated rule and why, from the inline markers;
-plus `objective_to_test` turns built from the `ctests`/`atests`/`ltests`
-bodies (2,181 files self-check with `REPORT.TEST`/`FAILED`). Largest volume in
-the whole cache and it matches how the eval reports failures.
+### 3. Make a run an artefact that can be re-measured (small)
 
-Hard constraint: `btests/` is *intentionally illegal* Ada. It must never enter
-`code_pair` or reach `inject_defect`, or the 17 defect families will "repair"
-already-broken code into wrong targets. `.ada` is not in
-`ADA_SPEC_EXTENSIONS` today, which is why all 4,142 files are invisible to
-every extractor; add a dedicated extension constant and a dedicated builder
-rather than widening the code pool.
+Findings 3 and 4, and the bookkeeping the last two versions needed:
 
-### 4. The doc trees no extractor reads (~11,000 sections)
+- [`eval/eval_pipeline.py`](eval/eval_pipeline.py) clears the per-model
+  `outputs/eval_results/` tree at the start of a run (or writes a run id and
+  the tallies filter on it), so a filtered run cannot report a mixture of two.
+- [`eval/generate.py`](eval/generate.py) records a fingerprint of the adapter it
+  loaded (sha256 over the adapter weights plus the training config) in
+  `generation_meta.json`, and `scripts/gen_eval_report.py` copies that sidecar
+  to `docs/results/meta-vX.Y.Z.json`. A versioned split then survives the next
+  run, which is what v0.8.0 had to do by hand.
+- [`eval/baseline_eval.py`](eval/baseline_eval.py) reports BLEU, exact match and
+  compliance split by changed and unchanged samples as well, because all six of
+  the v0.8.0 exact matches were echoes and the metric currently rewards them.
 
-`default_doc_dirs()` is `learn` + `training_material` only. Adding the rest
-needs no parser change:
+This is the smallest item here and the one that makes the other two arguable
+after the fact.
 
-| Repo | files | sections | `doc_section` turns |
-|---|---|---|---|
-| `Ada-Algorithms` | 1,851 | 11,414 | ~8,266 |
-| `adacovex` | 216 | 2,053 | ~1,575 |
-| `Ada_CRDT` | 95 | 1,106 | ~763 |
-| `AdaCore/skills` | 71 | 662 | ~519 |
-| `ada-spark` | 9 | 94 | ~83 |
+## Deferred, with measured volumes
 
-`Ada-Algorithms/misc/Ada/*/README.md` (1,130 files) carries algorithm
-overviews and component tables. Low risk, low reward: it is prose, and
-`doc_section` is already the largest-prose kind in the corpus at 5,379.
+Ordered by value per unit of work. None of it ships without a result file to
+compare against v0.9.0.
 
-### 5. Contract-documentation turns from the generated AdaDoc pages (111 files)
+1. **`ada83_diag`**: the Ada 83 conformance suite as error-diagnosis turns.
+   4,142 `.ada` files, 12,195 inline `-- ERROR:` markers, 1,397 `.ada` files with
+   an `-- OBJECTIVE:` header, and 2,576 of the 2,998 `ctests`/`atests`/`ltests`
+   files that self-check with `FAILED`. Largest volume in the cache and it
+   matches how the eval reports failures. Hard constraint: `btests/` is
+   *intentionally illegal* Ada, so `.ada` needs a dedicated extension constant
+   and a dedicated builder; it must never enter `code_pair` or reach
+   `inject_defect`, or the 17 defect families will "repair" already-broken code
+   into wrong targets.
+2. **AdaDoc comment blocks above declarations**: 9,423 declarations and ~142k
+   words that `parse_ada_ast` discards because it starts at the declaration
+   keyword. Bigger than scoped (finding 6) and it gives the write side of the
+   `gnatdoc` guidance that is already loaded. The one item here with parser
+   risk: both the regex path and the libadalang path need it, and `parent.text`
+   excludes the comment as well.
+3. **The doc trees no extractor reads**: 14,704 sections across
+   `Ada-Algorithms` (10,904), `adacovex` (1,989), `Ada_CRDT` (1,118),
+   `AdaCore/skills` (598) and `ada-spark` (95). `default_doc_dirs()` is
+   `learn` + `training_material` only, so adding the rest needs no parser
+   change. Low risk, low reward: it is prose and `doc_section` is already the
+   largest prose kind at 5,379.
+4. **Contract-documentation turns from the generated AdaDoc pages**: 111 files
+   (`adacovex/docs/api-docs/` 75, `Ada_CRDT/docs/api-docs/` 36).
+   `_SPARK_ASSURANCE_DOC_DIRS` lists `docs/proof`, `docs/compliance`,
+   `docs/usage` and `docs/archive`, not `docs/api-docs`, so none of it is read.
+   Two products: "document this declaration" turns with a real target, and a
+   much richer source for `assurance_qa` than the 5 turns it produces today.
+5. **Build-configuration turns from `.gpr` files**: 2,515 files,
+   `discover_files` collapses them to the first readable file per input
+   directory, used only as trailing context.
 
-`adacovex/docs/api-docs/` (75 files) and `Ada_CRDT/docs/api-docs/` (36) are
-generated API pages: package description, per-parameter table, `**Returns:**`
-semantic line. `_SPARK_ASSURANCE_DOC_DIRS` lists `docs/proof`,
-`docs/compliance`, `docs/usage`, `docs/archive` and not `docs/api-docs`, so
-none of it is read. Two products: "document this declaration" turns with a
-real target, and a much richer source for `assurance_qa` than the 5 turns it
-produces today (`adacovex-spark-levels.md` spells out all five SPARK levels
-with their `gnatprove` commands).
+## Not worth it
 
-### 6. AdaDoc comment blocks above declarations (721 declarations, ~20k words)
-
-`parse_ada_ast` starts at the declaration keyword, so the comment above it is
-discarded. 673 of those declarations are in `Ada-Algorithms` (18,488 words),
-21 in `Ada_CRDT`, 20 in `adacovex`. Gives the write side of the `gnatdoc`
-guidance that is already loaded. Requires touching both the regex path and the
-libadalang path (`parent.text` also excludes the comment), so it is the one
-item here with parser risk.
-
-### 7. Build-configuration turns from `.gpr` files (2,254 files, 4 read)
-
-`discover_files` collapses `.gpr` to the first readable file per input
-directory, used only as trailing context. `Ada-Algorithms` has 2,260, with
-`-gnat2022` in 1,026 and `-gnata` in 885. Turn kind: "which standard does
-this project target, which warnings does it enable", answered from the file,
-plus the reverse (write the `.gpr` for a SPARK project at level 2).
-
-### 8. `training_material` Ada that no builder reaches (363 files)
-
-Only the `prompt/`+`answer/` lab twins are read. Unread: 63 files in
-`courses/ada_essentials/examples`, 54 in `mini_projects`, 28 in `quiz`, and
-208 in `labs/` trees with no prompt/answer pair (`gnatsas`, `gnatdas`,
-`gnat_project_facility`). The `labs/source/` vs `labs/solution/` layout is the
-natural twin of the prompt/answer rule that already exists.
-
-### Not worth it
-
-- `SimpleEnglish`'s 430 raw model outputs on STE tasks: other models'
+- `SimpleEnglish`'s 435 raw model outputs on STE tasks: other models'
   generations, not Ada.
-- `TLALOC`'s 169 `.finc` / 112 `.sub` / 44 `.dcl`: TLALOC's own register DSL.
-- `Ada-Algorithms/*/SPARK2/*/.spark`, `.gnat-json`, `.cswi`, `.sarif`:
-  prover provenance for units already proved; useful only as a filter.
+- TLALOC's 169 `.FINC` / 112 `.SUB` / 44 `.DCL`: TLALOC's own register DSL.
+- `Ada-Algorithms/*/SPARK2/*/.spark`, `.gnat-json`, `.cswi`, `.sarif`: prover
+  provenance for units already proved; useful only as a filter.
 - The 279 `spark_verified` candidates `gen_verified_spark.py` drops for
   `with`-ing a sibling: real SPARK, but proving them needs a per-directory
-  synthetic project, and 568 already-proved units have not yet been shown to
+  synthetic project, and 567 already-proved units have not yet been shown to
   raise the proved count.
+- `training_material`'s `labs/` starters: instructions without solutions
+  (finding 6), so there is no answer to train on.
 
 ## Rules for this track
 
 - Every new turn kind gets a unit test per branch, and a count in
-  `docs/datasets-and-training.md`.
+  [`docs/datasets-and-training.md`](docs/datasets-and-training.md).
 - Every new source directory updates the
   [`docs/data-provenance.md`](docs/data-provenance.md) source table, then
   `make check-integrity` and `make validate-defects` must pass.
 - No new turn kind may lower reply-format compliance, the BUILD/TEST numbers,
-  or the build count on the samples the model changed. That last one is the
-  bar this version exists to clear: a run that reaches 16/19 build by leaving
-  the base project in place is not the win v0.4.1's 16/19 was.
+  or the build count on the samples the model changed. That last one is the bar
+  this version exists to clear: a run that reaches 16/19 build by leaving the
+  base project in place is not the win v0.4.1's 16/19 was.
 - Numbers come from `make eval-report` only. A claim without a
   `docs/results/result-vX.Y.Z.md` is prose, not a result.

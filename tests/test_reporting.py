@@ -110,6 +110,21 @@ def _sample_result_line(compiled: bool, passed: bool, prove: str) -> str:
 
 
 class TestCollectAdaEvalMetrics:
+    def _result_line(self, name, compiled, prove="unproved"):
+        return json.dumps({
+            "name": name,
+            "evaluation_results": [
+                {"eval": "build", "compiled": compiled},
+                {"eval": "test", "compiled": compiled, "passed_tests": compiled},
+                {"eval": "prove", "result": prove},
+            ],
+        })
+
+    def _meta(self, tmp_path, label, payload):
+        target = tmp_path / "generated_solutions" / label / "generation_meta.json"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps(payload), encoding="utf-8")
+
     def test_aggregates_models_and_datasets(self, tmp_path: Path):
         base = tmp_path / "base_qwen3-8b" / "spark_ds"
         ft = tmp_path / "fine_tuned" / "spark_ds"
@@ -129,6 +144,36 @@ class TestCollectAdaEvalMetrics:
 
     def test_empty_dir_yields_empty(self, tmp_path: Path):
         assert ger.collect_ada_eval_metrics(tmp_path) == {}
+
+    def test_records_the_changed_split_when_the_sidecar_exists(self, tmp_path: Path, monkeypatch):
+        monkeypatch.setattr(ger, "GENERATED_DIR", tmp_path / "generated_solutions")
+        ft = tmp_path / "fine_tuned" / "spark_ds"
+        ft.mkdir(parents=True)
+        (ft / "r.jsonl").write_text(
+            self._result_line("s1", True) + "\n" + self._result_line("s2", False) + "\n",
+            encoding="utf-8",
+        )
+        self._meta(tmp_path, "fine_tuned", {
+            "s1": {"changed_files": 1}, "s2": {"changed_files": 0},
+        })
+
+        metrics = ger.collect_ada_eval_metrics(tmp_path)
+
+        by_change = metrics["fine_tuned"]["by_change"]
+        assert by_change["edited"]["build"] == {"compiled": 1, "failed": 0, "total": 1}
+        assert by_change["unchanged"]["build"] == {"compiled": 0, "failed": 1, "total": 1}
+
+    def test_no_sidecar_leaves_the_split_out(self, tmp_path: Path, monkeypatch):
+        # Absent, not zero: an older run has no sidecar, and by_change full of
+        # zeros would render as "the model changed nothing", which is a claim.
+        monkeypatch.setattr(ger, "GENERATED_DIR", tmp_path / "generated_solutions")
+        ft = tmp_path / "fine_tuned" / "spark_ds"
+        ft.mkdir(parents=True)
+        (ft / "r.jsonl").write_text(self._result_line("s1", True) + "\n", encoding="utf-8")
+
+        metrics = ger.collect_ada_eval_metrics(tmp_path)
+
+        assert "by_change" not in metrics["fine_tuned"]
 
 
 class TestRender:
@@ -156,6 +201,52 @@ class TestRender:
     def test_markdown_handles_missing_results(self):
         text = ger.render_markdown("1.0.0", {"version": "1.0.0", "generated_at": "x"})
         assert "No ada-eval JSONL results found" in text
+
+    def _changed_stats(self, edited, unchanged):
+        return {
+            "edited": {
+                "build": {"compiled": edited[0], "failed": edited[1] - edited[0], "total": edited[1]},
+                "test": {"passed": edited[0], "failed": edited[1] - edited[0], "total": edited[1]},
+                "prove": {"proved": 0, "unproved": edited[1], "error": 0, "total": edited[1]},
+            },
+            "unchanged": {
+                "build": {"compiled": unchanged[0], "failed": unchanged[1] - unchanged[0], "total": unchanged[1]},
+                "test": {"passed": unchanged[0], "failed": unchanged[1] - unchanged[0], "total": unchanged[1]},
+                "prove": {"proved": 0, "unproved": unchanged[1], "error": 0, "total": unchanged[1]},
+            },
+        }
+
+    def test_markdown_states_the_changed_and_unchanged_split(self):
+        data = self._data()
+        data["ada_eval"]["fine_tuned"]["by_change"] = self._changed_stats((3, 4), (12, 15))
+        text = ger.render_markdown("9.9.9", data)
+        assert "## Samples the model changed" in text
+        assert "| fine-tuned | changed | 4 | 3/4 (75.0%) | 3/4 (75.0%) | 0/4 (0.0%) |" in text
+        assert "| fine-tuned | unchanged | 15 | 12/15 (80.0%) | 12/15 (80.0%) | 0/15 (0.0%) |" in text
+        # The base model is in the same table: the split is per model.
+        assert "| base | changed | n/a | n/a | n/a | n/a |" in text
+
+    def test_markdown_says_not_recorded_without_a_sidecar(self):
+        text = ger.render_markdown("9.9.9", self._data())
+        assert "## Samples the model changed" in text
+        assert "_Not recorded:" in text
+        assert "| fine-tuned | changed |" not in text
+
+    def test_split_section_absent_without_ada_eval_results(self):
+        text = ger.render_markdown("1.0.0", {"version": "1.0.0", "generated_at": "x"})
+        assert "Samples the model changed" not in text
+
+    def test_unknown_model_label_is_still_shown(self):
+        # --base-model can point anywhere, and generate.py names the directory
+        # after it. A label this script has no pretty name for must still get a
+        # row rather than vanishing from the table.
+        data = self._data()
+        stats = self._changed_stats((2, 2), (5, 5))
+        data["ada_eval"]["base_llama_3"] = {
+            "samples": 4, "build": 3, "by_change": stats,
+        }
+        text = ger.render_markdown("9.9.9", data)
+        assert "| base_llama_3 | changed | 2 | 2/2 (100.0%)" in text
 
     def test_index_comparison_table_last_three(self):
         entries = [
@@ -189,6 +280,44 @@ class TestRender:
         # Every relative link the index emits must point at a real file.
         for target in re.findall(r"\]\((result-v[\d.]+\.md)\)", text):
             assert (tmp_path / target).exists(), f"index links a missing report: {target}"
+
+    def test_index_comparison_carries_the_split_rows(self):
+        """The cross-version table must state no-op replies and edited-sample build.
+
+    Both are the numbers that stop a total build rate from being read as a
+    model result, and both are absent for runs that recorded no sidecar, which
+    has to render as n/a rather than as a zero.
+    """
+        entries = [
+            {
+                **self._data(),
+                "version": "0.9.0",
+                "baseline": {"per_model": {"fine_tuned": {"reply_shapes": {"untouched": 15}}}},
+                "ada_eval": {
+                    **self._data()["ada_eval"],
+                    "fine_tuned": {
+                        **self._data()["ada_eval"]["fine_tuned"],
+                        "by_change": {
+                            "edited": {
+                                "build": {"compiled": 3, "failed": 1, "total": 4},
+                                "test": {"passed": 2, "failed": 2, "total": 4},
+                                "prove": {"proved": 1, "unproved": 3, "error": 0, "total": 4},
+                            },
+                            "unchanged": {
+                                "build": {"compiled": 14, "failed": 1, "total": 15},
+                                "test": {"passed": 10, "failed": 5, "total": 15},
+                                "prove": {"proved": 0, "unproved": 14, "error": 1, "total": 15},
+                            },
+                        },
+                    },
+                },
+            },
+            {"version": "0.8.0", "generated_at": "x", "ada_eval": {}},
+        ]
+        text = ger.render_index(entries)
+        table = text.split("Last 2 versions compared")[1]
+        assert "| No-op replies (FT) | 15 | n/a |" in table
+        assert "| Build on edited samples (FT) | 75.0% | n/a |" in table
 
     def test_every_real_result_file_is_linked_from_the_index(self):
         """The shipped index must cover each result file on disk, and every

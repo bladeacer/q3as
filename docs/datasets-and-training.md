@@ -115,8 +115,8 @@ input, so upgrading the prover does not invalidate `contract_mutations` or
 `verified_spark`. Both gnatprove stages skip cleanly when the tool is absent
 (`make prove` installs it), keeping the output they already wrote.
 `make clean` removes the stamps along with the dataset, and keeps the
-downloaded model in `models/` (16 GB that `make check-model` would otherwise
-re-fetch; `make clean-model` removes it).
+downloaded models in `models/` (multi-GB downloads that `make check-model` /
+`make check-models` would otherwise re-fetch; `make clean-model` removes them).
 
 Effect on the full pipeline, measured on 16 cores over the whole corpus
 (6,421 Ada files, 80,716 turns):
@@ -285,10 +285,13 @@ mechanisms keep the splits honest:
 - **Seed 42** everywhere: `SFTConfig(seed=...)`, LoRA `random_state`,
   dataset shuffling. Content-derived randomness in the builder is
   deterministic too, so dataset bytes are identical for any worker count.
-- **8 GB host profile**: the training window is 1024 tokens. Dataset
-  tokenization uses one process, the data loader uses no workers, and
-  checkpoints omit optimizer state. The `make` pipeline also uses one
-  dataset worker and saves the LoRA adapter without a merged 16-bit export.
+- **8 GB host profile**: the selected registry model
+  ([docs/models.md](models.md)) supplies the repo, cache path, LoRA rank, and
+  1024-token window. The default uses Unsloth's pre-quantized 4-bit base with
+  sequence packing and embedding offload. Dataset tokenization uses one
+  process and the data loader uses no workers. Checkpoints keep optimizer,
+  scheduler, and RNG state so an interrupted run can resume; the `make`
+  pipeline saves the LoRA adapter without a merged 16-bit export.
 - **Host RAM**: the 468 MB train split is streamed from JSONL into a cached
   Arrow table (`data/processed/.tokenized/`) one record at a time. The
   previous loader held three copies of the split at once (parsed records,
@@ -398,18 +401,32 @@ mechanisms keep the splits honest:
   steps (patience 10 evaluations at one every 50 steps needs an eleventh point,
   step 550), so the budget is always spent in full; and the adapter saved is
   the state at step 500, not a best-checkpoint reload.
-- **Sequence packing**: not applicable here, and not for want of trying. The
-  reason packing is normally wanted is padding: with
-  `per_device_train_batch_size=1` there is no padding at all, so there is
-  nothing to reclaim. The reason it is also wanted, throughput, does not apply
-  either: the forward is compute-bound, not launch-bound (batching the eval
-  4-wide was measured at 1.12x for 7.05 GB of 8.15 GB, and 8-wide OOMs), and a
-  4096-token window multiplies activation memory on a card that already peaks
-  near 7.5 GB. Unsloth's packing additionally needs the Flash Attention varlen
-  path, which this box does not have ("Your Flash Attention 2 installation seems
-  to be broken. Using Xformers instead"), so boundaries could not be masked
-  correctly. The 1024 window covers the mean record (511 tokens); the tail is
-  truncated, and `--max-seq-length` is the knob.
+- **Sequence packing** is on by default (`packing=True`) for every packed
+  model in the registry. Short chat records are concatenated into rows of
+  `max_seq_length` tokens, so a 1024-token row carries several Ada snippets
+  instead of mostly padding. The default strategy is `wrapped`, a flat row of
+  EOS-delimited records (the chat template already ends each record with
+  `<|im_end|>`) that needs no FlashAttention varlen path on this box.
+  The faster `bfd` strategy (`--packing-strategy bfd`) relies on
+  FlashAttention varlen to mask document boundaries; the older measurement on
+  this host ("Your Flash Attention 2 installation seems to be broken. Using
+  Xformers instead") is why `wrapped` is the default. Use `--no-packing` for a
+  one-record-per-row baseline. Packing does not change the eval splits: they
+  stay as text for the chunked callback. LFM 2.5 has packing off in the
+  registry until document boundaries are verified for its convolution layers.
+  The 1024 window covers the mean record (511 tokens); the tail is truncated,
+  and `--max-seq-length` is the knob.
+- **Embedding offload** (`offload_embedding=True`) keeps the embedding matrix
+  off the GPU for Unsloth models. It is a `FastLanguageModel.from_pretrained`
+  argument; the HF + PEFT backend logs and ignores it. An older Unsloth
+  version that does not accept the argument is detected and retried without
+  it, with a warning.
+- **Backend choice**: the registry selects `unsloth` for Qwen models and
+  `hf` (transformers + PEFT with 4-bit bitsandbytes and `adamw_8bit`) for
+  custom-code or hybrid architectures. `--backend hf|unsloth` overrides it,
+  and `--trust-remote-code` is on for repos that ship `modeling_*.py`. The HF
+  backend saves the adapter only: a 4-bit model cannot be merged in place
+  inside the 8 GB ceiling, and `eval/generate.py` loads adapter + base.
 - **Validation loss tracking**: every `--eval-steps` (default 50) on a seeded
   subset, with a per-pass rate and ETA, the measured cost per example, the
   evaluation time still to come, and a trend verdict in the versioned report.
@@ -456,7 +473,10 @@ bit-deterministic; seed 42 gives functional, not bitwise, reproducibility.
 The versioned JSON (`result-data-vX.Y.Z.json`) carries the same data
 (`training.train_loss`, `training.val_loss`, `training.test_loss`,
 `training.trend`, plus the raw histories); the results-index comparison
-table adds the fine-tuned test loss and trend verdict per version.
+table adds the fine-tuned test loss, the trend verdict, and the two
+changed-versus-echoed rows (no-op replies, build rate on the samples the
+model changed) per version. The latter two are `n/a` for a version that
+recorded no `generation_meta.json` sidecar.
 
 ## Validation loop
 
