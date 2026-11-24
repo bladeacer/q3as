@@ -1,5 +1,7 @@
 # q3as - Qwen 3 Ada SPARK
 
+> Technically we are trying to support not just qwen models. The name is just the former scope of this codebase when it was in its proof of concept phase.
+
 Specialized fine-tuning initiative targeting the full Ada language spectrum: **Ada 83, Ada 95, Ada 2005, Ada 2012, SPARK 2014, and Ada 2022**.
 
 `q3as` ingests Ada source trees (`.ads`, `.adb`, `.gpr`,
